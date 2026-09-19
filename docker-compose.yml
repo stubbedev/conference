@@ -1,0 +1,47 @@
+# Bring-up stack: conference behind traefik with Let's Encrypt TLS.
+# Fill in .env (BASE_URL, ACME_EMAIL, API_KEYS, EXTERNAL_IPS) and run
+# `docker compose up -d`. Port 5000/udp must stay reachable for the
+# WebRTC ICE mux.
+services:
+  traefik:
+    image: traefik:v3
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+
+  conference:
+    image: ghcr.io/stubbedev/conference:latest
+    build: .
+    restart: unless-stopped
+    environment:
+      BASE_URL: ${BASE_URL}
+      API_KEYS: ${API_KEYS}
+      EXTERNAL_IPS: ${EXTERNAL_IPS}
+    volumes:
+      - data:/data
+    ports:
+      - "5000:5000/udp"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.conference.rule=Host(`${BASE_URL}`)
+      - traefik.http.routers.conference.entrypoints=websecure
+      - traefik.http.routers.conference.tls.certresolver=letsencrypt
+      - traefik.http.services.conference.loadbalancer.server.port=8080
+
+volumes:
+  letsencrypt:
+  data:

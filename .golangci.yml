@@ -1,0 +1,79 @@
+# Every available linter is enabled (default: all). Settings below only
+# scope linters where their defaults fight reality; anything else is
+# fixed in code, not silenced.
+version: "2"
+
+linters:
+  # Enable every available linter.
+  default: all
+  # Deprecated predecessors that default:all also pulls in; keeping both
+  # generations would report every finding twice.
+  disable:
+    - wsl # replaced by wsl_v5
+    - exhaustruct # replaced by exhaustruct_v5
+    - gomodguard # replaced by gomodguard_v2
+  settings:
+    varnamelen:
+      # Conventional names the whole Go ecosystem recognizes.
+      ignore-names:
+        - r
+        - w
+        - tt
+        - tc
+        - id
+        - mu
+    lll:
+      # Struct tag lines exceed 120 columns.
+      line-length: 140
+    mnd:
+      # 0-3 stay literal in indexes and trivial cases; everything else
+      # gets a named constant in code.
+      ignored-numbers:
+        - "0"
+        - "1"
+        - "2"
+        - "3"
+    funlen:
+      # Signaling dispatch tables read linearly; a switch statement is
+      # not a monster.
+      statements: 60
+    depguard:
+      # Closed dependency policy: the allow list IS the dependency
+      # list, spelled out because depguard's glob patterns only match a
+      # single trailing segment here. Adding a module means adding it
+      # here, consciously.
+      rules:
+        main:
+          list-mode: strict
+          files:
+            - "**/*.go"
+          allow:
+            - $gostd
+            - github.com/stubbe/conference
+            - github.com/stubbe/conference/web
+            - github.com/stubbe/conference/internal/api
+            - github.com/stubbe/conference/internal/config
+            - github.com/stubbe/conference/internal/roomcrypt
+            - github.com/stubbe/conference/internal/sfu
+            - github.com/stubbe/conference/internal/store
+            - github.com/stubbe/conference/internal/ws
+            - github.com/pion/webrtc/v4
+            - github.com/pion/webrtc/v4/pkg/media
+            - github.com/pion/rtcp
+            - github.com/pion/ice/v4
+            - github.com/pion/interceptor
+            - github.com/pion/interceptor/pkg/nack
+            - github.com/pion/interceptor/pkg/report
+            - github.com/coder/websocket
+            - github.com/google/uuid
+            - modernc.org/sqlite
+    exhaustruct_v5:
+      # Zero-value struct literals are idiomatic for libraries whose
+      # field sets evolve out from under us, and partial signaling
+      # frames are the whole point of the wire protocol. Patterns are
+      # matched in full, so wildcards are spelled out.
+      ignore-patterns:
+        - ^github\.com/pion/.*
+        - ^net/http\..*
+        - ^github\.com/coder/websocket\..*
+        - ^github\.com/stubbe/conference/internal/sfu\.Message$
