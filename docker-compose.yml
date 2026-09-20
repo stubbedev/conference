@@ -30,6 +30,7 @@ services:
     environment:
       BASE_URL: ${BASE_URL}
       API_KEYS: ${API_KEYS}
+      JOIN_ONLY: ${JOIN_ONLY:-false}
       EXTERNAL_IPS: ${EXTERNAL_IPS}
     volumes:
       - data:/data

@@ -3,6 +3,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -43,6 +44,11 @@ type Config struct {
 	// are immutable once created; the key holder can only delete them.
 	APIKeys []string
 
+	// JoinOnly hides the create form on the landing page: the public can
+	// only join, rooms come in through the API. Requires APIKeys, since
+	// without a key creation would stay open to everyone anyway.
+	JoinOnly bool
+
 	ICEUDPPort  int      // single UDP port for the ICE mux (0 = ephemeral ports)
 	ExternalIPs []string // NAT 1:1 addresses announced as host candidates
 	ICEServers  []ICEServer
@@ -80,6 +86,15 @@ func envInt(key string, def int) (int, error) {
 	return n, nil
 }
 
+func envBool(key string) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 func splitList(v string) []string {
 	var out []string
 
@@ -95,6 +110,8 @@ func splitList(v string) []string {
 	return out
 }
 
+var errJoinOnlyNeedsKey = errors.New("config: JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
+
 // FromEnv builds a Config from the process environment.
 func FromEnv() (*Config, error) {
 	cfg := &Config{
@@ -102,6 +119,7 @@ func FromEnv() (*Config, error) {
 		BaseURL:        "",
 		DBPath:         env("DB_PATH", defaultDBPath),
 		APIKeys:        nil,
+		JoinOnly:       false,
 		ICEUDPPort:     defaultICEUDPPort,
 		ExternalIPs:    nil,
 		ICEServers:     nil,
@@ -121,6 +139,10 @@ func FromEnv() (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.JoinOnly && len(cfg.APIKeys) == 0 {
+		return nil, errJoinOnlyNeedsKey
+	}
+
 	return cfg, nil
 }
 
@@ -136,6 +158,7 @@ func applyHTTPConfig(cfg *Config) error {
 	cfg.HTTPAddr = net.JoinHostPort(env("BIND", ""), port)
 	cfg.BaseURL = strings.TrimRight(env("BASE_URL", ""), "/")
 	cfg.APIKeys = splitList(env("API_KEYS", ""))
+	cfg.JoinOnly = envBool("JOIN_ONLY")
 	cfg.AllowedOrigins = splitList(env("ALLOWED_ORIGINS", ""))
 
 	return nil

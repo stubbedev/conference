@@ -54,6 +54,7 @@ BASE_URL=meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
 | `BASE_URL`         | —                        | Public origin, used in created links             |
 | `DB_PATH`          | `conference.db`          | SQLite database path                             |
 | `API_KEYS`         | empty                    | Comma-separated bearer keys for room creation/deletion; empty = anyone may create |
+| `JOIN_ONLY`        | `false`                  | Hide room creation on the landing page (join-only); requires `API_KEYS` |
 | `ICE_UDP_PORT`     | `5000`                   | Single UDP port for all WebRTC traffic           |
 | `EXTERNAL_IPS`     | —                        | Comma-separated public IPs advertised for ICE (NAT) |
 | `ICE_SERVERS`      | Google STUN              | JSON array of STUN/TURN servers handed to clients |
@@ -63,25 +64,79 @@ BASE_URL=meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
 
 ## HTTP API
 
-```bash
-# Create a room (with a password). Immutable once created.
-curl -X POST https://host/api/rooms \
-  -H "Authorization: Bearer $API_KEY" \
-  -d '{"name":"Standup","password":"hunter2"}'
+Everything lives under `/api` on the same origin. Creation, listing and
+deletion require a bearer key when `API_KEYS` is set.
 
-# → {"slug":"abc-def-ghi","roomKey":"…","privToken":"…",
-#    "privPath":"/r/abc-def-ghi?p=…","shortPath":"/r/abc-def-ghi", …}
+### Creating rooms from automations
+
+```bash
+# One-time: mint an operator key and put it in the server's API_KEYS.
+openssl rand -base64 32
+
+# Create a password-protected, named room.
+curl -X POST https://meet.example.com/api/rooms \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Standup","password":"hunter2","maxMembers":12}'
 ```
 
-- `GET /api/config` — ICE servers + whether an API key is required.
-- `GET /api/rooms/{slug}` — public room info; for password rooms it
-  includes the salts the browser needs to compute a proof.
-- `POST /api/rooms/{slug}/auth` — join authorization. Send either
-  `{"token": "…"}` (privileged link), nothing at all (open room; returns
-  the room key) or `{"proof": base64url(PBKDF2-SHA256(password, authSalt),
-  210000 iterations)}` (password room; returns the room key sealed with
-  AES-GCM under the password). Returns a session for the signaling
-  WebSocket.
+The response carries everything needed to hand out links (rooms are
+immutable; this is the only time the key and token are revealed):
+
+```json
+{
+  "slug": "abc-def-ghi",
+  "name": "Standup",
+  "roomKey": "kX9…",
+  "privToken": "k5Q…",
+  "privPath": "/r/abc-def-ghi?p=k5Q…",
+  "privUrl": "https://meet.example.com/r/abc-def-ghi?p=k5Q…#k=kX9…",
+  "shortPath": "/r/abc-def-ghi",
+  "shortUrl": "https://meet.example.com/r/abc-def-ghi",
+  "baseUrl": "https://meet.example.com",
+  "maxMembers": 12
+}
+```
+
+- **Public link**: `shortUrl` — or `${baseUrl}${shortPath}` when
+  `BASE_URL` is unset, prefixed with your own origin. Share freely; a
+  password room asks for the password in the browser.
+- **Privileged link**: `privUrl` — or `${baseUrl}${privPath}#k=${roomKey}`.
+  Opens without the password and carries moderator rights — mute, stop
+  camera or screen share, kick. Keep it to the host.
+- `roomKey` and `privToken` are shown exactly once. Store both to rebuild
+  the privileged link later; the server cannot re-mint them.
+
+### Auth tokens
+
+- **API keys** are static operator secrets you mint yourself
+  (`openssl rand -base64 32`) and list in `API_KEYS`. Send them as
+  `Authorization: Bearer <key>` or `X-Api-Key`. They gate only room
+  creation, listing and deletion.
+- **Privileged link tokens** (`privToken`) are minted by room creation
+  and stored only as a hash. The browser exchanges one for a moderator
+  session automatically when someone opens a privileged link.
+- **Join sessions** are minted by `POST /api/rooms/{slug}/auth` — send
+  `{"token": …}` (privileged link), an empty body (open room; returns
+  the room key) or `{"proof": base64url(PBKDF2-SHA256(password,
+  authSalt), 210000 iterations)}` (password room; returns the room key
+  sealed with AES-GCM under the password). Sessions are opaque,
+  room-scoped and long-lived (a year by default); automations normally
+  never need them, since the links above carry everything.
+
+### Public, join-only deployments
+
+Set `API_KEYS` **and** `JOIN_ONLY=true`: the landing page then offers
+joining only, and rooms exist solely through the API above. (The server
+refuses to start with `JOIN_ONLY` but no `API_KEYS`, which would leave
+creation open anyway.)
+
+### Other endpoints
+
+- `GET /api/config` — ICE servers, whether creation needs a key, whether
+  the landing page is join-only.
+- `GET /api/rooms/{slug}` — public room info; password rooms include
+  the salts the browser needs to compute a proof.
 - `GET /api/rooms` / `DELETE /api/rooms/{slug}` — operator endpoints (API key).
 
 ## How the end-to-end encryption works

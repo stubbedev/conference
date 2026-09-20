@@ -8,6 +8,7 @@ export interface ServerConfig {
   iceServers: ICEServer[]
   createAuthRequired: boolean
   sessionLifetimeDays: number
+  joinOnly: boolean
 }
 
 export interface RoomInfo {

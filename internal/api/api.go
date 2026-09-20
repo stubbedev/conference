@@ -71,6 +71,7 @@ type configResponse struct {
 	ICEServers          []config.ICEServer `json:"iceServers"`
 	CreateAuthRequired  bool               `json:"createAuthRequired"`
 	SessionLifetimeDays int                `json:"sessionLifetimeDays"`
+	JoinOnly            bool               `json:"joinOnly"`
 }
 
 func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
@@ -78,6 +79,7 @@ func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
 		ICEServers:          s.Cfg.ICEServers,
 		CreateAuthRequired:  len(s.Cfg.APIKeys) > 0,
 		SessionLifetimeDays: int(s.Cfg.SessionTTL / (hoursPerDay * time.Hour)),
+		JoinOnly:            s.Cfg.JoinOnly,
 	})
 }
 
@@ -93,7 +95,9 @@ type createRoomResponse struct {
 	RoomKey    string `json:"roomKey"`
 	PrivToken  string `json:"privToken"`
 	PrivPath   string `json:"privPath"`
+	PrivURL    string `json:"privUrl,omitempty"`
 	ShortPath  string `json:"shortPath"`
+	ShortURL   string `json:"shortUrl,omitempty"`
 	BaseURL    string `json:"baseUrl,omitempty"`
 	MaxMembers int    `json:"maxMembers"`
 }
@@ -127,13 +131,17 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	roomKey := roomcrypt.B64(key)
+
 	writeJSON(w, http.StatusCreated, createRoomResponse{
 		Slug:       room.Slug,
 		Name:       room.Name,
-		RoomKey:    roomcrypt.B64(key),
+		RoomKey:    roomKey,
 		PrivToken:  privToken,
 		PrivPath:   "/r/" + room.Slug + "?p=" + privToken,
+		PrivURL:    joinURL(s.Cfg.BaseURL, "/r/"+room.Slug+"?p="+privToken+"#k="+roomKey),
 		ShortPath:  "/r/" + room.Slug,
+		ShortURL:   joinURL(s.Cfg.BaseURL, "/r/"+room.Slug),
 		BaseURL:    s.Cfg.BaseURL,
 		MaxMembers: room.MaxMembers,
 	})
@@ -515,6 +523,16 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	if err != nil {
 		log.Printf("api: encode response: %v", err)
 	}
+}
+
+// joinURL prefixes an absolute link when a public origin is
+// configured; an empty result means the caller builds its own.
+func joinURL(base, path string) string {
+	if base == "" {
+		return ""
+	}
+
+	return base + path
 }
 
 func writeError(w http.ResponseWriter, status int, code, text string) {
