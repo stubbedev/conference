@@ -5,10 +5,13 @@ import { toast } from 'sonner'
 
 import { useLatest } from '@/hooks/latest'
 import {
+  aspectRatioChanged,
   CAMERA_RESOLUTIONS,
   DEFAULT_DEVICE_PREFS,
   DEVICE_LABELS,
+  FALLBACK_ASPECT_RATIO,
   openTrack,
+  openTrackWithFallback,
   resumeAudio,
   stopMediaStream,
   trackConstraints,
@@ -84,6 +87,7 @@ export default function Room() {
   const [mediaBusy, setMediaBusy] = useState(false)
   const [unread, setUnread] = useState(0)
   const [userPin, setUserPin] = useState<string | null>(null)
+  const [tileRatios, setTileRatios] = useState<Record<string, number>>({})
   const [fullscreen, setFullscreen] = useState(false)
   const [privileged, setPrivileged] = useState(false)
 
@@ -107,6 +111,7 @@ export default function Room() {
   )
 
   const { devices, refresh: refreshDevices } = useMediaDevices()
+  const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
 
   const clientRef = useRef<RoomClient | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
@@ -450,13 +455,19 @@ export default function Room() {
   const switchDevice = useCallback(
     async (kind: TrackKind, deviceId: string, resolution?: CameraResolution) => {
       const prefs = prefsRef.current
-      const track =
-        kind === 'cam'
-          ? await openTrack('cam', deviceId, false, resolution ?? prefs.resolution)
-          : await openTrack('mic', deviceId, false)
+      const { track, deviceId: usedId } = await openTrackWithFallback(
+        kind,
+        deviceId,
+        resolution ?? prefs.resolution,
+      )
       if (!track) {
         toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
         return
+      }
+      if (deviceId && !usedId) {
+        toast(
+          `That ${DEVICE_LABELS[kind].toLowerCase()} is unavailable here, using the system default.`,
+        )
       }
       track.enabled = controlsRef.current[kind]
 
@@ -477,8 +488,8 @@ export default function Room() {
 
       updateDevicePrefs(
         kind === 'mic'
-          ? { mic: deviceId }
-          : { cam: deviceId, ...(resolution ? { resolution } : {}) },
+          ? { mic: usedId }
+          : { cam: usedId, ...(resolution ? { resolution } : {}) },
       )
       setMediaError('')
       void refreshDevices()
@@ -590,11 +601,17 @@ export default function Room() {
   const pinnedTile = pinnedKey ? (allTiles.find((tile) => tile.key === pinnedKey) ?? null) : null
   const stripTiles = pinnedTile ? allTiles.filter((tile) => tile.key !== pinnedKey) : []
 
+  const handleTileRatio = useCallback((key: string, ratio: number) => {
+    setTileRatios((prev) =>
+      aspectRatioChanged(prev[key] ?? 0, ratio) ? { ...prev, [key]: ratio } : prev,
+    )
+  }, [])
+
   const togglePin = (key: string) => {
     setUserPin(pinnedKey === key ? NO_PIN : key)
   }
 
-  const renderTile = (tile: Tile, compact = false) => {
+  const renderTile = (tile: Tile, compact = false, onAspectRatio?: (ratio: number) => void) => {
     const isLocal = tile.sourceId === LOCAL_SOURCE
     const isScreen = tile.kind === SCREEN_KIND
     const member = isLocal ? selfMember : members.find((m) => m.id === tile.sourceId)
@@ -615,6 +632,7 @@ export default function Room() {
         pinned={pinnedKey === tile.key}
         onTogglePin={allTiles.length > 1 ? () => togglePin(tile.key) : undefined}
         compact={compact}
+        onAspectRatio={onAspectRatio}
       />
     )
   }
@@ -741,15 +759,18 @@ export default function Room() {
               alignContent: 'safe center',
             }}
           >
-            {allTiles.map((tile) => (
-              <div
-                key={tile.key}
-                className="aspect-video w-full justify-self-center"
-                style={{ maxWidth: 'min(100%, 172cqh)' }}
-              >
-                {renderTile(tile)}
-              </div>
-            ))}
+            {allTiles.map((tile) => {
+              const ratio = tileRatios[tile.key] ?? FALLBACK_ASPECT_RATIO
+              return (
+                <div
+                  key={tile.key}
+                  className="w-full justify-self-center"
+                  style={{ aspectRatio: `${ratio}`, maxWidth: `calc(96cqh * ${ratio})` }}
+                >
+                  {renderTile(tile, false, (next) => handleTileRatio(tile.key, next))}
+                </div>
+              )
+            })}
           </main>
         )}
 
@@ -780,6 +801,7 @@ export default function Room() {
         chatOpen={chatOpen}
         unread={unread}
         fullscreen={fullscreen}
+        canShare={canShare}
         onMic={() => toggleTrack('mic')}
         onCam={() => toggleTrack('cam')}
         onShare={() => void toggleShare()}

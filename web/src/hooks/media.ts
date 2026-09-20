@@ -53,6 +53,42 @@ export function supportsSinkSelection(): boolean {
   return typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype
 }
 
+// Mobile browsers have device lists full of entries the page cannot
+// actually select (Android exposes communication routes as inputs and has
+// no real output switching), so device pickers are desktop-only there.
+export function isMobileDevice(): boolean {
+  if (typeof navigator === 'undefined') return false
+  return (
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent))
+  )
+}
+
+// Chrome prefixes duplicate aliases with "Default -"; collapse aliases so
+// every listed entry is a distinct, selectable device.
+export function dedupeDevices(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
+  const byGroup = new Map<string, MediaDeviceInfo>()
+  for (const device of devices) {
+    const key = device.groupId || device.deviceId
+    const current = byGroup.get(key)
+    if (!current || (/^default\b/i.test(current.label) && !/^default\b/i.test(device.label))) {
+      byGroup.set(key, device)
+    }
+  }
+
+  const seenLabels = new Set<string>()
+  const unique: MediaDeviceInfo[] = []
+  for (const device of byGroup.values()) {
+    const label = device.label.replace(/^default\b[\s-]*/i, '').trim().toLowerCase()
+    if (label) {
+      if (seenLabels.has(label)) continue
+      seenLabels.add(label)
+    }
+    unique.push(device)
+  }
+  return unique
+}
+
 export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promise<void> } {
   const [groups, setGroups] = useState<DeviceGroups>({ mics: [], cams: [], speakers: [] })
 
@@ -61,9 +97,9 @@ export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promi
     try {
       const all = await navigator.mediaDevices.enumerateDevices()
       setGroups({
-        mics: all.filter((device) => device.kind === 'audioinput' && device.deviceId !== ''),
-        cams: all.filter((device) => device.kind === 'videoinput' && device.deviceId !== ''),
-        speakers: all.filter((device) => device.kind === 'audiooutput' && device.deviceId !== ''),
+        mics: dedupeDevices(all.filter((d) => d.kind === 'audioinput' && d.deviceId !== '')),
+        cams: dedupeDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId !== '')),
+        speakers: dedupeDevices(all.filter((d) => d.kind === 'audiooutput' && d.deviceId !== '')),
       })
     } catch {
       return
@@ -87,12 +123,46 @@ export function trackConstraints(
   if (kind === 'mic') return deviceId ? { deviceId: { exact: deviceId } } : {}
   const size =
     resolution === 'auto'
-      ? { width: { ideal: 1280 } }
+      ? { width: { ideal: 1280 }, height: { ideal: 720 } }
       : {
           width: { ideal: RESOLUTION_DIMENSIONS[resolution].width },
           height: { ideal: RESOLUTION_DIMENSIONS[resolution].height },
         }
   return deviceId ? { deviceId: { exact: deviceId }, ...size } : size
+}
+
+async function requestTrack(
+  kind: TrackKind,
+  deviceId: string,
+  resolution: CameraResolution,
+): Promise<MediaStreamTrack | null> {
+  const constraints = trackConstraints(kind, deviceId, resolution)
+  const request: MediaStreamConstraints = kind === 'mic' ? { audio: constraints } : { video: constraints }
+  const stream = await navigator.mediaDevices.getUserMedia(request).catch(() => null)
+  if (!stream) return null
+  return kind === 'mic'
+    ? (stream.getAudioTracks()[0] ?? null)
+    : (stream.getVideoTracks()[0] ?? null)
+}
+
+export interface OpenTrackResult {
+  track: MediaStreamTrack | null
+  deviceId: string
+}
+
+// Tries the requested device, then the system default, and reports which
+// one produced the track: some listed devices cannot actually be opened
+// (Android communication routes, ephemeral ids on iOS).
+export async function openTrackWithFallback(
+  kind: TrackKind,
+  deviceId: string,
+  resolution: CameraResolution = 'auto',
+): Promise<OpenTrackResult> {
+  for (const attempt of deviceId ? [deviceId, ''] : ['']) {
+    const track = await requestTrack(kind, attempt, resolution)
+    if (track) return { track, deviceId: attempt }
+  }
+  return { track: null, deviceId }
 }
 
 export async function openTrack(
@@ -101,21 +171,8 @@ export async function openTrack(
   allowFallback = true,
   resolution: CameraResolution = 'auto',
 ): Promise<MediaStreamTrack | null> {
-  const asks =
-    allowFallback && deviceId
-      ? [trackConstraints(kind, deviceId, resolution), trackConstraints(kind, '', resolution)]
-      : [trackConstraints(kind, deviceId, resolution)]
-
-  for (const ask of asks) {
-    const request: MediaStreamConstraints = kind === 'mic' ? { audio: ask } : { video: ask }
-    const stream = await navigator.mediaDevices.getUserMedia(request).catch(() => null)
-    if (stream) {
-      return kind === 'mic'
-        ? (stream.getAudioTracks()[0] ?? null)
-        : (stream.getVideoTracks()[0] ?? null)
-    }
-  }
-  return null
+  if (!allowFallback) return requestTrack(kind, deviceId, resolution)
+  return (await openTrackWithFallback(kind, deviceId, resolution)).track
 }
 
 export function stopMediaStream(stream: MediaStream | null | undefined): void {
@@ -127,6 +184,14 @@ export function validDeviceId(devices: MediaDeviceInfo[], deviceId: string): str
   if (!deviceId || devices.length === 0) return deviceId
   if (devices.some((device) => device.deviceId === deviceId)) return deviceId
   return devices.every((device) => device.label !== '') ? '' : deviceId
+}
+
+const RATIO_EPSILON = 0.01
+
+export const FALLBACK_ASPECT_RATIO = 16 / 9
+
+export function aspectRatioChanged(prev: number, next: number): boolean {
+  return next > 0 && Math.abs(next - prev) > RATIO_EPSILON
 }
 
 let sharedContext: AudioContext | null = null
@@ -141,7 +206,68 @@ function audioContext(): AudioContext | null {
   }
 }
 
+// Mobile autoplay policies stall or block any element that carries sound.
+// When play() is rejected we keep the element registered and retry on the
+// next user gesture, which unlocks it for the rest of the call.
+const awaitingGesture = new Map<HTMLMediaElement, ((blocked: boolean) => void) | undefined>()
+let gestureListenerActive = false
+
+function retryAwaiting(): void {
+  if (awaitingGesture.size === 0) return
+  for (const [element, onBlocked] of awaitingGesture) {
+    if (!element.isConnected) {
+      awaitingGesture.delete(element)
+      continue
+    }
+    void element
+      .play()
+      .then(() => {
+        awaitingGesture.delete(element)
+        onBlocked?.(false)
+      })
+      .catch(() => {})
+  }
+}
+
+function installGestureRetry(): void {
+  if (gestureListenerActive || typeof window === 'undefined') return
+  gestureListenerActive = true
+  const retry = () => {
+    retryAwaiting()
+    if (awaitingGesture.size === 0) {
+      window.removeEventListener('pointerdown', retry)
+      window.removeEventListener('keydown', retry)
+      gestureListenerActive = false
+    }
+  }
+  window.addEventListener('pointerdown', retry)
+  window.addEventListener('keydown', retry)
+}
+
+export function playMediaElement(
+  element: HTMLMediaElement,
+  onBlocked?: (blocked: boolean) => void,
+): void {
+  element
+    .play()
+    .then(
+      () => {
+        awaitingGesture.delete(element)
+        onBlocked?.(false)
+      },
+      (err: unknown) => {
+        if (err instanceof DOMException && err.name === 'NotAllowedError') {
+          awaitingGesture.set(element, onBlocked)
+          installGestureRetry()
+          onBlocked?.(true)
+        }
+      },
+    )
+    .catch(() => {})
+}
+
 export function resumeAudio(): void {
+  retryAwaiting()
   const ctx = audioContext()
   if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {})
 }

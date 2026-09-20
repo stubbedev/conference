@@ -3,6 +3,7 @@ import { Settings2 } from 'lucide-react'
 import {
   CAMERA_RESOLUTIONS,
   DEVICE_LABELS,
+  isMobileDevice,
   supportsSinkSelection,
   type CameraResolution,
   type DeviceGroups,
@@ -79,9 +80,16 @@ export function DeviceSettings({
   onResolutionChange,
   onVolumeChange,
 }: DeviceSettingsProps) {
+  // Mobile device lists are full of entries the page cannot actually
+  // switch (Android communication routes, no output selection at all),
+  // so only the camera picker and volume are offered there.
+  const mobile = isMobileDevice()
+
   return (
     <div className="flex flex-col gap-3">
-      <DeviceSelect kind="mic" devices={devices.mics} selected={selected.mic} onChange={onChange} />
+      {!mobile && (
+        <DeviceSelect kind="mic" devices={devices.mics} selected={selected.mic} onChange={onChange} />
+      )}
       <DeviceSelect kind="cam" devices={devices.cams} selected={selected.cam} onChange={onChange} />
       {devices.cams.length > 0 && (
         <div className="flex min-w-0 flex-col gap-1.5">
@@ -107,7 +115,7 @@ export function DeviceSettings({
           </Select>
         </div>
       )}
-      {supportsSinkSelection() && (
+      {supportsSinkSelection() && !mobile && (
         <DeviceSelect
           kind="speaker"
           devices={devices.speakers}

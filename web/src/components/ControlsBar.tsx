@@ -23,6 +23,8 @@ interface ControlsBarProps {
   chatOpen: boolean
   unread: number
   fullscreen: boolean
+  /** getDisplayMedia is missing on iOS Safari and some mobile browsers. */
+  canShare?: boolean
   onMic: () => void
   onCam: () => void
   onShare: () => void
@@ -41,6 +43,7 @@ export function ControlsBar({
   chatOpen,
   unread,
   fullscreen,
+  canShare = true,
   onMic,
   onCam,
   onShare,
@@ -102,14 +105,16 @@ export function ControlsBar({
       >
         {cam ? <Video /> : <VideoOff />}
       </Button>
-      <Button
-        variant={sharing ? 'destructive' : 'secondary'}
-        size="icon"
-        onClick={onShare}
-        title={sharing ? 'Stop sharing' : 'Share your screen'}
-      >
-        {sharing ? <MonitorX /> : <MonitorUp />}
-      </Button>
+      {canShare && (
+        <Button
+          variant={sharing ? 'destructive' : 'secondary'}
+          size="icon"
+          onClick={onShare}
+          title={sharing ? 'Stop sharing' : 'Share your screen'}
+        >
+          {sharing ? <MonitorX /> : <MonitorUp />}
+        </Button>
+      )}
 
       <Separator orientation="vertical" className="mx-1 self-center" />
 

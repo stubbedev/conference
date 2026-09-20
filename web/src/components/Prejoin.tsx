@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { Loader2, RotateCcw, ShieldCheck } from 'lucide-react'
 
+import { FALLBACK_ASPECT_RATIO } from '@/hooks/media'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -28,12 +30,19 @@ export function Prejoin({
   onRetryMedia,
   onJoin,
 }: PrejoinProps) {
+  const [ratio, setRatio] = useState(FALLBACK_ASPECT_RATIO)
   const canJoin = !mediaBusy && !mediaError && Boolean(stream)
 
   return (
     <div className="relative grid h-dvh place-items-center overflow-y-auto bg-muted/40 p-4">
       <div className="grid w-full max-w-3xl gap-6 md:grid-cols-[1.4fr_1fr] md:gap-8">
-        <div className="aspect-video overflow-hidden rounded-2xl border bg-card shadow-xs">
+        <div
+          className="relative mx-auto w-full overflow-hidden rounded-2xl border bg-card shadow-xs"
+          style={{
+            aspectRatio: `${ratio}`,
+            maxWidth: `calc(min(70dvh, 100%) * ${ratio})`,
+          }}
+        >
           {mediaError ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
               <p className="text-sm font-medium">{mediaError}</p>
@@ -48,7 +57,7 @@ export function Prejoin({
                   <Loader2 className="size-6 animate-spin text-muted-foreground" />
                 </div>
               )}
-              <VideoTile stream={stream} name={name || 'You'} muted mirrored />
+              <VideoTile stream={stream} name={name || 'You'} muted mirrored onAspectRatio={setRatio} />
             </div>
           )}
         </div>
