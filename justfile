@@ -5,8 +5,9 @@
 default:
     @just --list
 
-# vet + test + lint + web build + go build (what ci.yml runs).
-check: vet test lint web build
+# vet + test + lint + web build + go build + browser smoke test (what
+# ci.yml runs).
+check: vet test lint web build e2e
 
 vet:
     go vet ./...
@@ -51,6 +52,12 @@ dev:
     backend=$!
     trap 'kill "$backend" 2>/dev/null || true' EXIT
     cd web && npm run dev
+
+# Two headless Chromes with fake cameras join a room through a freshly
+# built server and must exchange E2EE audio and video. Needs Chrome on
+# PATH (or CHROME=/path/to/chrome).
+e2e:
+    node web/e2e/smoke.mjs
 
 # Run the server on :8080 serving the built UI (run `just web` first).
 run:

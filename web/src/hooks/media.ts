@@ -135,8 +135,14 @@ export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promi
 
 // Splits a stream into single-kind views: the video element never carries
 // an audio track (the case mobile autoplay policy is strictest about) and
-// the audio element never carries video. The derived streams follow
-// track additions and removals on the source.
+// the audio element never carries video.
+//
+// When the source gains or loses a track (the SFU negotiates audio first
+// and adds video moments later), the affected view is replaced by a
+// fresh MediaStream instead of mutated in place. A media element bound
+// to a stream that grows a track under it is exactly the case Android
+// Chrome mishandles (first frame, then nothing); a new stream object
+// goes through the element's normal load path.
 export function useSplitStreams(stream: MediaStream | null): {
   video: MediaStream | null
   audio: MediaStream | null
@@ -152,18 +158,17 @@ export function useSplitStreams(stream: MediaStream | null): {
       return
     }
 
-    const video = new MediaStream(stream.getVideoTracks())
-    const audio = new MediaStream(stream.getAudioTracks())
+    const view = (kind: 'video' | 'audio') =>
+      new MediaStream(kind === 'video' ? stream.getVideoTracks() : stream.getAudioTracks())
 
     const sync = (event: MediaStreamTrackEvent) => {
-      const target = event.track.kind === 'video' ? video : audio
-      if (event.type === 'addtrack') target.addTrack(event.track)
-      else target.removeTrack(event.track)
+      const kind = event.track.kind === 'video' ? 'video' : 'audio'
+      setSplit((prev) => ({ ...prev, [kind]: view(kind) }))
     }
 
     stream.addEventListener('addtrack', sync)
     stream.addEventListener('removetrack', sync)
-    setSplit({ video, audio })
+    setSplit({ video: view('video'), audio: view('audio') })
 
     return () => {
       stream.removeEventListener('addtrack', sync)

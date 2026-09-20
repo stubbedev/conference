@@ -85,6 +85,36 @@ interface Events {
 
 type AnyHandler = (payload: never) => void
 
+// E2EEStats is what the worker posts every couple of seconds: frames
+// processed and dropped per direction plus the last error text.
+export interface E2EEStats {
+  type: 'e2ee-stats'
+  send: number
+  recv: number
+  dropSend: number
+  dropRecv: number
+  lastError: string
+}
+
+function isE2EEStats(data: unknown): data is E2EEStats {
+  return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'e2ee-stats'
+}
+
+// preferVP8 pins a video transceiver to VP8. The E2EE transform keeps
+// only the VP8 frame header in the clear; H.264 and AV1 packetizers
+// parse NAL units and OBUs out of the payload and would choke on
+// ciphertext. The SFU mirrors the offer's codec order, so a browser
+// that lists a hardware H.264 encoder first would otherwise get it.
+function preferVP8(transceiver: RTCRtpTransceiver): void {
+  if (transceiver.sender.track?.kind !== 'video') return
+  const codecs = RTCRtpSender.getCapabilities('video')?.codecs ?? []
+  const preferred = codecs.filter(
+    (codec) => codec.mimeType === 'video/VP8' || codec.mimeType === 'video/rtx',
+  )
+  if (!preferred.some((codec) => codec.mimeType === 'video/VP8')) return
+  transceiver.setCodecPreferences(preferred)
+}
+
 export class RoomClient {
   private ws: WebSocket | null = null
   private opts: RoomClientOptions
@@ -103,18 +133,45 @@ export class RoomClient {
   private micSender: RTCRtpSender | null = null
   private camSender: RTCRtpSender | null = null
   private state = { mic: true, cam: true, sharing: false }
-  private e2eeStats: Record<string, unknown> = {}
+  private e2eeStats: E2EEStats | null = null
+  private e2eeFailureReported = { send: false, recv: false }
 
   readonly worker: Worker
 
   constructor(opts: RoomClientOptions) {
     this.opts = opts
-    this.worker = new Worker(new URL('./e2ee.worker.js', import.meta.url), { type: 'module' })
-    this.worker.onmessage = (ev: MessageEvent) => {
-      const data = ev.data as { type?: string }
-      if (data?.type === 'e2ee-stats') this.e2eeStats = data
+    this.worker = new Worker(new URL('./e2ee.worker.ts', import.meta.url), { type: 'module' })
+    this.worker.onmessage = (ev: MessageEvent<unknown>) => {
+      if (!isE2EEStats(ev.data)) return
+      this.e2eeStats = ev.data
+      this.reportE2EEFailure(ev.data)
+    }
+    this.worker.onerror = (ev: ErrorEvent) => {
+      this.emit('error', { code: 'e2ee', text: `Media encryption worker failed: ${ev.message}` })
     }
     this.worker.postMessage({ keyBytes: opts.mediaKey.slice() })
+  }
+
+  // reportE2EEFailure turns a transform that drops everything into a
+  // visible error. A silently failing transform looks exactly like a
+  // network problem from the outside (call connected, tiles black), so
+  // the first direction that has only ever dropped frames is reported
+  // once, with the worker's own error text.
+  private reportE2EEFailure(stats: E2EEStats): void {
+    if (!this.e2eeFailureReported.send && stats.dropSend > 0 && stats.send === 0) {
+      this.e2eeFailureReported.send = true
+      this.emit('error', {
+        code: 'e2ee',
+        text: `Your media cannot be encrypted, nothing is being sent: ${stats.lastError}`,
+      })
+    }
+    if (!this.e2eeFailureReported.recv && stats.dropRecv > 0 && stats.recv === 0) {
+      this.e2eeFailureReported.recv = true
+      this.emit('error', {
+        code: 'e2ee',
+        text: `Incoming media cannot be decrypted: ${stats.lastError}`,
+      })
+    }
   }
 
   connect(): Promise<void> {
@@ -185,6 +242,7 @@ export class RoomClient {
     this.localMic = stream.getAudioTracks()[0] ?? null
     this.localCam = stream.getVideoTracks()[0] ?? null
 
+    for (const transceiver of pc.getTransceivers()) preferVP8(transceiver)
     for (const sender of pc.getSenders()) this.installSenderTransform(sender)
     this.micSender = pc.getSenders().find((sender) => sender.track?.kind === 'audio') ?? null
     this.camSender = pc.getSenders().find((sender) => sender.track?.kind === 'video') ?? null
@@ -206,6 +264,8 @@ export class RoomClient {
       this.screenTrackIds.add(track.id)
       const sender = pc.addTrack(track, stream)
       this.screenSenders.push(sender)
+      const transceiver = pc.getTransceivers().find((t) => t.sender === sender)
+      if (transceiver) preferVP8(transceiver)
       this.installSenderTransform(sender)
     }
 
@@ -309,38 +369,19 @@ export class RoomClient {
     return pc
   }
 
+  // The encoded transform is attached through the standard
+  // RTCRtpScriptTransform API only. Room.tsx refuses to join without
+  // it, so no untyped fallback path exists here.
   private installSenderTransform(sender: RTCRtpSender): void {
     if (this.transformed.has(sender)) return
     this.transformed.add(sender)
-    if ('RTCRtpScriptTransform' in window) {
-      const Ctor = (window as unknown as { RTCRtpScriptTransform: new (w: Worker, o: unknown) => unknown })
-        .RTCRtpScriptTransform
-      ;(sender as { transform?: unknown }).transform = new Ctor(this.worker, { purpose: 'send' })
-    } else if ('createEncodedStreams' in sender) {
-      const legacy = sender as unknown as {
-        createEncodedStreams: () => { readable: ReadableStream; writable: WritableStream }
-      }
-      const streams = legacy.createEncodedStreams()
-      this.worker.postMessage({ purpose: 'send', streams }, [streams.readable, streams.writable])
-    } else {
-      throw new Error('This browser cannot send end-to-end encrypted media.')
-    }
+    sender.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'send' })
   }
 
   private installReceiverTransform(receiver: RTCRtpReceiver): void {
     if (this.transformed.has(receiver)) return
     this.transformed.add(receiver)
-    if ('RTCRtpScriptTransform' in window) {
-      const Ctor = (window as unknown as { RTCRtpScriptTransform: new (w: Worker, o: unknown) => unknown })
-        .RTCRtpScriptTransform
-      ;(receiver as { transform?: unknown }).transform = new Ctor(this.worker, { purpose: 'recv' })
-    } else if ('createEncodedStreams' in receiver) {
-      const legacy = receiver as unknown as {
-        createEncodedStreams: () => { readable: ReadableStream; writable: WritableStream }
-      }
-      const streams = legacy.createEncodedStreams()
-      this.worker.postMessage({ purpose: 'recv', streams }, [streams.readable, streams.writable])
-    }
+    receiver.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'recv' })
   }
 
   private async sendUpOffer(): Promise<void> {
@@ -512,7 +553,7 @@ export class RoomClient {
   // Built to be read from the debug overlay on a phone screen.
   async debugStats(): Promise<string> {
     const lines: string[] = [
-      `e2ee ${JSON.stringify(this.e2eeStats)}`,
+      `e2ee ${this.e2eeStats ? JSON.stringify(this.e2eeStats) : 'no stats yet'}`,
       `self ${this.selfId || '-'}`,
     ]
 

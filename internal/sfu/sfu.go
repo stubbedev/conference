@@ -862,13 +862,8 @@ func (m *Member) ensureDownPeer(sourceID string) {
 			return
 		}
 
-		local, err := webrtc.NewTrackLocalStaticRTP(
+		local := newForwardTrack(
 			track.remote.Codec().RTPCodecCapability, track.remote.ID(), track.remote.StreamID())
-		if err != nil {
-			m.fail("track-local", err)
-
-			return
-		}
 
 		sendOnly := webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionSendonly,
@@ -1048,6 +1043,10 @@ type UpTrack struct {
 	remote *webrtc.TrackRemote
 	pc     *webrtc.PeerConnection
 
+	// extURIs maps the publisher's negotiated RTP header-extension IDs
+	// to their URIs, so forwarded packets can be re-numbered per viewer.
+	extURIs map[uint8]string
+
 	mu      sync.RWMutex
 	viewers map[string]*upViewer
 	stop    chan struct{}
@@ -1056,7 +1055,7 @@ type UpTrack struct {
 // upViewer is one viewer of one forwarded track, with the downlink rate
 // state derived from that viewer's RTCP feedback.
 type upViewer struct {
-	local *webrtc.TrackLocalStaticRTP
+	local *forwardTrack
 	rate  viewerRate
 }
 
@@ -1156,7 +1155,7 @@ func (ut *UpTrack) startForwarding() {
 			ut.mu.RUnlock()
 
 			for _, viewer := range viewers {
-				writeErr := viewer.local.WriteRTP(packet)
+				writeErr := viewer.local.WriteRTP(packet, ut.extURIs)
 				if writeErr != nil {
 					log.Printf("forward: %v", writeErr)
 				}
@@ -1165,7 +1164,7 @@ func (ut *UpTrack) startForwarding() {
 	}()
 }
 
-func (ut *UpTrack) addViewer(viewerID string, local *webrtc.TrackLocalStaticRTP) {
+func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack) {
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
 
@@ -1337,6 +1336,7 @@ func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemo
 		kind:    kind,
 		remote:  track,
 		pc:      up.pc,
+		extURIs: extensionURIs(receiver),
 		viewers: map[string]*upViewer{},
 		mu:      sync.RWMutex{},
 		stop:    nil,
@@ -1457,7 +1457,7 @@ func (up *UpPeer) close() {
 
 // downSend pairs a forwarded local track with its logical kind.
 type downSend struct {
-	local *webrtc.TrackLocalStaticRTP
+	local *forwardTrack
 	kind  string
 }
 

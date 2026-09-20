@@ -158,20 +158,38 @@ creation open anyway.)
 - **Privileged links** carry the key in the URL fragment (`#k=…`), which
   browsers never transmit.
 - Frames are encrypted with AES-CTR in an Encoded Transform worker (key
-  derived via HKDF from the room key); chat with AES-GCM. The first byte of
-  each frame stays in the clear so RTP payload descriptors survive.
+  derived via HKDF from the room key); chat with AES-GCM. Each frame carries
+  its own counter block, so the receiver never depends on local timing.
+- Only the codec header the RTP layer and hardware decoders must read stays
+  in the clear: the 10-byte VP8 keyframe header (frame tag, start code,
+  dimensions), the 3-byte VP8 delta frame tag, the 1-byte Opus TOC. Video
+  is pinned to VP8, because H.264 and AV1 packetizers parse the payload
+  and cannot carry ciphertext.
+- The worker is TypeScript compiled against the WebWorker typings
+  (`web/tsconfig.worker.json`), so calling an encoded-frame API a browser
+  does not have fails the build instead of silently dropping every frame.
 
 ## Development
 
 ```bash
-just check    # vet + test + lint + web build + go build (what CI runs)
+just check    # vet + test + lint + web build + go build + browser smoke (what CI runs)
+just e2e      # the browser smoke test alone
 just run      # local server with a scratch database
 just release-preview
 ```
 
 The Go code must stay clean under `golangci-lint` with every linter enabled
 (`default: all`) and under `gopls`. `go test ./...` includes a full WebRTC
-media loopback test through the hub.
+media loopback test through the hub and a check that forwarded RTP header
+extensions are renumbered to the viewer's extmap.
+
+`just e2e` (`web/e2e/smoke.mjs`) starts a server, points two headless
+Chromes with fake cameras at one room and asserts that both receive the
+other's audio and video through the E2EE transform with zero dropped
+frames and exactly one tile per participant. It needs Chrome on `PATH`
+(or `CHROME=/path/to/chrome`) and is the gate that catches what type
+checks and unit tests cannot: a pipeline that connects fine and
+transmits nothing.
 
 ## License
 

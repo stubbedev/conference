@@ -61,11 +61,12 @@ interface Tile {
 type Phase = 'checking' | 'gate' | 'prejoin' | 'joining' | 'live' | 'error'
 
 const SCREEN_KIND = 'screen'
+const CAMERA_KIND = 'camera'
 const LOCAL_SOURCE = 'local'
 const NO_PIN = 'none'
 
 function supportsE2EE(): boolean {
-  return 'RTCRtpScriptTransform' in window || 'createEncodedStreams' in RTCRtpSender.prototype
+  return 'RTCRtpScriptTransform' in window
 }
 
 export default function Room() {
@@ -357,14 +358,13 @@ export default function Room() {
         }
       })
       client.on('track', ({ sourceId, stream: stream_, kind }) => {
+        // A member's microphone and camera share one tile (and one
+        // MediaStream from the SFU); only a screen share gets its own.
+        const tileKind = kind === SCREEN_KIND ? SCREEN_KIND : CAMERA_KIND
+        const key = `${sourceId}:${tileKind}`
         setTiles((prev) => {
-          if (kind === 'audio') {
-            const cam = prev.find((t) => t.sourceId === sourceId && t.kind === 'cam')
-            if (cam) return prev
-          }
-          const key = `${sourceId}:${kind === 'audio' ? 'cam' : kind}`
           const rest = prev.filter((t) => t.key !== key)
-          return [...rest, { key, sourceId, kind, stream: stream_ }]
+          return [...rest, { key, sourceId, kind: tileKind, stream: stream_ }]
         })
       })
       client.on('chat', (message) => {

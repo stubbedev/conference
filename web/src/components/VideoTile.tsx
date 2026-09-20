@@ -45,29 +45,12 @@ export function toggleTileDebug(): void {
   window.dispatchEvent(new CustomEvent('tile-debug'))
 }
 
-// rebind re-attaches a stream to a media element. Re-assigning through
-// null forces the element's playback pipeline to restart — the only
-// reliable way to make Android Chrome pick up a track that was added
-// to a stream already bound to the element; without the bounce it
-// renders the new track's first frame and then never advances.
-function rebind(element: HTMLMediaElement, stream: MediaStream): void {
-  element.srcObject = null
-  element.srcObject = stream
-}
-
-// Streams grow over time (audio can arrive before video) and mobile
-// browsers suspend decoding in ways that leave elements paused, so
-// track-list changes re-bind the element and visibility changes
-// re-check playback.
-function watchStream(stream: MediaStream | null, onChange: () => void): () => void {
-  stream?.addEventListener('addtrack', onChange)
-  stream?.addEventListener('removetrack', onChange)
-  return () => {
-    stream?.removeEventListener('addtrack', onChange)
-    stream?.removeEventListener('removetrack', onChange)
-  }
-}
-
+// Mobile browsers suspend decoding in ways that leave elements paused
+// while the tab is hidden, so visibility changes re-check playback.
+// Track-list changes never touch a bound element: useSplitStreams hands
+// the tile a fresh MediaStream instead, which goes through the element's
+// normal load path (Android Chrome renders one frame and stops when a
+// track is added to a stream it is already playing).
 function watchVisibility(element: HTMLMediaElement, start: () => void): () => void {
   const onVisible = () => {
     if (document.visibilityState === 'visible' && element.paused) start()
@@ -120,10 +103,6 @@ export function VideoTile({
       video.muted = true
       playMediaElement(video)
     }
-    const reattach = () => {
-      rebind(video, videoStream)
-      start()
-    }
     const reportRatio = () => {
       const ratio =
         video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 0
@@ -144,12 +123,15 @@ export function VideoTile({
 
     video.addEventListener('loadedmetadata', onLoadedMetadata)
     video.addEventListener('resize', reportRatio)
-    const disposers = [watchStream(videoStream, reattach), watchVisibility(video, start)]
+    const unwatch = watchVisibility(video, start)
 
     return () => {
       video.removeEventListener('loadedmetadata', onLoadedMetadata)
       video.removeEventListener('resize', reportRatio)
-      for (const dispose of disposers) dispose()
+      unwatch()
+      // Release the sink: a detached element still holding a live
+      // camera track keeps consuming frames on some mobile browsers.
+      video.srcObject = null
     }
   }, [videoStream, onAspectRatioRef])
 
@@ -159,18 +141,15 @@ export function VideoTile({
     if (!audio || !audioStream) return
 
     const start = () => playMediaElement(audio, setAudioBlocked)
-    const reattach = () => {
-      rebind(audio, audioStream)
-      start()
-    }
     if (audio.srcObject !== audioStream) {
       audio.srcObject = audioStream
       start()
     }
 
-    const disposers = [watchStream(audioStream, reattach), watchVisibility(audio, start)]
+    const unwatch = watchVisibility(audio, start)
     return () => {
-      for (const dispose of disposers) dispose()
+      unwatch()
+      audio.srcObject = null
     }
   }, [muted, audioStream])
 
@@ -202,41 +181,6 @@ export function VideoTile({
 
   const hideVideo = Boolean(camOff && !sharing)
   const speakingNow = speaking && !micOff && !sharing
-
-  // Self-healing for the Android render stall: if the rendered-frame
-  // counter stops advancing while a live video track is bound and the
-  // page is visible, re-bind the element. The watchdog recovers
-  // playback whatever stalled it — it does not need to know the cause.
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video || !videoStream || hideVideo) return
-
-    let lastFrames = -1
-    let rebindAttempts = 0
-
-    const watchdog = window.setInterval(() => {
-      if (document.visibilityState !== 'visible' || video.paused) return
-      if (!videoStream.getVideoTracks().some((track) => track.readyState === 'live')) return
-
-      const frames = video.getVideoPlaybackQuality().totalVideoFrames
-      if (lastFrames > 0 && frames === lastFrames) {
-        // Stop after a couple of failed re-binds: a hard stall then
-        // shows a steady frame (or black) instead of flashing forever.
-        if (rebindAttempts < 2) {
-          rebindAttempts += 1
-          rebind(video, videoStream)
-          video.muted = true
-          playMediaElement(video)
-        }
-      } else {
-        rebindAttempts = 0
-      }
-
-      lastFrames = frames
-    }, 1500)
-
-    return () => window.clearInterval(watchdog)
-  }, [videoStream, hideVideo])
 
   useEffect(() => {
     const sync = () => setDebugOn(tileDebugOn)
