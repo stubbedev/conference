@@ -1,46 +1,88 @@
 // End-to-end media frame encryption worker.
 //
-// The first byte of every encoded frame stays in the clear (RTP payload
-// descriptors must stay readable along the path); the remainder is
-// AES-CTR encrypted. The counter block carries the frame timestamp, so
-// sender and receiver derive the same keystream without extra
-// signaling. The key never leaves this worker.
-
-let cryptoKeyPromise = null
+// Frame layout: [1 clear byte (RTP payload descriptor)][16-byte AES-CTR
+// counter block][ciphertext]. The clear byte keeps RTP payload
+// descriptors readable along the path; the remainder is encrypted.
+//
+// The counter block is carried in the frame itself (SFrame-style
+// explicit IV): a random salt per transform plus a monotonically
+// increasing counter. Deriving it from frame.timestamp instead breaks
+// on the receive side, where timestamps are resampled by A/V sync and
+// jitter processing shortly after join (and may be fractional, which
+// throws in BigInt) — sender and receiver then derive different
+// keystreams and every frame, keyframes included, fails to decrypt,
+// freezing the picture permanently. The key never leaves this worker.
 
 const UNPROTECTED = 1
+const BLOCK_BYTES = 16
+const SALT_BYTES = 8
+
+let cryptoKeyPromise = null
 
 function setKeyBytes(bytes) {
   cryptoKeyPromise = crypto.subtle.importKey('raw', bytes, 'AES-CTR', false, ['encrypt', 'decrypt'])
 }
 
-function counterFor(timestamp) {
-  const iv = new Uint8Array(16)
-  new DataView(iv.buffer).setBigUint64(8, BigInt(timestamp))
-  return iv
+// encryptFrame seals one frame under the transform's salt and counter;
+// the counter then advances past every block this frame consumed, so
+// keystream blocks are never reused across frames.
+async function encryptFrame(frame, state) {
+  const data = new Uint8Array(frame.data)
+  const counterBlock = new Uint8Array(BLOCK_BYTES)
+  counterBlock.set(state.salt, 0)
+  new DataView(counterBlock.buffer).setBigUint64(SALT_BYTES, state.counter)
+
+  const key = await cryptoKeyPromise
+  const out = await crypto.subtle.encrypt(
+    { name: 'AES-CTR', counter: counterBlock, length: 64 },
+    key,
+    data.subarray(UNPROTECTED),
+  )
+
+  const merged = new Uint8Array(UNPROTECTED + BLOCK_BYTES + out.byteLength)
+  merged.set(data.subarray(0, UNPROTECTED), 0)
+  merged.set(counterBlock, UNPROTECTED)
+  merged.set(new Uint8Array(out), UNPROTECTED + BLOCK_BYTES)
+
+  state.counter += BigInt(Math.ceil(out.byteLength / BLOCK_BYTES) || 1)
+
+  return merged
 }
 
-async function transformFrame(frame, encrypt) {
+// decryptFrame reads the counter block straight off the wire, so the
+// receiver never depends on local frame timing.
+async function decryptFrame(frame) {
   const data = new Uint8Array(frame.data)
-  const head = data.subarray(0, UNPROTECTED)
-  const body = data.subarray(UNPROTECTED)
+  if (data.length <= UNPROTECTED + BLOCK_BYTES) return data
+
   const key = await cryptoKeyPromise
-  const out = await crypto.subtle[encrypt ? 'encrypt' : 'decrypt'](
-    { name: 'AES-CTR', counter: counterFor(frame.timestamp), length: 64 },
+  const out = await crypto.subtle.decrypt(
+    {
+      name: 'AES-CTR',
+      counter: data.subarray(UNPROTECTED, UNPROTECTED + BLOCK_BYTES),
+      length: 64,
+    },
     key,
-    body,
+    data.subarray(UNPROTECTED + BLOCK_BYTES),
   )
+
   const merged = new Uint8Array(UNPROTECTED + out.byteLength)
-  merged.set(head)
+  merged.set(data.subarray(0, UNPROTECTED), 0)
   merged.set(new Uint8Array(out), UNPROTECTED)
+
   return merged
 }
 
 function pipe(transformer, encrypt) {
+  const state = {
+    salt: crypto.getRandomValues(new Uint8Array(SALT_BYTES)),
+    counter: 0n,
+  }
+
   const transform = new TransformStream({
     async transform(frame, controller) {
       try {
-        const data = await transformFrame(frame, encrypt)
+        const data = encrypt ? await encryptFrame(frame, state) : await decryptFrame(frame)
         frame.setData(data.buffer)
         controller.enqueue(frame)
       } catch (err) {
