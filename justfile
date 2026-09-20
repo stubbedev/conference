@@ -27,7 +27,23 @@ build:
 fmt:
     gofmt -w .
 
-# Run the server locally with a scratch database.
+# Run backend + vite dev server (HMR on http://localhost:5173) with a
+# scratch database — the quickest way to try it locally. Ctrl+C stops both.
+# The backend listens on :18080 so it never fights other services for
+# 8080; vite proxies /api and /ws to it.
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    (cd web && [ -d node_modules ] || npm ci)
+    export PORT=18080
+    export ICE_UDP_PORT=0
+    export BACKEND_ORIGIN=http://localhost:18080
+    DB_PATH=/tmp/conference-dev.db go run ./cmd/server &
+    backend=$!
+    trap 'kill "$backend" 2>/dev/null || true' EXIT
+    cd web && npm run dev
+
+# Run the server on :8080 serving the built UI (run `just web` first).
 run:
     DB_PATH=/tmp/conference-dev.db go run ./cmd/server
 
