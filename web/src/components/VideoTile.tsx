@@ -28,13 +28,35 @@ interface VideoTileProps {
   onAspectRatio?: (ratio: number) => void
 }
 
+// ?debug=1 renders per-tile playback diagnostics: rendered and dropped
+// frame counters plus element state. When a tile freezes these numbers
+// say which side failed — counters still climbing means frames decode
+// but the picture stopped compositing; counters frozen means frames
+// stopped arriving or decrypting.
+const DEBUG_STATS =
+  typeof location !== 'undefined' && new URLSearchParams(location.search).has('debug')
+
+// rebind re-attaches a stream to a media element. Re-assigning through
+// null forces the element's playback pipeline to restart — the only
+// reliable way to make Android Chrome pick up a track that was added
+// to a stream already bound to the element; without the bounce it
+// renders the new track's first frame and then never advances.
+function rebind(element: HTMLMediaElement, stream: MediaStream): void {
+  element.srcObject = null
+  element.srcObject = stream
+}
+
 // Streams grow over time (audio can arrive before video) and mobile
-// browsers suspend decoding in ways that leave elements paused, so both
-// media elements re-check playback when the stream gains tracks or the
-// page becomes visible again.
-function watchStream(stream: MediaStream | null, start: () => void): () => void {
-  stream?.addEventListener('addtrack', start)
-  return () => stream?.removeEventListener('addtrack', start)
+// browsers suspend decoding in ways that leave elements paused, so
+// track-list changes re-bind the element and visibility changes
+// re-check playback.
+function watchStream(stream: MediaStream | null, onChange: () => void): () => void {
+  stream?.addEventListener('addtrack', onChange)
+  stream?.addEventListener('removetrack', onChange)
+  return () => {
+    stream?.removeEventListener('addtrack', onChange)
+    stream?.removeEventListener('removetrack', onChange)
+  }
 }
 
 function watchVisibility(element: HTMLMediaElement, start: () => void): () => void {
@@ -76,6 +98,7 @@ export function VideoTile({
   const ratioRef = useRef(0)
   const onAspectRatioRef = useLatest(onAspectRatio)
   const [audioBlocked, setAudioBlocked] = useState(false)
+  const [debugStats, setDebugStats] = useState('')
   const speaking = useIsSpeaking(stream)
   const { video: videoStream, audio: audioStream } = useSplitStreams(stream)
 
@@ -86,6 +109,10 @@ export function VideoTile({
     const start = () => {
       video.muted = true
       playMediaElement(video)
+    }
+    const reattach = () => {
+      rebind(video, videoStream)
+      start()
     }
     const reportRatio = () => {
       const ratio =
@@ -107,7 +134,7 @@ export function VideoTile({
 
     video.addEventListener('loadedmetadata', onLoadedMetadata)
     video.addEventListener('resize', reportRatio)
-    const disposers = [watchStream(videoStream, start), watchVisibility(video, start)]
+    const disposers = [watchStream(videoStream, reattach), watchVisibility(video, start)]
 
     return () => {
       video.removeEventListener('loadedmetadata', onLoadedMetadata)
@@ -122,12 +149,16 @@ export function VideoTile({
     if (!audio || !audioStream) return
 
     const start = () => playMediaElement(audio, setAudioBlocked)
+    const reattach = () => {
+      rebind(audio, audioStream)
+      start()
+    }
     if (audio.srcObject !== audioStream) {
       audio.srcObject = audioStream
       start()
     }
 
-    const disposers = [watchStream(audioStream, start), watchVisibility(audio, start)]
+    const disposers = [watchStream(audioStream, reattach), watchVisibility(audio, start)]
     return () => {
       for (const dispose of disposers) dispose()
     }
@@ -161,6 +192,48 @@ export function VideoTile({
 
   const hideVideo = Boolean(camOff && !sharing)
   const speakingNow = speaking && !micOff && !sharing
+
+  // Self-healing for the Android render stall: if the rendered-frame
+  // counter stops advancing while a live video track is bound and the
+  // page is visible, re-bind the element. The watchdog recovers
+  // playback whatever stalled it — it does not need to know the cause.
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !videoStream || hideVideo) return
+
+    let lastFrames = -1
+
+    const watchdog = window.setInterval(() => {
+      if (document.visibilityState !== 'visible' || video.paused) return
+      if (!videoStream.getVideoTracks().some((track) => track.readyState === 'live')) return
+
+      const frames = video.getVideoPlaybackQuality().totalVideoFrames
+      if (lastFrames > 0 && frames === lastFrames) {
+        rebind(video, videoStream)
+        video.muted = true
+        playMediaElement(video)
+      }
+
+      lastFrames = frames
+    }, 1500)
+
+    return () => window.clearInterval(watchdog)
+  }, [videoStream, hideVideo])
+
+  useEffect(() => {
+    if (!DEBUG_STATS) return
+    const video = videoRef.current
+    if (!video) return
+
+    const sample = () => {
+      const quality = video.getVideoPlaybackQuality()
+      setDebugStats(
+        `f:${quality.totalVideoFrames} d:${quality.droppedVideoFrames} rs:${video.readyState} t:${video.currentTime.toFixed(1)}`,
+      )
+    }
+    const timer = window.setInterval(sample, 1000)
+    return () => window.clearInterval(timer)
+  }, [videoStream])
 
   return (
     <div className="group relative isolate h-full w-full">
@@ -214,6 +287,11 @@ export function VideoTile({
         <span className={cn('truncate', compact ? 'max-w-24' : 'max-w-48')}>{name}</span>
         {sharing && <span className="shrink-0 text-white/60">screen</span>}
       </div>
+      {DEBUG_STATS && debugStats && (
+        <span className="absolute right-2 bottom-9 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
+          {debugStats}
+        </span>
+      )}
       <div className="absolute top-2 right-2 flex gap-1 text-white">
         {micOff && <MicOff className="size-4" />}
         {camOff && !sharing && <VideoOff className="size-4" />}
