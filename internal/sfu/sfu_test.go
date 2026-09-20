@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
@@ -447,5 +448,78 @@ func TestModeration(t *testing.T) {
 
 	if live := hub.LiveCount(testSlug); live != 1 {
 		t.Fatalf("expected 1 member left, got %d", live)
+	}
+}
+
+// watchKeyframeOnPublisher closes keyframe once the publisher's video
+// sender receives an RTCP PLI.
+func watchKeyframeOnPublisher(sender *webrtc.RTPSender, keyframe chan struct{}) {
+	go func() {
+		for {
+			packets, _, readErr := sender.ReadRTCP()
+			if readErr != nil {
+				return
+			}
+
+			for _, packet := range packets {
+				if _, ok := packet.(*rtcp.PictureLossIndication); ok {
+					close(keyframe)
+
+					return
+				}
+			}
+		}
+	}()
+}
+
+// TestKeyframeRequestForwarding asserts that a viewer's RTCP PLI — what a
+// browser sends after losing video packets mid-call — is relayed to the
+// publisher as a keyframe request. Without the relay the first lost packet
+// leaves the viewer's video frozen on its last decodable frame.
+func TestKeyframeRequestForwarding(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+
+	publisher := newTestPeer(t, hub, engine, "alice", false)
+	audioTrack, videoTrack := publisherOffer(t, publisher)
+
+	go pumpMedia(audioTrack)
+	go pumpMedia(videoTrack)
+
+	viewer := newTestPeer(t, hub, engine, "bob", false)
+	video, _ := viewerSubscribe(t, viewer, engine)
+
+	// Let the subscribe-time keyframe requests drain before listening, so
+	// the assertion below can only be satisfied by the relayed viewer PLI.
+	time.Sleep(time.Second)
+
+	keyframe := make(chan struct{})
+
+	for _, transceiver := range publisher.local.GetTransceivers() {
+		sender := transceiver.Sender()
+		if sender == nil || sender.Track() == nil || sender.Track().Kind() != webrtc.RTPCodecTypeVideo {
+			continue
+		}
+
+		watchKeyframeOnPublisher(sender, keyframe)
+	}
+
+	err = viewer.local.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(video.SSRC())}})
+	if err != nil {
+		t.Fatalf("viewer pli: %v", err)
+	}
+
+	select {
+	case <-keyframe:
+	case <-time.After(testTimeout):
+		t.Fatal("publisher never received the viewer's keyframe request")
 	}
 }

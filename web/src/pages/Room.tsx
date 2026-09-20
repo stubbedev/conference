@@ -33,6 +33,7 @@ import {
   openKeyblob,
   toB64,
 } from '@/lib/roomkeys'
+import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
 import { RoomClient, type ChatMessage, type MemberInfo } from '@/lib/sfu'
 import { Button } from '@/components/ui/button'
 import { ChatPanel } from '@/components/ChatPanel'
@@ -224,18 +225,25 @@ export default function Room() {
           session = res.session
           if (res.key) keyB64 = res.key
         } else {
-          if (!password) {
+          const pass = password ?? savedRoomPassword(slug)
+          if (!pass) {
             setGateError('')
             setPhase('gate')
             return
           }
           if (!info.authSalt) throw new Error('This room is missing its password salt.')
-          const proof = await deriveProof(password, info.authSalt)
-          const res = await api.auth(slug, { proof })
+          const proof = await deriveProof(pass, info.authSalt)
+          const res = await api.auth(slug, { proof }).catch((err: unknown) => {
+            // A remembered password that no longer works falls back to
+            // the prompt instead of failing the join.
+            if (!password) forgetRoomPassword(slug)
+            throw err
+          })
+          if (password) rememberRoomPassword(slug, password)
           session = res.session
           if (res.key) keyB64 = res.key
           else if (res.keyblob && res.keySalt) {
-            const raw = await openKeyblob(res.keyblob, res.keySalt, password)
+            const raw = await openKeyblob(res.keyblob, res.keySalt, pass)
             keyB64 = toB64(raw)
           }
         }

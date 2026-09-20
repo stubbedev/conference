@@ -33,6 +33,10 @@ const (
 const (
 	taskQueueDepth = 64
 	bpsPerKbps     = 1000
+
+	// Minimum spacing between keyframe requests forwarded for one
+	// viewer, so a PLI burst cannot thrash the publisher's encoder.
+	keyframeRequestInterval = 200 * time.Millisecond
 )
 
 // Sentinel errors surfaced to signaling clients and the API layer.
@@ -438,6 +442,22 @@ func (r *Room) notifyTrackRemoved(sourceID, mid string) {
 	}
 }
 
+// requestKeyframe asks a publisher to produce fresh keyframes. Safe from
+// any goroutine; the write happens on the publisher's task loop so it
+// cannot race an upstream renegotiation.
+func (r *Room) requestKeyframe(sourceID string) {
+	source := r.member(sourceID)
+	if source == nil {
+		return
+	}
+
+	source.enqueue(func() {
+		if source.up != nil {
+			source.up.requestKeyframe()
+		}
+	})
+}
+
 // Member is one connected participant: an upstream peer connection that
 // publishes their media and one downstream peer connection per source
 // they subscribe to.
@@ -536,12 +556,7 @@ func (m *Member) handleDownAnswer(msg Message) {
 }
 
 func (m *Member) handlePLI(msg Message) {
-	source := m.room.member(msg.Member)
-	if source == nil || source.up == nil {
-		return
-	}
-
-	source.up.requestKeyframe()
+	m.room.requestKeyframe(msg.Member)
 }
 
 func (m *Member) handleState(msg Message) {
@@ -765,19 +780,20 @@ func (m *Member) ensureDownPeer(sourceID string) {
 			return
 		}
 
-		transceiver := webrtc.RTPTransceiverInit{
+		sendOnly := webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionSendonly,
 		}
 
-		_, err = down.pc.AddTransceiverFromTrack(local, transceiver)
-		if err != nil {
-			m.fail("track-add", err)
+		transceiver, trackErr := down.pc.AddTransceiverFromTrack(local, sendOnly)
+		if trackErr != nil {
+			m.fail("track-add", trackErr)
 
 			return
 		}
 
 		down.sends[track.mid] = &downSend{local: local, kind: track.kind}
 		track.addViewer(m.ID, local)
+		down.watchKeyframeRequests(transceiver.Sender(), m)
 
 		added = true
 	})
@@ -786,7 +802,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		down.negotiate(m)
 	}
 
-	source.up.requestKeyframe()
+	m.room.requestKeyframe(sourceID)
 }
 
 // ensureDownConnection lazily creates the downstream peer connection
@@ -1114,6 +1130,46 @@ type DownPeer struct {
 }
 
 func (dp *DownPeer) pcID() string { return "down-" + dp.sourceID }
+
+// watchKeyframeRequests relays a viewer's RTCP keyframe requests (PLI or
+// FIR, what a browser sends after losing video packets mid-call) to the
+// publisher. Without this relay the first lost packet leaves the viewer's
+// decoder waiting for a keyframe that never arrives, which shows up as
+// video frozen on the last decodable frame. The loop ends when the peer
+// connection closes and ReadRTCP fails.
+func (dp *DownPeer) watchKeyframeRequests(sender *webrtc.RTPSender, viewer *Member) {
+	if sender == nil {
+		return
+	}
+
+	go func() {
+		var lastForward time.Time
+
+		for {
+			packets, _, err := sender.ReadRTCP()
+			if err != nil {
+				return
+			}
+
+			needsKeyframe := false
+
+			for _, packet := range packets {
+				switch packet.(type) {
+				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+					needsKeyframe = true
+				}
+			}
+
+			if !needsKeyframe || time.Since(lastForward) < keyframeRequestInterval {
+				continue
+			}
+
+			lastForward = time.Now()
+
+			viewer.room.requestKeyframe(dp.sourceID)
+		}
+	}()
+}
 
 // negotiate sends a fresh offer describing everything currently in sends.
 func (dp *DownPeer) negotiate(viewer *Member) {

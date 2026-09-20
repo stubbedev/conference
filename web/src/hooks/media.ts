@@ -115,6 +115,47 @@ export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promi
   return { devices: groups, refresh }
 }
 
+// Splits a stream into single-kind views: the video element never carries
+// an audio track (the case mobile autoplay policy is strictest about) and
+// the audio element never carries video. The derived streams follow
+// track additions and removals on the source.
+export function useSplitStreams(stream: MediaStream | null): {
+  video: MediaStream | null
+  audio: MediaStream | null
+} {
+  const [split, setSplit] = useState<{ video: MediaStream | null; audio: MediaStream | null }>({
+    video: null,
+    audio: null,
+  })
+
+  useEffect(() => {
+    if (!stream) {
+      setSplit({ video: null, audio: null })
+      return
+    }
+
+    const video = new MediaStream(stream.getVideoTracks())
+    const audio = new MediaStream(stream.getAudioTracks())
+
+    const sync = (event: MediaStreamTrackEvent) => {
+      const target = event.track.kind === 'video' ? video : audio
+      if (event.type === 'addtrack') target.addTrack(event.track)
+      else target.removeTrack(event.track)
+    }
+
+    stream.addEventListener('addtrack', sync)
+    stream.addEventListener('removetrack', sync)
+    setSplit({ video, audio })
+
+    return () => {
+      stream.removeEventListener('addtrack', sync)
+      stream.removeEventListener('removetrack', sync)
+    }
+  }, [stream])
+
+  return split
+}
+
 export function trackConstraints(
   kind: TrackKind,
   deviceId: string,

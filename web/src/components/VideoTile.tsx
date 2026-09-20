@@ -7,6 +7,7 @@ import {
   playMediaElement,
   resumeAudio,
   useIsSpeaking,
+  useSplitStreams,
 } from '@/hooks/media'
 import { cn } from '@/lib/utils'
 
@@ -76,10 +77,11 @@ export function VideoTile({
   const onAspectRatioRef = useLatest(onAspectRatio)
   const [audioBlocked, setAudioBlocked] = useState(false)
   const speaking = useIsSpeaking(stream)
+  const { video: videoStream, audio: audioStream } = useSplitStreams(stream)
 
   useEffect(() => {
     const video = videoRef.current
-    if (!video) return
+    if (!video || !videoStream) return
 
     const start = () => {
       video.muted = true
@@ -98,38 +100,38 @@ export function VideoTile({
       if (video.paused) start()
     }
 
-    if (video.srcObject !== stream) {
-      video.srcObject = stream
+    if (video.srcObject !== videoStream) {
+      video.srcObject = videoStream
       start()
     }
 
     video.addEventListener('loadedmetadata', onLoadedMetadata)
     video.addEventListener('resize', reportRatio)
-    const disposers = [watchStream(stream, start), watchVisibility(video, start)]
+    const disposers = [watchStream(videoStream, start), watchVisibility(video, start)]
 
     return () => {
       video.removeEventListener('loadedmetadata', onLoadedMetadata)
       video.removeEventListener('resize', reportRatio)
       for (const dispose of disposers) dispose()
     }
-  }, [stream, onAspectRatioRef])
+  }, [videoStream, onAspectRatioRef])
 
   useEffect(() => {
     if (muted) return
     const audio = audioRef.current
-    if (!audio) return
+    if (!audio || !audioStream) return
 
     const start = () => playMediaElement(audio, setAudioBlocked)
-    if (audio.srcObject !== stream) {
-      audio.srcObject = stream
+    if (audio.srcObject !== audioStream) {
+      audio.srcObject = audioStream
       start()
     }
 
-    const disposers = [watchStream(stream, start), watchVisibility(audio, start)]
+    const disposers = [watchStream(audioStream, start), watchVisibility(audio, start)]
     return () => {
       for (const dispose of disposers) dispose()
     }
-  }, [muted, stream])
+  }, [muted, audioStream])
 
   useEffect(() => {
     const audio = audioRef.current
