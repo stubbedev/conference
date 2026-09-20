@@ -6,3 +6,6 @@
 *.db-wal
 .env
 /conference
+.direnv/
+/tmp/
+build-errors.log

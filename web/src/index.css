@@ -117,4 +117,16 @@
   body {
     @apply bg-background text-foreground;
   }
+  button:not(:disabled),
+  [role='switch']:not(:disabled),
+  [role='option']:not([data-disabled]) {
+    cursor: pointer;
+  }
+}
+
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
 }

@@ -14,7 +14,6 @@ export interface RoomInfo {
   slug: string
   name: string
   requiresPassword: boolean
-  e2ee: boolean
   members: number
   maxMembers: number
   authSalt?: string
@@ -24,7 +23,6 @@ export interface RoomInfo {
 export interface CreatedRoom {
   slug: string
   name: string
-  e2ee: boolean
   roomKey: string
   privToken: string
   privPath: string
@@ -44,7 +42,6 @@ export interface AuthResult {
 export interface CreateRoomInput {
   name: string
   password: string
-  e2ee: boolean
   maxMembers: number
 }
 
@@ -71,7 +68,6 @@ export const api = {
       body: JSON.stringify({
         name: input.name,
         password: input.password,
-        e2ee: input.e2ee,
         maxMembers: input.maxMembers,
       }),
     }),

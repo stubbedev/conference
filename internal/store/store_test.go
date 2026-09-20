@@ -30,9 +30,9 @@ func passwordRoom(slug, privHash string) store.Room {
 		Slug:     slug,
 		Name:     "",
 		AuthSalt: nil, AuthHash: nil, KeySalt: nil, Keyblob: nil,
-		OpenKey:  nil,
-		PrivHash: []byte(privHash),
-		E2EE:     false, MaxMembers: 0, CreatedAt: time.Time{},
+		OpenKey:    nil,
+		PrivHash:   []byte(privHash),
+		MaxMembers: 0, CreatedAt: time.Time{},
 	}
 }
 
@@ -49,7 +49,7 @@ func TestRoomRoundTrip(t *testing.T) {
 		AuthSalt: []byte("saltsalt"), AuthHash: []byte("hash"),
 		KeySalt: []byte("ksalt"), Keyblob: []byte("blob"),
 		OpenKey: nil, PrivHash: []byte("priv"),
-		E2EE: true, MaxMembers: 5, CreatedAt: created,
+		MaxMembers: 5, CreatedAt: created,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestRoomRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got.Name != "Standup" || !got.RequiresPassword() || !got.E2EE || got.MaxMembers != 5 {
+	if got.Name != "Standup" || !got.RequiresPassword() || got.MaxMembers != 5 {
 		t.Errorf("unexpected room: %+v", got)
 	}
 

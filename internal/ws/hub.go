@@ -100,7 +100,7 @@ func (h *Handler) admit(ctx context.Context, conn *websocket.Conn) (*sfu.Member,
 		return nil, nil, nil, noop
 	}
 
-	room, ok := h.authenticate(ctx, conn, &first)
+	room, priv, ok := h.authenticate(ctx, conn, &first)
 	if !ok {
 		return nil, nil, nil, noop
 	}
@@ -128,7 +128,8 @@ func (h *Handler) admit(ctx context.Context, conn *websocket.Conn) (*sfu.Member,
 	member, err := h.Hub.JoinRoom(sfu.JoinRequest{
 		Slug: room.Slug, RoomName: room.Name,
 		MemberName: sanitizeName(first.Name),
-		E2EE:       room.E2EE, MaxMembers: room.MaxMembers,
+		MaxMembers: room.MaxMembers,
+		Priv:       priv,
 	}, func(msg sfu.Message) {
 		select {
 		case out <- msg:
@@ -159,23 +160,24 @@ func writeJoinError(ctx context.Context, conn *websocket.Conn, err error) {
 	writeError(ctx, conn, "join-failed", "Could not join the room.")
 }
 
-// authenticate validates the join frame's room and session credentials.
-func (h *Handler) authenticate(ctx context.Context, conn *websocket.Conn, first *sfu.Message) (*store.Room, bool) {
+// authenticate validates the join frame's room and session credentials
+// and reports whether the session carries moderator rights.
+func (h *Handler) authenticate(ctx context.Context, conn *websocket.Conn, first *sfu.Message) (*store.Room, bool, bool) {
 	room, err := h.Store.GetRoom(ctx, first.Room)
 	if err != nil {
 		writeError(ctx, conn, "room-not-found", "No such room.")
 
-		return nil, false
+		return nil, false, false
 	}
 
 	sess, err := h.Store.GetSession(ctx, first.Session)
 	if err != nil || sess.Room != room.Slug {
 		writeError(ctx, conn, "unauthorized", "Join authorization missing or expired.")
 
-		return nil, false
+		return nil, false, false
 	}
 
-	return room, true
+	return room, sess.Priv, true
 }
 
 func (h *Handler) readPump(ctx context.Context, conn *websocket.Conn, member *sfu.Member, teardown func()) {

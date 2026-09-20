@@ -30,13 +30,15 @@ export interface RemoteTrack {
   kind: string
 }
 
+export type ModerateAction = 'mute' | 'cam' | 'screen' | 'kick'
+export type ForcedAction = Exclude<ModerateAction, 'kick'>
+
 export interface RoomClientOptions {
   slug: string
   session: string
   name: string
-  e2ee: boolean
-  mediaKey: Uint8Array | null
-  chatKey: CryptoKey | null
+  mediaKey: Uint8Array<ArrayBuffer>
+  chatKey: CryptoKey
   iceServers: RTCIceServer[]
 }
 
@@ -63,6 +65,8 @@ interface WireMessage {
   ts?: number
   code?: string
   text?: string
+  target?: string
+  action?: string
 }
 
 interface Events {
@@ -74,6 +78,8 @@ interface Events {
   'track-removed': { sourceId: string; mid: string }
   chat: ChatMessage
   error: { code: string; text: string }
+  forced: { action: ForcedAction }
+  kicked: Record<string, never>
   closed: Record<string, never>
 }
 
@@ -94,18 +100,16 @@ export class RoomClient {
   private handlers = new Map<string, Set<AnyHandler>>()
   private localMic: MediaStreamTrack | null = null
   private localCam: MediaStreamTrack | null = null
+  private micSender: RTCRtpSender | null = null
+  private camSender: RTCRtpSender | null = null
   private state = { mic: true, cam: true, sharing: false }
 
-  readonly worker: Worker | null
+  readonly worker: Worker
 
   constructor(opts: RoomClientOptions) {
     this.opts = opts
-    if (opts.e2ee && opts.mediaKey) {
-      this.worker = new Worker(new URL('./e2ee.worker.js', import.meta.url), { type: 'module' })
-      this.worker.postMessage({ keyBytes: opts.mediaKey.slice() })
-    } else {
-      this.worker = null
-    }
+    this.worker = new Worker(new URL('./e2ee.worker.js', import.meta.url), { type: 'module' })
+    this.worker.postMessage({ keyBytes: opts.mediaKey.slice() })
   }
 
   connect(): Promise<void> {
@@ -177,7 +181,16 @@ export class RoomClient {
     this.localCam = stream.getVideoTracks()[0] ?? null
 
     for (const sender of pc.getSenders()) this.installSenderTransform(sender)
+    this.micSender = pc.getSenders().find((sender) => sender.track?.kind === 'audio') ?? null
+    this.camSender = pc.getSenders().find((sender) => sender.track?.kind === 'video') ?? null
     await this.sendUpOffer()
+
+    this.state = {
+      mic: this.localMic?.enabled ?? false,
+      cam: this.localCam?.enabled ?? false,
+      sharing: false,
+    }
+    this.sendState()
   }
 
   async addScreen(stream: MediaStream): Promise<void> {
@@ -215,15 +228,29 @@ export class RoomClient {
     await this.sendUpOffer()
   }
 
-  setMic(enabled: boolean): void {
-    if (this.localMic) this.localMic.enabled = enabled
-    this.state = { ...this.state, mic: enabled }
-    this.sendState()
+  async replaceLocalTrack(kind: 'mic' | 'cam', track: MediaStreamTrack): Promise<void> {
+    const pc = this.up
+    if (!pc) return
+
+    let sender = kind === 'mic' ? this.micSender : this.camSender
+    if (!sender) {
+      sender = pc.addTrack(track, new MediaStream([track]))
+      this.installSenderTransform(sender)
+      if (kind === 'mic') this.micSender = sender
+      else this.camSender = sender
+      await this.sendUpOffer()
+    } else {
+      await sender.replaceTrack(track)
+    }
+
+    if (kind === 'mic') this.localMic = track
+    else this.localCam = track
   }
 
-  setCam(enabled: boolean): void {
-    if (this.localCam) this.localCam.enabled = enabled
-    this.state = { ...this.state, cam: enabled }
+  setTrackEnabled(kind: 'mic' | 'cam', enabled: boolean): void {
+    const track = kind === 'mic' ? this.localMic : this.localCam
+    if (track) track.enabled = enabled
+    this.state = kind === 'mic' ? { ...this.state, mic: enabled } : { ...this.state, cam: enabled }
     this.sendState()
   }
 
@@ -232,9 +259,12 @@ export class RoomClient {
   }
 
   async sendChat(text: string): Promise<void> {
-    if (!this.opts.chatKey) throw new Error('Chat is not available.')
     const sealed = await encryptChat(this.opts.chatKey, text)
     this.send({ type: 'chat', iv: sealed.iv, ct: sealed.ct })
+  }
+
+  moderate(target: string, action: ModerateAction): void {
+    this.send({ type: 'moderate', target, action })
   }
 
   leave(): void {
@@ -242,7 +272,7 @@ export class RoomClient {
     this.up?.close()
     for (const pc of this.downs.values()) pc.close()
     this.downs.clear()
-    this.worker?.terminate()
+    this.worker.terminate()
   }
 
   private send(msg: WireMessage): void {
@@ -275,7 +305,7 @@ export class RoomClient {
   }
 
   private installSenderTransform(sender: RTCRtpSender): void {
-    if (!this.worker || this.transformed.has(sender)) return
+    if (this.transformed.has(sender)) return
     this.transformed.add(sender)
     if ('RTCRtpScriptTransform' in window) {
       const Ctor = (window as unknown as { RTCRtpScriptTransform: new (w: Worker, o: unknown) => unknown })
@@ -293,7 +323,7 @@ export class RoomClient {
   }
 
   private installReceiverTransform(receiver: RTCRtpReceiver): void {
-    if (!this.worker || this.transformed.has(receiver)) return
+    if (this.transformed.has(receiver)) return
     this.transformed.add(receiver)
     if ('RTCRtpScriptTransform' in window) {
       const Ctor = (window as unknown as { RTCRtpScriptTransform: new (w: Worker, o: unknown) => unknown })
@@ -388,6 +418,16 @@ export class RoomClient {
       case 'chat':
         await this.handleChat(msg)
         return
+      case 'forced': {
+        const action = msg.action
+        if (action === 'mute' || action === 'cam' || action === 'screen') {
+          this.emit('forced', { action })
+        }
+        return
+      }
+      case 'kicked':
+        this.emit('kicked', {})
+        return
       default:
         return
     }
@@ -446,7 +486,7 @@ export class RoomClient {
   }
 
   private async handleChat(msg: WireMessage): Promise<void> {
-    if (!this.opts.chatKey || !msg.iv || !msg.ct) return
+    if (!msg.iv || !msg.ct) return
 
     try {
       const text = await decryptChat(this.opts.chatKey, { iv: msg.iv, ct: msg.ct })

@@ -35,7 +35,7 @@ type testPeer struct {
 	pending []webrtc.ICECandidateInit
 }
 
-func newTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, name string) *testPeer {
+func newTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, name string, priv bool) *testPeer {
 	t.Helper()
 
 	peer := &testPeer{
@@ -54,8 +54,8 @@ func newTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, name string) *t
 		Slug:       testSlug,
 		RoomName:   "Integration",
 		MemberName: name,
-		E2EE:       true,
 		MaxMembers: 8,
+		Priv:       priv,
 	}, func(msg sfu.Message) { peer.raw <- msg })
 	if err != nil {
 		t.Fatalf("%s join: %v", name, err)
@@ -372,7 +372,7 @@ func TestMediaLoopback(t *testing.T) {
 		MaxPublishKbps: 2500,
 	})
 
-	publisher := newTestPeer(t, hub, engine, "alice")
+	publisher := newTestPeer(t, hub, engine, "alice", false)
 	audioTrack, videoTrack := publisherOffer(t, publisher)
 
 	// Media must flow before the viewer subscribes: the hub only learns
@@ -380,7 +380,7 @@ func TestMediaLoopback(t *testing.T) {
 	go pumpMedia(audioTrack)
 	go pumpMedia(videoTrack)
 
-	viewer := newTestPeer(t, hub, engine, "bob")
+	viewer := newTestPeer(t, hub, engine, "bob", false)
 
 	video, audio := viewerSubscribe(t, viewer, engine)
 	for _, track := range []*webrtc.TrackRemote{video, audio} {
@@ -393,5 +393,59 @@ func TestMediaLoopback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("no RTP on %s track: %v", track.Kind(), err)
 		}
+	}
+}
+
+func TestModeration(t *testing.T) {
+	t.Parallel()
+
+	const moderate = "moderate"
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	// Unprivileged members cannot moderate.
+	guest.member.Handle(sfu.Message{Type: moderate, Target: host.member.ID, Action: sfu.ActionMute})
+
+	if msg := guest.next(t, "error"); msg.Code != "not-allowed" {
+		t.Fatalf("guest expected not-allowed, got %q", msg.Code)
+	}
+
+	// Media actions reach the target as a forced event.
+	host.member.Handle(sfu.Message{Type: moderate, Target: guest.member.ID, Action: sfu.ActionMute})
+
+	if msg := guest.next(t, "forced"); msg.Action != sfu.ActionMute {
+		t.Fatalf("guest expected forced mute, got %q", msg.Action)
+	}
+
+	// Unknown actions are rejected.
+	host.member.Handle(sfu.Message{Type: moderate, Target: guest.member.ID, Action: "nope"})
+
+	if msg := host.next(t, "error"); msg.Code != "bad-action" {
+		t.Fatalf("host expected bad-action, got %q", msg.Code)
+	}
+
+	// Kick removes the target and notifies the rest of the room.
+	host.member.Handle(sfu.Message{Type: moderate, Target: guest.member.ID, Action: sfu.ActionKick})
+
+	if msg := guest.next(t, "kicked"); msg.Type != "kicked" {
+		t.Fatalf("guest expected kicked, got %q", msg.Type)
+	}
+
+	if msg := host.next(t, "member-left"); msg.ID != guest.member.ID {
+		t.Fatalf("host expected member-left for guest, got %q", msg.ID)
+	}
+
+	if live := hub.LiveCount(testSlug); live != 1 {
+		t.Fatalf("expected 1 member left, got %d", live)
 	}
 }

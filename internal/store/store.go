@@ -32,7 +32,6 @@ type Room struct {
 	Keyblob    []byte // room key sealed under the password; nil for open rooms
 	OpenKey    []byte // room key in the clear; set for open rooms only
 	PrivHash   []byte // SHA-256 of the privileged link token
-	E2EE       bool
 	MaxMembers int
 	CreatedAt  time.Time
 }
@@ -65,7 +64,6 @@ CREATE TABLE IF NOT EXISTS rooms (
 	keyblob     BLOB,
 	open_key    BLOB,
 	priv_hash   BLOB NOT NULL,
-	e2ee        INTEGER NOT NULL DEFAULT 1,
 	max_members INTEGER NOT NULL DEFAULT 0,
 	created_at  INTEGER NOT NULL
 );
@@ -126,10 +124,10 @@ func (s *Store) Close() error {
 // CreateRoom inserts a new room. The slug must not exist yet.
 func (s *Store) CreateRoom(ctx context.Context, r Room) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO rooms
-		(slug, name, auth_salt, auth_hash, key_salt, keyblob, open_key, priv_hash, e2ee, max_members, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(slug, name, auth_salt, auth_hash, key_salt, keyblob, open_key, priv_hash, max_members, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Slug, r.Name, r.AuthSalt, r.AuthHash, r.KeySalt, r.Keyblob,
-		r.OpenKey, r.PrivHash, boolInt(r.E2EE), r.MaxMembers, r.CreatedAt.Unix())
+		r.OpenKey, r.PrivHash, r.MaxMembers, r.CreatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("store: create room: %w", err)
 	}
@@ -142,10 +140,10 @@ func scanRoom(scanner row) (*Room, error) {
 
 	var created int64
 
-	var e2ee, maxMembers int
+	var maxMembers int
 
 	err := scanner.Scan(&r.Slug, &r.Name, &r.AuthSalt, &r.AuthHash, &r.KeySalt,
-		&r.Keyblob, &r.OpenKey, &r.PrivHash, &e2ee, &maxMembers, &created)
+		&r.Keyblob, &r.OpenKey, &r.PrivHash, &maxMembers, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -154,14 +152,13 @@ func scanRoom(scanner row) (*Room, error) {
 		return nil, fmt.Errorf("store: scan room: %w", err)
 	}
 
-	r.E2EE = e2ee != 0
 	r.MaxMembers = maxMembers
 	r.CreatedAt = time.Unix(created, 0)
 
 	return &r, nil
 }
 
-const roomColumns = `slug, name, auth_salt, auth_hash, key_salt, keyblob, open_key, priv_hash, e2ee, max_members, created_at`
+const roomColumns = `slug, name, auth_salt, auth_hash, key_salt, keyblob, open_key, priv_hash, max_members, created_at`
 
 // GetRoom returns the room with the given slug.
 func (s *Store) GetRoom(ctx context.Context, slug string) (*Room, error) {

@@ -21,6 +21,14 @@ const (
 	KindScreen = "screen"
 )
 
+// Moderation actions a privileged member can request for another member.
+const (
+	ActionMute   = "mute"
+	ActionCam    = "cam"
+	ActionScreen = "screen"
+	ActionKick   = "kick"
+)
+
 // Internal tuning knobs.
 const (
 	taskQueueDepth = 64
@@ -31,6 +39,7 @@ const (
 var (
 	ErrRoomFull   = errors.New("sfu: room full")
 	ErrBadRequest = errors.New("sfu: bad request")
+	ErrForbidden  = errors.New("sfu: moderator access required")
 )
 
 // TrackInfo maps an SDP media section to a logical stream kind so the
@@ -54,7 +63,6 @@ type MemberInfo struct {
 type RoomInfo struct {
 	Slug  string `json:"slug"`
 	Name  string `json:"name"`
-	E2EE  bool   `json:"e2ee"`
 	Live  int    `json:"live"`
 	Limit int    `json:"limit"`
 }
@@ -65,8 +73,8 @@ type JoinRequest struct {
 	Slug       string
 	RoomName   string
 	MemberName string
-	E2EE       bool
 	MaxMembers int
+	Priv       bool
 }
 
 // Message is the single JSON shape exchanged over the signaling
@@ -103,6 +111,10 @@ type Message struct {
 	IV      string `json:"iv,omitempty"`
 	CT      string `json:"ct,omitempty"`
 	TS      int64  `json:"ts,omitempty"`
+
+	// moderate
+	Target string `json:"target,omitempty"`
+	Action string `json:"action,omitempty"`
 
 	// error
 	Code string `json:"code,omitempty"`
@@ -142,7 +154,7 @@ func (h *Hub) JoinRoom(req JoinRequest, send func(Message)) (*Member, error) {
 		}
 
 		room = &Room{
-			slug: req.Slug, name: req.RoomName, e2ee: req.E2EE,
+			slug: req.Slug, name: req.RoomName,
 			limit: limit, cfg: &h.cfg,
 			members: map[string]*Member{}, hub: h,
 			mu: sync.Mutex{}, nextShort: 0, rembStop: nil,
@@ -152,7 +164,7 @@ func (h *Hub) JoinRoom(req JoinRequest, send func(Message)) (*Member, error) {
 
 	h.mu.Unlock()
 
-	return room.join(req.MemberName, send)
+	return room.join(req, send)
 }
 
 // LiveCount returns the number of connected members in a live room.
@@ -218,7 +230,6 @@ func (h *Hub) drop(room *Room) {
 type Room struct {
 	slug  string
 	name  string
-	e2ee  bool
 	limit int
 	cfg   *HubConfig
 	hub   *Hub
@@ -231,7 +242,7 @@ type Room struct {
 }
 
 func (r *Room) info() *RoomInfo {
-	return &RoomInfo{Slug: r.slug, Name: r.name, E2EE: r.e2ee, Live: len(r.members), Limit: r.limit}
+	return &RoomInfo{Slug: r.slug, Name: r.name, Live: len(r.members), Limit: r.limit}
 }
 
 func (r *Room) snapshot() []*Member {
@@ -248,7 +259,7 @@ func (r *Room) member(id string) *Member {
 	return r.members[id]
 }
 
-func (r *Room) join(name string, send func(Message)) (*Member, error) {
+func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 	r.mu.Lock()
 
 	if r.limit > 0 && len(r.members) >= r.limit {
@@ -262,8 +273,9 @@ func (r *Room) join(name string, send func(Message)) (*Member, error) {
 	member := &Member{
 		ID:    uuid.NewString(),
 		Short: r.nextShort,
-		Name:  name,
+		Name:  req.MemberName,
 		room:  r,
+		priv:  req.Priv,
 		send:  send,
 		tasks: make(chan func(), taskQueueDepth),
 		done:  make(chan struct{}),
@@ -435,6 +447,7 @@ type Member struct {
 	Name  string
 
 	room *Room
+	priv bool
 	send func(Message)
 
 	tasks chan func()
@@ -508,6 +521,8 @@ func (m *Member) apply(msg Message) {
 		m.handleState(msg)
 	case "chat":
 		m.handleChat(msg)
+	case "moderate":
+		m.handleModerate(msg)
 	}
 }
 
@@ -553,6 +568,34 @@ func (m *Member) handleChat(msg Message) {
 	m.room.broadcastExcept(m.ID, Message{
 		Type: "chat", From: m.ID, IV: msg.IV, CT: msg.CT, TS: time.Now().UnixMilli(),
 	})
+}
+
+// handleModerate applies a privileged member's action against another
+// member: media actions instruct the target's client to disable the
+// track, kick also removes the target from the room.
+func (m *Member) handleModerate(msg Message) {
+	if !m.priv {
+		m.fail("not-allowed", ErrForbidden)
+
+		return
+	}
+
+	target := m.room.member(msg.Target)
+	if target == nil || target.ID == m.ID {
+		m.fail("bad-target", ErrBadRequest)
+
+		return
+	}
+
+	switch msg.Action {
+	case ActionMute, ActionCam, ActionScreen:
+		target.send(Message{Type: "forced", Action: msg.Action})
+	case ActionKick:
+		target.send(Message{Type: "kicked"})
+		target.Leave()
+	default:
+		m.fail("bad-action", ErrBadRequest)
+	}
 }
 
 // handleUpOffer applies a (re)negotiation of the member's upstream peer
@@ -836,10 +879,10 @@ func (m *Member) teardown() {
 // UpPeer is a publisher's peer connection; the client offers, the server
 // answers, media flows client-to-server.
 type UpPeer struct {
-	pc     *webrtc.PeerConnection
-	member *Member
-	tracks map[string]*UpTrack
-	labels map[string]string
+	pc      *webrtc.PeerConnection
+	member  *Member
+	tracks  map[string]*UpTrack
+	labels  map[string]string
 	pending map[string]webrtc.ICECandidateInit
 }
 

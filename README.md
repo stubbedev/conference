@@ -67,7 +67,7 @@ BASE_URL=meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
 # Create a room (with a password). Immutable once created.
 curl -X POST https://host/api/rooms \
   -H "Authorization: Bearer $API_KEY" \
-  -d '{"name":"Standup","password":"hunter2","e2ee":true}'
+  -d '{"name":"Standup","password":"hunter2"}'
 
 # → {"slug":"abc-def-ghi","roomKey":"…","privToken":"…",
 #    "privPath":"/r/abc-def-ghi?p=…","shortPath":"/r/abc-def-ghi", …}

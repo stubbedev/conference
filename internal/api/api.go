@@ -84,14 +84,12 @@ func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
 type createRoomRequest struct {
 	Name       string `json:"name"`
 	Password   string `json:"password"`
-	E2EE       *bool  `json:"e2ee"`
 	MaxMembers int    `json:"maxMembers"`
 }
 
 type createRoomResponse struct {
 	Slug       string `json:"slug"`
 	Name       string `json:"name"`
-	E2EE       bool   `json:"e2ee"`
 	RoomKey    string `json:"roomKey"`
 	PrivToken  string `json:"privToken"`
 	PrivPath   string `json:"privPath"`
@@ -132,7 +130,6 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, createRoomResponse{
 		Slug:       room.Slug,
 		Name:       room.Name,
-		E2EE:       room.E2EE,
 		RoomKey:    roomcrypt.B64(key),
 		PrivToken:  privToken,
 		PrivPath:   "/r/" + room.Slug + "?p=" + privToken,
@@ -180,7 +177,6 @@ func buildRoom(req createRoomRequest, key []byte, privToken string) (store.Room,
 		Keyblob:    nil,
 		OpenKey:    nil,
 		PrivHash:   roomcrypt.HashToken(privToken),
-		E2EE:       req.E2EE == nil || *req.E2EE,
 		MaxMembers: req.MaxMembers,
 		CreatedAt:  time.Now(),
 	}
@@ -231,7 +227,6 @@ type roomInfoResponse struct {
 	Slug             string `json:"slug"`
 	Name             string `json:"name"`
 	RequiresPassword bool   `json:"requiresPassword"`
-	E2EE             bool   `json:"e2ee"`
 	Members          int    `json:"members"`
 	MaxMembers       int    `json:"maxMembers"`
 	AuthSalt         string `json:"authSalt,omitempty"`
@@ -248,7 +243,6 @@ func (s *Server) roomInfo(w http.ResponseWriter, r *http.Request) {
 		Slug:             room.Slug,
 		Name:             room.Name,
 		RequiresPassword: room.RequiresPassword(),
-		E2EE:             room.E2EE,
 		Members:          s.Hub.LiveCount(room.Slug),
 		MaxMembers:       room.MaxMembers,
 		AuthSalt:         "",
@@ -271,7 +265,7 @@ type authRequest struct {
 type authResponse struct {
 	Session string `json:"session"`
 	Priv    bool   `json:"priv"`
-	Key     string `json:"key,omitempty"`    // open rooms: the room key itself
+	Key     string `json:"key,omitempty"`     // open rooms: the room key itself
 	Keyblob string `json:"keyblob,omitempty"` // password rooms: sealed room key
 	KeySalt string `json:"keySalt,omitempty"`
 }
@@ -428,7 +422,6 @@ type adminRoom struct {
 	Slug             string `json:"slug"`
 	Name             string `json:"name"`
 	RequiresPassword bool   `json:"requiresPassword"`
-	E2EE             bool   `json:"e2ee"`
 	MaxMembers       int    `json:"maxMembers"`
 	CreatedAt        string `json:"createdAt"`
 	Live             int    `json:"live"`
@@ -455,7 +448,6 @@ func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 			Slug:             room.Slug,
 			Name:             room.Name,
 			RequiresPassword: room.RequiresPassword(),
-			E2EE:             room.E2EE,
 			MaxMembers:       room.MaxMembers,
 			CreatedAt:        room.CreatedAt.UTC().Format(time.RFC3339),
 			Live:             s.Hub.LiveCount(room.Slug),

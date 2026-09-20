@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Lock } from 'lucide-react'
+import { Loader2, Lock } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -15,12 +15,13 @@ import { Label } from '@/components/ui/label'
 
 interface JoinGateProps {
   open: boolean
+  busy?: boolean
   roomName: string
   error?: string
   onSubmit: (password: string) => void
 }
 
-export function JoinGate({ open, roomName, error, onSubmit }: JoinGateProps) {
+export function JoinGate({ open, busy, roomName, error, onSubmit }: JoinGateProps) {
   const [password, setPassword] = useState('')
 
   return (
@@ -39,7 +40,7 @@ export function JoinGate({ open, roomName, error, onSubmit }: JoinGateProps) {
           className="grid gap-3"
           onSubmit={(event) => {
             event.preventDefault()
-            if (password) onSubmit(password)
+            if (password && !busy) onSubmit(password)
           }}
         >
           <div className="grid gap-1.5">
@@ -54,7 +55,9 @@ export function JoinGate({ open, roomName, error, onSubmit }: JoinGateProps) {
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
           <DialogFooter>
-            <Button type="submit">Unlock and join</Button>
+            <Button type="submit" disabled={busy || !password}>
+              {busy && <Loader2 className="animate-spin" />} Unlock and join
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

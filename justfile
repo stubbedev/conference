@@ -27,18 +27,27 @@ build:
 fmt:
     gofmt -w .
 
-# Run backend + vite dev server (HMR on http://localhost:5173) with a
-# scratch database — the quickest way to try it locally. Ctrl+C stops both.
-# The backend listens on :18080 so it never fights other services for
-# 8080; vite proxies /api and /ws to it.
+# Run backend (air hot reload) + vite dev server (HMR on
+# http://localhost:5173) with a scratch database — the quickest way to
+# try it locally. Ctrl+C stops both. air rebuilds and restarts the
+# backend on every Go change and passes this shell's environment through
+# to it: :18080 so it never fights other services for 8080, an ephemeral
+# ICE port, and a scratch SQLite in /tmp. vite proxies /api and /ws to
+# it. The toolchain (go, air, just, node) comes from the flake dev shell
+# — see flake.nix.
 dev:
     #!/usr/bin/env bash
     set -euo pipefail
     (cd web && [ -d node_modules ] || npm ci)
     export PORT=18080
     export ICE_UDP_PORT=0
+    export DB_PATH=/tmp/conference-dev.db
     export BACKEND_ORIGIN=http://localhost:18080
-    DB_PATH=/tmp/conference-dev.db go run ./cmd/server &
+    if ! command -v air >/dev/null 2>&1; then
+        echo "air is missing — enter the dev shell (direnv) or: go install github.com/air-verse/air@latest" >&2
+        exit 1
+    fi
+    air &
     backend=$!
     trap 'kill "$backend" 2>/dev/null || true' EXIT
     cd web && npm run dev
