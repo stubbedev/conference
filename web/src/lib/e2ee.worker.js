@@ -12,12 +12,22 @@
 // throws in BigInt) — sender and receiver then derive different
 // keystreams and every frame, keyframes included, fails to decrypt,
 // freezing the picture permanently. The key never leaves this worker.
+//
+// The worker also counts frames processed and dropped per direction and
+// reports the last error, so the page can show exactly whether the
+// transform is the stage dropping frames on a given device.
 
 const UNPROTECTED = 1
 const BLOCK_BYTES = 16
 const SALT_BYTES = 8
 
 let cryptoKeyPromise = null
+
+const stats = { send: 0, recv: 0, dropSend: 0, dropRecv: 0, lastError: '' }
+
+setInterval(() => {
+  postMessage({ type: 'e2ee-stats', ...stats })
+}, 2000)
 
 function setKeyBytes(bytes) {
   cryptoKeyPromise = crypto.subtle.importKey('raw', bytes, 'AES-CTR', false, ['encrypt', 'decrypt'])
@@ -85,10 +95,14 @@ function pipe(transformer, encrypt) {
         const data = encrypt ? await encryptFrame(frame, state) : await decryptFrame(frame)
         frame.setData(data.buffer)
         controller.enqueue(frame)
+        if (encrypt) stats.send += 1
+        else stats.recv += 1
       } catch (err) {
         // A frame we cannot process is dropped rather than forwarded
         // in the clear.
-        console.warn('e2ee: dropping frame', err)
+        stats.lastError = String(err)
+        if (encrypt) stats.dropSend += 1
+        else stats.dropRecv += 1
       }
     },
   })

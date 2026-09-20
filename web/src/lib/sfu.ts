@@ -103,12 +103,17 @@ export class RoomClient {
   private micSender: RTCRtpSender | null = null
   private camSender: RTCRtpSender | null = null
   private state = { mic: true, cam: true, sharing: false }
+  private e2eeStats: Record<string, unknown> = {}
 
   readonly worker: Worker
 
   constructor(opts: RoomClientOptions) {
     this.opts = opts
     this.worker = new Worker(new URL('./e2ee.worker.js', import.meta.url), { type: 'module' })
+    this.worker.onmessage = (ev: MessageEvent) => {
+      const data = ev.data as { type?: string }
+      if (data?.type === 'e2ee-stats') this.e2eeStats = data
+    }
     this.worker.postMessage({ keyBytes: opts.mediaKey.slice() })
   }
 
@@ -500,5 +505,47 @@ export class RoomClient {
     } catch (err) {
       console.warn('chat: undecryptable message', err)
     }
+  }
+
+  // debugStats renders a compact diagnostic snapshot: E2EE worker frame
+  // counters plus WebRTC transport statistics for every peer connection.
+  // Built to be read from the debug overlay on a phone screen.
+  async debugStats(): Promise<string> {
+    const lines: string[] = [
+      `e2ee ${JSON.stringify(this.e2eeStats)}`,
+      `self ${this.selfId || '-'}`,
+    ]
+
+    const connections: [string, RTCPeerConnection][] = []
+    if (this.up) connections.push(['up', this.up])
+    for (const [id, down] of this.downs) connections.push([`down-${id.slice(0, 6)}`, down])
+
+    for (const [label, pc] of connections) {
+      try {
+        const stats = await pc.getStats()
+        for (const report of stats.values()) {
+          const entry = report as unknown as Record<string, unknown>
+          if (entry.type === 'inbound-rtp' && entry.kind === 'video') {
+            lines.push(
+              `${label} in/v rx:${entry.framesReceived ?? '?'} dec:${entry.framesDecoded ?? '?'} frz:${entry.freezeCount ?? '?'} pli:${entry.pliCount ?? '?'} nack:${entry.nackCount ?? '?'} loss:${entry.packetsLost ?? '?'}`,
+            )
+          }
+          if (entry.type === 'outbound-rtp' && entry.kind === 'video') {
+            lines.push(
+              `${label} out/v enc:${entry.framesEncoded ?? '?'} kb:${Math.round(Number(entry.bytesSent ?? 0) / 1024)}`,
+            )
+          }
+          if (entry.type === 'candidate-pair' && entry.state === 'succeeded') {
+            lines.push(
+              `${label} ice rtt:${Math.round(Number(entry.currentRoundTripTime ?? 0) * 1000)}ms`,
+            )
+          }
+        }
+      } catch {
+        lines.push(`${label} stats unavailable`)
+      }
+    }
+
+    return lines.join('\n')
   }
 }

@@ -43,7 +43,7 @@ import { JoinGate } from '@/components/JoinGate'
 import { ParticipantsPanel } from '@/components/ParticipantsPanel'
 import { Prejoin } from '@/components/Prejoin'
 import { ThemeToggle } from '@/components/ThemeToggle'
-import { VideoTile } from '@/components/VideoTile'
+import { toggleTileDebug, VideoTile } from '@/components/VideoTile'
 
 interface Controls {
   mic: boolean
@@ -91,6 +91,11 @@ export default function Room() {
   const [tileRatios, setTileRatios] = useState<Record<string, number>>({})
   const [fullscreen, setFullscreen] = useState(false)
   const [privileged, setPrivileged] = useState(false)
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [debugText, setDebugText] = useState('')
+  const titleTapsRef = useRef<number[]>([])
+  const copyTimerRef = useRef<number | undefined>(undefined)
+  const pageErrorsRef = useRef<string[]>([])
 
   const [displayName, setDisplayName] = usePersistentState('conference:name', randomDisplayName)
   const [devicePrefs, setDevicePrefs] = usePersistentState<DevicePrefs>(
@@ -532,6 +537,50 @@ export default function Room() {
   )
 
   useEffect(() => {
+    const record = (text: string) => {
+      pageErrorsRef.current = [...pageErrorsRef.current.slice(-9), text]
+    }
+    const onError = (event: ErrorEvent) =>
+      record(`${new Date().toLocaleTimeString()} ${event.message} @${event.lineno}`)
+    const onRejection = (event: PromiseRejectionEvent) =>
+      record(`${new Date().toLocaleTimeString()} promise ${String(event.reason)}`)
+
+    window.addEventListener('error', onError)
+    window.addEventListener('unhandledrejection', onRejection)
+
+    return () => {
+      window.removeEventListener('error', onError)
+      window.removeEventListener('unhandledrejection', onRejection)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!debugOpen) return
+
+    let alive = true
+
+    const sample = async () => {
+      const client = clientRef.current
+      const report = client
+        ? await client.debugStats().catch(() => 'stats unavailable')
+        : 'not joined yet'
+
+      if (!alive) return
+
+      setDebugText(`${report}\n--- page errors ---\n${pageErrorsRef.current.join('\n') || 'none'}`)
+    }
+
+    void sample()
+
+    const timer = window.setInterval(() => void sample(), 1000)
+
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [debugOpen, clientRef])
+
+  useEffect(() => {
     if (phase !== 'live' && phase !== 'prejoin') return
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
@@ -556,6 +605,25 @@ export default function Room() {
   const copyInvite = async () => {
     await navigator.clipboard.writeText(`${location.origin}/r/${slug}`)
     toast.success('Invite link copied')
+  }
+
+  // Five taps on the room name toggle the diagnostics panel and the
+  // per-tile overlays; a single tap still copies the invite link.
+  const onTitleTap = () => {
+    const now = Date.now()
+    titleTapsRef.current = titleTapsRef.current.filter((tap) => now - tap < 2500)
+    titleTapsRef.current.push(now)
+    window.clearTimeout(copyTimerRef.current)
+
+    if (titleTapsRef.current.length >= 5) {
+      titleTapsRef.current = []
+      setDebugOpen(!debugOpen)
+      toggleTileDebug()
+
+      return
+    }
+
+    copyTimerRef.current = window.setTimeout(() => void copyInvite(), 450)
   }
 
   const leave = () => {
@@ -725,8 +793,8 @@ export default function Room() {
         <div className="flex min-w-0 items-center gap-2">
           <button
             type="button"
-            onClick={() => void copyInvite()}
-            title="Copy invite link"
+            onClick={onTitleTap}
+            title="Copy invite link (tap 5× for diagnostics)"
             className="group -mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-sm font-medium transition-colors hover:bg-secondary"
           >
             <span className="truncate">{roomInfo?.name || slug}</span>
@@ -825,6 +893,11 @@ export default function Room() {
           onVolumeChange={handleVolumeChange}
         />
       </ControlsBar>
+      {debugOpen && (
+        <pre className="fixed bottom-20 left-2 z-50 max-h-64 w-[22rem] max-w-[90vw] overflow-auto rounded-lg bg-black/85 p-2 font-mono text-[10px] leading-tight break-all whitespace-pre-wrap text-emerald-300">
+          {debugText || 'collecting…'}
+        </pre>
+      )}
     </div>
   )
 }

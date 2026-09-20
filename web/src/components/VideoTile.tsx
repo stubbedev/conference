@@ -28,13 +28,22 @@ interface VideoTileProps {
   onAspectRatio?: (ratio: number) => void
 }
 
-// ?debug=1 renders per-tile playback diagnostics: rendered and dropped
-// frame counters plus element state. When a tile freezes these numbers
-// say which side failed — counters still climbing means frames decode
-// but the picture stopped compositing; counters frozen means frames
-// stopped arriving or decrypting.
-const DEBUG_STATS =
-  typeof location !== 'undefined' && new URLSearchParams(location.search).has('debug')
+// Debug overlays show per-tile playback diagnostics: rendered and
+// dropped frame counters plus element state. When a tile freezes these
+// numbers say which side failed — counters still climbing means frames
+// decode but the picture stopped compositing; counters frozen means
+// frames stopped arriving or decrypting.
+//
+// Enabled by "debug=1" anywhere in the URL (the room key lives in the
+// #fragment, so a trailing ?debug=1 typed after it never reaches
+// location.search), or toggled at runtime by tapping the room name
+// five times.
+let tileDebugOn = typeof location !== 'undefined' && /debug=1/.test(location.href)
+
+export function toggleTileDebug(): void {
+  tileDebugOn = !tileDebugOn
+  window.dispatchEvent(new CustomEvent('tile-debug'))
+}
 
 // rebind re-attaches a stream to a media element. Re-assigning through
 // null forces the element's playback pipeline to restart — the only
@@ -99,6 +108,7 @@ export function VideoTile({
   const onAspectRatioRef = useLatest(onAspectRatio)
   const [audioBlocked, setAudioBlocked] = useState(false)
   const [debugStats, setDebugStats] = useState('')
+  const [debugOn, setDebugOn] = useState(tileDebugOn)
   const speaking = useIsSpeaking(stream)
   const { video: videoStream, audio: audioStream } = useSplitStreams(stream)
 
@@ -202,6 +212,7 @@ export function VideoTile({
     if (!video || !videoStream || hideVideo) return
 
     let lastFrames = -1
+    let rebindAttempts = 0
 
     const watchdog = window.setInterval(() => {
       if (document.visibilityState !== 'visible' || video.paused) return
@@ -209,9 +220,16 @@ export function VideoTile({
 
       const frames = video.getVideoPlaybackQuality().totalVideoFrames
       if (lastFrames > 0 && frames === lastFrames) {
-        rebind(video, videoStream)
-        video.muted = true
-        playMediaElement(video)
+        // Stop after a couple of failed re-binds: a hard stall then
+        // shows a steady frame (or black) instead of flashing forever.
+        if (rebindAttempts < 2) {
+          rebindAttempts += 1
+          rebind(video, videoStream)
+          video.muted = true
+          playMediaElement(video)
+        }
+      } else {
+        rebindAttempts = 0
       }
 
       lastFrames = frames
@@ -221,19 +239,25 @@ export function VideoTile({
   }, [videoStream, hideVideo])
 
   useEffect(() => {
-    if (!DEBUG_STATS) return
+    const sync = () => setDebugOn(tileDebugOn)
+    window.addEventListener('tile-debug', sync)
+    return () => window.removeEventListener('tile-debug', sync)
+  }, [])
+
+  useEffect(() => {
+    if (!debugOn) return
     const video = videoRef.current
     if (!video) return
 
     const sample = () => {
       const quality = video.getVideoPlaybackQuality()
       setDebugStats(
-        `f:${quality.totalVideoFrames} d:${quality.droppedVideoFrames} rs:${video.readyState} t:${video.currentTime.toFixed(1)}`,
+        `v:${videoStream?.getVideoTracks().length ?? 0} f:${quality.totalVideoFrames} d:${quality.droppedVideoFrames} rs:${video.readyState} t:${video.currentTime.toFixed(1)}`,
       )
     }
     const timer = window.setInterval(sample, 1000)
     return () => window.clearInterval(timer)
-  }, [videoStream])
+  }, [videoStream, debugOn])
 
   return (
     <div className="group relative isolate h-full w-full">
@@ -287,7 +311,7 @@ export function VideoTile({
         <span className={cn('truncate', compact ? 'max-w-24' : 'max-w-48')}>{name}</span>
         {sharing && <span className="shrink-0 text-white/60">screen</span>}
       </div>
-      {DEBUG_STATS && debugStats && (
+      {debugOn && debugStats && (
         <span className="absolute right-2 bottom-9 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
           {debugStats}
         </span>
