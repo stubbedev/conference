@@ -293,8 +293,20 @@ async function main() {
       console.log('\nSMOKE OK: media flows both ways through the SFU with E2EE')
     }
   } finally {
-    for (const p of procs) p.kill('SIGKILL')
-    rmSync(dir, { recursive: true, force: true })
+    // Wait for the children to be gone before removing their profiles:
+    // Chrome keeps writing to its user-data-dir for a moment after
+    // SIGKILL is delivered, and a racing rm fails with ENOTEMPTY.
+    await Promise.all(
+      procs.map(
+        (p) =>
+          new Promise((done) => {
+            if (p.exitCode !== null || p.signalCode !== null) return done()
+            p.once('exit', done)
+            p.kill('SIGKILL')
+          }),
+      ),
+    )
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
 }
 
