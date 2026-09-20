@@ -78,8 +78,13 @@ release-preview:
     echo "minor:   v$maj.$((min + 1)).0"
     echo "major:   v$((maj + 1)).0.0"
 
-# Tag the current commit and push the tag (the tag push triggers
-# .github/workflows/release.yml, which publishes the Docker image).
+release-patch: (release "patch")
+release-minor: (release "minor")
+release-major: (release "major")
+
+# Run the CI gates, tag the current commit, and push the branch and the tag
+# (the tag push triggers .github/workflows/release.yml, which publishes the
+# Docker image).
 release level:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -89,12 +94,15 @@ release level:
     fi
     v="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
     IFS=. read -r maj min pat <<<"${v#v}"
-    case "{{level}}" in
+    case "{{ level }}" in
         patch) next="v$maj.$min.$((pat + 1))" ;;
         minor) next="v$maj.$((min + 1)).0" ;;
         major) next="v$((maj + 1)).0.0" ;;
         *) echo "level must be patch, minor or major" >&2; exit 1 ;;
     esac
+    echo "releasing $v -> $next"
+    just check
     git tag "$next"
+    git push origin HEAD
     git push origin "$next"
-    echo "pushed $next"
+    echo "released $next"
