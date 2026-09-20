@@ -1402,6 +1402,13 @@ func (dp *DownPeer) applyAnswer(sdp string, viewer *Member) {
 		return
 	}
 
+	flushErr := dp.ice.flush(dp.pc)
+	if flushErr != nil {
+		viewer.fail("ice-down", flushErr)
+	}
+
+	dp.offerPending = false
+
 	// Tracks added while the previous offer was in flight renegotiate now.
 	if dp.offerDirty {
 		dp.offerDirty = false

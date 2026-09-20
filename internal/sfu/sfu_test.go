@@ -165,26 +165,30 @@ func onICECandidate(member *sfu.Member, pcID string) func(*webrtc.ICECandidate) 
 	}
 }
 
+// newSampleTrack creates a dummy sample track of the given kind.
+func newSampleTrack(t *testing.T, mimeType, id string) *webrtc.TrackLocalStaticSample {
+	t.Helper()
+
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: mimeType}, id, "publisher")
+	if err != nil {
+		t.Fatalf("%s track: %v", id, err)
+	}
+
+	return track
+}
+
 func addPublisherTracks(
 	t *testing.T,
 	peerConn *webrtc.PeerConnection,
 ) (*webrtc.TrackLocalStaticSample, *webrtc.TrackLocalStaticSample) {
 	t.Helper()
 
-	audio, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "publisher")
-	if err != nil {
-		t.Fatalf("audio track: %v", err)
-	}
-
-	video, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8}, "video", "publisher")
-	if err != nil {
-		t.Fatalf("video track: %v", err)
-	}
+	audio := newSampleTrack(t, webrtc.MimeTypeOpus, "audio")
+	video := newSampleTrack(t, webrtc.MimeTypeVP8, "video")
 
 	for _, track := range []webrtc.TrackLocal{audio, video} {
-		_, err = peerConn.AddTrack(track)
+		_, err := peerConn.AddTrack(track)
 		if err != nil {
 			t.Fatalf("add track: %v", err)
 		}
@@ -233,12 +237,8 @@ func negotiateUp(t *testing.T, publisher *testPeer, peerConn *webrtc.PeerConnect
 	}
 }
 
-// publisherOffer negotiates the publisher's upstream connection with
-// one audio and one video track and returns both writers.
-func publisherOffer(
-	t *testing.T,
-	publisher *testPeer,
-) (*webrtc.TrackLocalStaticSample, *webrtc.TrackLocalStaticSample) {
+// publisherPC creates the publisher's upstream peer connection.
+func publisherPC(t *testing.T, publisher *testPeer) *webrtc.PeerConnection {
 	t.Helper()
 
 	peerConn, err := publisher.engine.NewPeerConnection()
@@ -249,10 +249,60 @@ func publisherOffer(
 	publisher.setLocal(peerConn)
 	peerConn.OnICECandidate(onICECandidate(publisher.member, "up"))
 
+	return peerConn
+}
+
+// publisherOffer negotiates the publisher's upstream connection with
+// one audio and one video track and returns both writers.
+func publisherOffer(
+	t *testing.T,
+	publisher *testPeer,
+) (*webrtc.TrackLocalStaticSample, *webrtc.TrackLocalStaticSample) {
+	t.Helper()
+
+	peerConn := publisherPC(t, publisher)
 	audio, video := addPublisherTracks(t, peerConn)
 	negotiateUp(t, publisher, peerConn)
 
 	return audio, video
+}
+
+// publishAudioOnly negotiates the upstream with a single audio track.
+func publishAudioOnly(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSample {
+	t.Helper()
+
+	peerConn := publisherPC(t, publisher)
+	audio := newSampleTrack(t, webrtc.MimeTypeOpus, "audio")
+
+	_, err := peerConn.AddTrack(audio)
+	if err != nil {
+		t.Fatalf("add audio track: %v", err)
+	}
+
+	negotiateUp(t, publisher, peerConn)
+
+	return audio
+}
+
+// addVideoTrack renegotiates the publisher's upstream with a video track.
+func addVideoTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSample {
+	t.Helper()
+
+	peerConn := publisher.localPC()
+	if peerConn == nil {
+		t.Fatal("publisher has no upstream connection")
+	}
+
+	video := newSampleTrack(t, webrtc.MimeTypeVP8, "video")
+
+	_, err := peerConn.AddTrack(video)
+	if err != nil {
+		t.Fatalf("add video track: %v", err)
+	}
+
+	negotiateUp(t, publisher, peerConn)
+
+	return video
 }
 
 // pumpMedia writes dummy frames until the track fails, so the hub sees
@@ -329,27 +379,27 @@ func isDownOffer(offer sfu.Message) bool {
 	return offer.Type == "offer" && strings.HasPrefix(offer.PC, "down-")
 }
 
-// viewerSubscribe answers every downstream offer on the same peer
-// connection (the hub renegotiates as the publisher's tracks register
-// one by one) until both a video and an audio track have arrived.
-func viewerSubscribe(
+// subscribeLoop answers every downstream offer on one peer connection
+// (the hub renegotiates as the publisher's tracks register one by one)
+// until done reports the wanted tracks have arrived. The kinds channel
+// and peer connection carry across calls so a later phase keeps the
+// same OnTrack handler and connection.
+func subscribeLoop(
 	t *testing.T,
 	viewer *testPeer,
 	engine *sfu.Engine,
-) (*webrtc.TrackRemote, *webrtc.TrackRemote) {
+	peerConn *webrtc.PeerConnection,
+	kinds chan *webrtc.TrackRemote,
+	done func(video, audio *webrtc.TrackRemote) bool,
+	stage string,
+) (*webrtc.TrackRemote, *webrtc.TrackRemote, *webrtc.PeerConnection) {
 	t.Helper()
-
-	kinds := make(chan *webrtc.TrackRemote, 4)
-
-	var peerConn *webrtc.PeerConnection
 
 	var videoTrack, audioTrack *webrtc.TrackRemote
 
-	videoOK, audioOK := false, false
-
 	deadline := time.After(testTimeout)
 
-	for !videoOK || !audioOK {
+	for !done(videoTrack, audioTrack) {
 		select {
 		case offer := <-viewer.out:
 			if !isDownOffer(offer) {
@@ -361,18 +411,39 @@ func viewerSubscribe(
 			onDownOffer(t, viewer, peerConn, offer)
 		case track := <-kinds:
 			if track.Kind() == webrtc.RTPCodecTypeVideo {
-				videoTrack, videoOK = track, true
+				videoTrack = track
 			}
 
 			if track.Kind() == webrtc.RTPCodecTypeAudio {
-				audioTrack, audioOK = track, true
+				audioTrack = track
 			}
 		case <-deadline:
-			t.Fatalf("timed out subscribing (video %v, audio %v)", videoOK, audioOK)
+			t.Fatalf("timed out waiting for %s", stage)
 		}
 	}
 
-	return videoTrack, audioTrack
+	return videoTrack, audioTrack, peerConn
+}
+
+// viewerSubscribe subscribes until both a video and an audio track
+// have arrived.
+func viewerSubscribe(
+	t *testing.T,
+	viewer *testPeer,
+	engine *sfu.Engine,
+) (*webrtc.TrackRemote, *webrtc.TrackRemote) {
+	t.Helper()
+
+	kinds := make(chan *webrtc.TrackRemote, 4)
+
+	video, audio, _ := subscribeLoop(t, viewer, engine, nil, kinds,
+		func(gotVideo, gotAudio *webrtc.TrackRemote) bool {
+			return gotVideo != nil && gotAudio != nil
+		},
+		"audio and video tracks",
+	)
+
+	return video, audio
 }
 
 // TestMediaLoopback pushes real RTP from a publisher through the hub
@@ -415,6 +486,61 @@ func TestMediaLoopback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("no RTP on %s track: %v", track.Kind(), err)
 		}
+	}
+}
+
+// TestLateVideoTrack publishes audio first and adds video through an
+// upstream renegotiation afterwards — the same shape as tracks
+// registering one by one on slow machines. The later downstream offer
+// must still reach the viewer; CI failed exactly here while the suite
+// stayed green on fast machines.
+func TestLateVideoTrack(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+
+	publisher := newTestPeer(t, hub, engine, "alice", false)
+	audioTrack := publishAudioOnly(t, publisher)
+
+	go pumpMedia(audioTrack)
+
+	viewer := newTestPeer(t, hub, engine, "bob", false)
+
+	kinds := make(chan *webrtc.TrackRemote, 4)
+
+	_, _, peerConn := subscribeLoop(t, viewer, engine, nil, kinds,
+		func(_, wantAudio *webrtc.TrackRemote) bool {
+			return wantAudio != nil
+		},
+		"audio track",
+	)
+
+	videoTrack := addVideoTrack(t, publisher)
+
+	go pumpMedia(videoTrack)
+
+	video, _, _ := subscribeLoop(t, viewer, engine, peerConn, kinds,
+		func(wantVideo, _ *webrtc.TrackRemote) bool {
+			return wantVideo != nil
+		},
+		"late video track",
+	)
+
+	err = video.SetReadDeadline(time.Now().Add(readTimeout))
+	if err != nil {
+		t.Fatalf("read deadline: %v", err)
+	}
+
+	_, _, err = video.ReadRTP()
+	if err != nil {
+		t.Fatalf("no RTP on late video track: %v", err)
 	}
 }
 
