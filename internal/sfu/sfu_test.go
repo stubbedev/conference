@@ -80,12 +80,16 @@ func (p *testPeer) pump() {
 }
 
 func (p *testPeer) addICE(msg sfu.Message) {
-	if msg.Candidate == nil || p.local == nil {
+	if msg.Candidate == nil {
 		return
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.local == nil {
+		return
+	}
 
 	if p.local.RemoteDescription() == nil {
 		p.pending = append(p.pending, *msg.Candidate)
@@ -94,6 +98,23 @@ func (p *testPeer) addICE(msg sfu.Message) {
 	}
 
 	_ = p.local.AddICECandidate(*msg.Candidate)
+}
+
+// setLocal installs the peer connection; the pump goroutine's ICE
+// handling reads it under the same mutex, so writes and reads share one
+// synchronized pattern.
+func (p *testPeer) setLocal(pc *webrtc.PeerConnection) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.local = pc
+}
+
+func (p *testPeer) localPC() *webrtc.PeerConnection {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.local
 }
 
 func (p *testPeer) setRemote(desc webrtc.SessionDescription) error {
@@ -225,7 +246,7 @@ func publisherOffer(
 		t.Fatalf("publisher pc: %v", err)
 	}
 
-	publisher.local = peerConn
+	publisher.setLocal(peerConn)
 	peerConn.OnICECandidate(onICECandidate(publisher.member, "up"))
 
 	audio, video := addPublisherTracks(t, peerConn)
@@ -295,7 +316,7 @@ func viewerPC(
 		t.Fatalf("viewer pc: %v", err)
 	}
 
-	viewer.local = subscribed
+	viewer.setLocal(subscribed)
 	subscribed.OnICECandidate(onICECandidate(viewer.member, offer.PC))
 	subscribed.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		kinds <- track
@@ -503,7 +524,7 @@ func TestKeyframeRequestForwarding(t *testing.T) {
 
 	keyframe := make(chan struct{})
 
-	for _, transceiver := range publisher.local.GetTransceivers() {
+	for _, transceiver := range publisher.localPC().GetTransceivers() {
 		sender := transceiver.Sender()
 		if sender == nil || sender.Track() == nil || sender.Track().Kind() != webrtc.RTPCodecTypeVideo {
 			continue
@@ -512,7 +533,7 @@ func TestKeyframeRequestForwarding(t *testing.T) {
 		watchKeyframeOnPublisher(sender, keyframe)
 	}
 
-	err = viewer.local.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(video.SSRC())}})
+	err = viewer.localPC().WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(video.SSRC())}})
 	if err != nil {
 		t.Fatalf("viewer pli: %v", err)
 	}

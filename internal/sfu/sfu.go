@@ -2,6 +2,7 @@ package sfu
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"maps"
 	"slices"
@@ -246,6 +247,9 @@ type Room struct {
 }
 
 func (r *Room) info() *RoomInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	return &RoomInfo{Slug: r.slug, Name: r.name, Live: len(r.members), Limit: r.limit}
 }
 
@@ -284,6 +288,7 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 		tasks: make(chan func(), taskQueueDepth),
 		done:  make(chan struct{}),
 		once:  sync.Once{},
+		mu:    sync.RWMutex{},
 		up:    nil,
 		downs: map[string]*DownPeer{},
 		state: State{Mic: false, Cam: false, Sharing: false},
@@ -372,9 +377,18 @@ func (r *Room) broadcastExcept(exceptID string, msg Message) {
 // publisher via REMB. Without it, Chrome ramps to its local maximum and
 // can saturate the uplink behind which the server sits.
 func (r *Room) startRembTicker() {
-	r.rembStop = make(chan struct{})
+	r.mu.Lock()
 
-	stop := r.rembStop
+	if r.rembStop != nil {
+		r.mu.Unlock()
+
+		return
+	}
+
+	stop := make(chan struct{})
+	r.rembStop = stop
+
+	r.mu.Unlock()
 
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
@@ -397,11 +411,12 @@ func (r *Room) sendRemb() {
 	}
 
 	for _, peer := range r.snapshot() {
-		if peer.up == nil {
+		upPeer := peer.upstream()
+		if upPeer == nil {
 			continue
 		}
 
-		ssrcs := peer.up.videoSSRCs()
+		ssrcs := upPeer.videoSSRCs()
 		if len(ssrcs) == 0 {
 			continue
 		}
@@ -412,7 +427,7 @@ func (r *Room) sendRemb() {
 			SSRCs:      ssrcs,
 		}
 
-		err := peer.up.pc.WriteRTCP([]rtcp.Packet{packet})
+		err := upPeer.pc.WriteRTCP([]rtcp.Packet{packet})
 		if err != nil {
 			log.Printf("room %s: remb: %v", r.slug, err)
 		}
@@ -452,8 +467,9 @@ func (r *Room) requestKeyframe(sourceID string) {
 	}
 
 	source.enqueue(func() {
-		if source.up != nil {
-			source.up.requestKeyframe()
+		up := source.upstream()
+		if up != nil {
+			up.requestKeyframe()
 		}
 	})
 }
@@ -474,6 +490,11 @@ type Member struct {
 	done  chan struct{}
 	once  sync.Once
 
+	// mu guards up and state for readers on other goroutines (members
+	// subscribing to this one, the REMB ticker, room joins); both are
+	// mutated only on this member's own task loop.
+	mu sync.RWMutex
+
 	up    *UpPeer
 	downs map[string]*DownPeer
 	state State
@@ -488,7 +509,13 @@ type State struct {
 
 // Info returns the wire representation of the member.
 func (m *Member) Info() MemberInfo {
-	return MemberInfo{ID: m.ID, Short: m.Short, Name: m.Name, Mic: m.state.Mic, Cam: m.state.Cam, Sharing: m.state.Sharing}
+	m.mu.RLock()
+
+	state := m.state
+
+	m.mu.RUnlock()
+
+	return MemberInfo{ID: m.ID, Short: m.Short, Name: m.Name, Mic: state.Mic, Cam: state.Cam, Sharing: state.Sharing}
 }
 
 // Handle queues a signaling message for processing on the member's own
@@ -502,6 +529,40 @@ func (m *Member) Handle(msg Message) {
 func (m *Member) Leave() {
 	m.enqueue(func() { m.teardown() })
 	m.once.Do(func() { close(m.done) })
+}
+
+// upstream returns the member's publisher connection, if any. Safe from
+// any goroutine; the field is swapped only on the member's own task loop.
+func (m *Member) upstream() *UpPeer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.up
+}
+
+// setUpstream installs or clears the publisher connection. Only called on
+// the member's own task loop; the lock publishes the write to upstream()
+// readers everywhere.
+func (m *Member) setUpstream(up *UpPeer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.up = up
+}
+
+// setStateIfChanged records the member's UI state and reports whether it
+// changed.
+func (m *Member) setStateIfChanged(next State) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.state == next {
+		return false
+	}
+
+	m.state = next
+
+	return true
 }
 
 func (m *Member) run() {
@@ -561,11 +622,9 @@ func (m *Member) handlePLI(msg Message) {
 
 func (m *Member) handleState(msg Message) {
 	next := State{Mic: msg.Mic, Cam: msg.Cam, Sharing: msg.Sharing}
-	if m.state == next {
+	if !m.setStateIfChanged(next) {
 		return
 	}
-
-	m.state = next
 
 	m.room.broadcastExcept(m.ID, Message{
 		Type: "member-state", ID: m.ID,
@@ -622,7 +681,7 @@ func (m *Member) handleUpOffer(msg Message) {
 
 // ensureUpPeer lazily creates the upstream peer connection.
 func (m *Member) ensureUpPeer() {
-	if m.up != nil {
+	if m.upstream() != nil {
 		return
 	}
 
@@ -633,13 +692,16 @@ func (m *Member) ensureUpPeer() {
 		return
 	}
 
-	m.up = &UpPeer{
-		pc:      connection,
-		member:  m,
-		tracks:  map[string]*UpTrack{},
-		labels:  map[string]string{},
-		pending: map[string]webrtc.ICECandidateInit{},
+	upPeer := &UpPeer{
+		pc:     connection,
+		member: m,
+		mu:     sync.RWMutex{},
+		tracks: map[string]*UpTrack{},
+		labels: map[string]string{},
+		ice:    newICEStash(),
 	}
+
+	m.setUpstream(upPeer)
 
 	connection.OnICECandidate(m.iceSender("up"))
 	connection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -648,7 +710,12 @@ func (m *Member) ensureUpPeer() {
 		// tracks must reach members that joined before the publisher
 		// sent media.
 		m.enqueue(func() {
-			m.up.register(receiver, track, m.up.labels)
+			publisher := m.upstream()
+			if publisher == nil {
+				return
+			}
+
+			publisher.register(receiver, track, publisher.labels)
 			m.room.notifyTracksAdded(m)
 		})
 	})
@@ -657,53 +724,55 @@ func (m *Member) ensureUpPeer() {
 // answerUp applies the publisher's offer, answers it, and fans track
 // changes out to subscribers.
 func (m *Member) answerUp(msg Message) {
+	upPeer := m.upstream()
+	if upPeer == nil {
+		return
+	}
+
 	for _, info := range msg.Tracks {
-		m.up.labels[info.Mid] = info.Kind
+		upPeer.labels[info.Mid] = info.Kind
 	}
 
 	offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: msg.SDP}
 
-	err := m.up.pc.SetRemoteDescription(offer)
+	err := upPeer.pc.SetRemoteDescription(offer)
 	if err != nil {
 		m.fail("srd", err)
 
 		return
 	}
 
-	for _, candidate := range m.up.pending {
-		candErr := m.up.pc.AddICECandidate(candidate)
-		if candErr != nil {
-			m.fail("ice-up", candErr)
-		}
+	flushErr := upPeer.ice.flush(upPeer.pc)
+	if flushErr != nil {
+		m.fail("ice-up", flushErr)
 	}
 
-	m.up.pending = map[string]webrtc.ICECandidateInit{}
-	m.up.syncTracks()
+	upPeer.syncTracks()
 
-	answer, err := m.up.pc.CreateAnswer(nil)
+	answer, err := upPeer.pc.CreateAnswer(nil)
 	if err != nil {
 		m.fail("answer", err)
 
 		return
 	}
 
-	err = m.up.pc.SetLocalDescription(answer)
+	err = upPeer.pc.SetLocalDescription(answer)
 	if err != nil {
 		m.fail("sld", err)
 
 		return
 	}
 
-	m.send(Message{Type: "answer", PC: "up", SDP: m.up.pc.LocalDescription().SDP})
+	m.send(Message{Type: "answer", PC: "up", SDP: upPeer.pc.LocalDescription().SDP})
 
 	// Also rescan after the answer: renegotiated-away tracks (screen
 	// share stopped) must be torn down and fanned out.
-	removed := m.up.pruneInactive()
+	removed := upPeer.pruneInactive()
 	for _, mid := range removed {
 		m.room.notifyTrackRemoved(m.ID, mid)
 	}
 
-	if m.up.hasTracks() {
+	if upPeer.hasTracks() {
 		m.room.notifyTracksAdded(m)
 	}
 }
@@ -727,17 +796,12 @@ func (m *Member) handleICE(msg Message) {
 
 	switch {
 	case msg.PC == "up":
-		if m.up == nil {
+		up := m.upstream()
+		if up == nil {
 			return
 		}
 
-		if m.up.pc.RemoteDescription() == nil {
-			m.up.pending[msg.Candidate.Candidate] = *msg.Candidate
-
-			return
-		}
-
-		candErr := m.up.pc.AddICECandidate(*msg.Candidate)
+		candErr := up.ice.add(up.pc, *msg.Candidate)
 		if candErr != nil {
 			m.fail("ice-up", candErr)
 		}
@@ -756,7 +820,12 @@ func (m *Member) handleICE(msg Message) {
 // forwarded, and renegotiates once.
 func (m *Member) ensureDownPeer(sourceID string) {
 	source := m.room.member(sourceID)
-	if source == nil || source.up == nil || !source.up.hasTracks() {
+	if source == nil {
+		return
+	}
+
+	sourceUp := source.upstream()
+	if sourceUp == nil || !sourceUp.hasTracks() {
 		return
 	}
 
@@ -767,7 +836,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 
 	added := false
 
-	source.up.forEachTrack(func(track *UpTrack) {
+	sourceUp.forEachTrack(func(track *UpTrack) {
 		if _, ok := down.sends[track.mid]; ok {
 			return
 		}
@@ -821,10 +890,12 @@ func (m *Member) ensureDownConnection(sourceID string) *DownPeer {
 	}
 
 	down := &DownPeer{
-		sourceID: sourceID,
-		pc:       connection,
-		sends:    map[string]*downSend{},
-		pending:  map[string]webrtc.ICECandidateInit{},
+		sourceID:     sourceID,
+		pc:           connection,
+		sends:        map[string]*downSend{},
+		ice:          newICEStash(),
+		offerPending: false,
+		offerDirty:   false,
 	}
 
 	connection.OnICECandidate(m.iceSender(down.pcID()))
@@ -872,15 +943,15 @@ func (m *Member) onPeerLeft(leftID string) {
 		_ = down.pc.Close()
 	}
 
-	if m.up != nil {
-		m.up.dropViewer(leftID)
+	if up := m.upstream(); up != nil {
+		up.dropViewer(leftID)
 	}
 }
 
 func (m *Member) teardown() {
-	if m.up != nil {
-		m.up.close()
-		m.up = nil
+	if up := m.upstream(); up != nil {
+		up.close()
+		m.setUpstream(nil)
 	}
 
 	for id, down := range m.downs {
@@ -892,14 +963,61 @@ func (m *Member) teardown() {
 	m.room.removeMember(m)
 }
 
+// iceStash buffers ICE candidates that arrive before a peer connection's
+// remote description exists, keyed by candidate string so retries are
+// idempotent. Upstream and downstream connections stage and flush
+// through this one implementation.
+type iceStash struct {
+	pending map[string]webrtc.ICECandidateInit
+}
+
+func newICEStash() iceStash {
+	return iceStash{pending: map[string]webrtc.ICECandidateInit{}}
+}
+
+// add applies the candidate right away, or stages it for flush.
+func (s *iceStash) add(pc *webrtc.PeerConnection, candidate webrtc.ICECandidateInit) error {
+	if pc.RemoteDescription() != nil {
+		err := pc.AddICECandidate(candidate)
+		if err != nil {
+			return fmt.Errorf("sfu: apply ice candidate: %w", err)
+		}
+
+		return nil
+	}
+
+	s.pending[candidate.Candidate] = candidate
+
+	return nil
+}
+
+// flush applies everything staged so far and empties the stash.
+func (s *iceStash) flush(pc *webrtc.PeerConnection) error {
+	var err error
+
+	for _, candidate := range s.pending {
+		err = errors.Join(err, pc.AddICECandidate(candidate))
+	}
+
+	s.pending = map[string]webrtc.ICECandidateInit{}
+
+	return err
+}
+
 // UpPeer is a publisher's peer connection; the client offers, the server
 // answers, media flows client-to-server.
 type UpPeer struct {
-	pc      *webrtc.PeerConnection
-	member  *Member
-	tracks  map[string]*UpTrack
-	labels  map[string]string
-	pending map[string]webrtc.ICECandidateInit
+	pc     *webrtc.PeerConnection
+	member *Member
+
+	// mu guards tracks: the map is mutated on the publisher's task loop
+	// but read from subscribers' loops and the REMB ticker. labels and
+	// ice stay on the owning loop.
+	mu     sync.RWMutex
+	tracks map[string]*UpTrack
+
+	labels map[string]string
+	ice    iceStash
 }
 
 // UpTrack is one forwarded upstream track, keyed by its SDP mid.
@@ -912,6 +1030,12 @@ type UpTrack struct {
 	mu      sync.RWMutex
 	viewers map[string]*webrtc.TrackLocalStaticRTP
 	stop    chan struct{}
+}
+
+// isVideo reports whether the track carries video (camera or screen);
+// everything that is not audio counts, including unknown kinds.
+func (ut *UpTrack) isVideo() bool {
+	return ut.kind != KindAudio
 }
 
 func (ut *UpTrack) startForwarding() {
@@ -965,17 +1089,27 @@ func (ut *UpTrack) close() {
 }
 
 func (up *UpPeer) hasTracks() bool {
-	for _, t := range up.tracks {
-		if t.kind != KindAudio {
+	tracks := up.trackSnapshot()
+	for _, t := range tracks {
+		if t.isVideo() {
 			return true
 		}
 	}
 
-	return len(up.tracks) > 0
+	return len(tracks) > 0
+}
+
+// trackSnapshot returns the registered tracks as a slice. Callers on
+// other goroutines must iterate the snapshot, never the live map.
+func (up *UpPeer) trackSnapshot() []*UpTrack {
+	up.mu.RLock()
+	defer up.mu.RUnlock()
+
+	return slices.Collect(maps.Values(up.tracks))
 }
 
 func (up *UpPeer) forEachTrack(fn func(*UpTrack)) {
-	for _, t := range up.tracks {
+	for _, t := range up.trackSnapshot() {
 		fn(t)
 	}
 }
@@ -983,8 +1117,8 @@ func (up *UpPeer) forEachTrack(fn func(*UpTrack)) {
 func (up *UpPeer) videoSSRCs() []uint32 {
 	var ssrcs []uint32
 
-	for _, track := range up.tracks {
-		if track.kind != KindAudio {
+	for _, track := range up.trackSnapshot() {
+		if track.isVideo() {
 			ssrcs = append(ssrcs, uint32(track.remote.SSRC()))
 		}
 	}
@@ -994,8 +1128,8 @@ func (up *UpPeer) videoSSRCs() []uint32 {
 
 // requestKeyframe sends PLIs for every video track of this publisher.
 func (up *UpPeer) requestKeyframe() {
-	for _, track := range up.tracks {
-		if track.kind == KindAudio {
+	for _, track := range up.trackSnapshot() {
+		if !track.isVideo() {
 			continue
 		}
 
@@ -1019,10 +1153,6 @@ func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemo
 		return
 	}
 
-	if _, ok := up.tracks[mid]; ok {
-		return
-	}
-
 	kind := labels[mid]
 	if kind == "" {
 		if track.Kind() == webrtc.RTPCodecTypeAudio {
@@ -1042,8 +1172,26 @@ func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemo
 		stop:    nil,
 	}
 
-	up.tracks[mid] = upTrack
+	if !up.addTrack(mid, upTrack) {
+		return
+	}
+
 	upTrack.startForwarding()
+}
+
+// addTrack records an upstream track unless its mid is already taken;
+// it reports whether the track was stored.
+func (up *UpPeer) addTrack(mid string, upTrack *UpTrack) bool {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+
+	if _, ok := up.tracks[mid]; ok {
+		return false
+	}
+
+	up.tracks[mid] = upTrack
+
+	return true
 }
 
 // midOf finds the SDP mid of the media section belonging to receiver.
@@ -1083,14 +1231,12 @@ func (up *UpPeer) pruneInactive() []string {
 
 	for _, transceiver := range up.pc.GetTransceivers() {
 		mid := transceiver.Mid()
-		if _, tracked := up.tracks[mid]; !tracked {
+		if !up.trackKnown(mid) {
 			continue
 		}
 
 		if transceiver.Direction() == webrtc.RTPTransceiverDirectionInactive {
-			up.tracks[mid].close()
-
-			delete(up.tracks, mid)
+			up.removeTrack(mid)
 
 			removed = append(removed, mid)
 		}
@@ -1099,15 +1245,40 @@ func (up *UpPeer) pruneInactive() []string {
 	return removed
 }
 
+func (up *UpPeer) trackKnown(mid string) bool {
+	up.mu.RLock()
+	defer up.mu.RUnlock()
+
+	_, ok := up.tracks[mid]
+
+	return ok
+}
+
+// removeTrack forgets an upstream track and stops its forwarding loop.
+func (up *UpPeer) removeTrack(mid string) {
+	up.mu.Lock()
+
+	track, found := up.tracks[mid]
+	if found {
+		delete(up.tracks, mid)
+	}
+
+	up.mu.Unlock()
+
+	if found {
+		track.close()
+	}
+}
+
 // dropViewer removes one viewer from every forwarded track.
 func (up *UpPeer) dropViewer(viewerID string) {
-	for _, track := range up.tracks {
+	for _, track := range up.trackSnapshot() {
 		track.dropViewer(viewerID)
 	}
 }
 
 func (up *UpPeer) close() {
-	for _, track := range up.tracks {
+	for _, track := range up.trackSnapshot() {
 		track.close()
 	}
 
@@ -1126,7 +1297,15 @@ type DownPeer struct {
 	sourceID string
 	pc       *webrtc.PeerConnection
 	sends    map[string]*downSend
-	pending  map[string]webrtc.ICECandidateInit
+	ice      iceStash
+
+	// offerPending is true while an offer is out awaiting the viewer's
+	// answer; offerDirty records that tracks changed in the meantime.
+	// WebRTC forbids a second SetLocalDescription(offer) before the
+	// pending one is answered, and dropping the later offer would strand
+	// the new tracks forever, so renegotiation is deferred to applyAnswer.
+	offerPending bool
+	offerDirty   bool
 }
 
 func (dp *DownPeer) pcID() string { return "down-" + dp.sourceID }
@@ -1173,6 +1352,12 @@ func (dp *DownPeer) watchKeyframeRequests(sender *webrtc.RTPSender, viewer *Memb
 
 // negotiate sends a fresh offer describing everything currently in sends.
 func (dp *DownPeer) negotiate(viewer *Member) {
+	if dp.offerPending {
+		dp.offerDirty = true
+
+		return
+	}
+
 	offer, err := dp.pc.CreateOffer(nil)
 	if err != nil {
 		viewer.fail("offer", err)
@@ -1202,6 +1387,8 @@ func (dp *DownPeer) negotiate(viewer *Member) {
 		}
 	}
 
+	dp.offerPending = true
+
 	viewer.send(Message{Type: "offer", PC: dp.pcID(), SDP: dp.pc.LocalDescription().SDP, Tracks: tracks})
 }
 
@@ -1215,24 +1402,15 @@ func (dp *DownPeer) applyAnswer(sdp string, viewer *Member) {
 		return
 	}
 
-	for _, candidate := range dp.pending {
-		candErr := dp.pc.AddICECandidate(candidate)
-		if candErr != nil {
-			viewer.fail("ice-down", candErr)
-		}
+	// Tracks added while the previous offer was in flight renegotiate now.
+	if dp.offerDirty {
+		dp.offerDirty = false
+		dp.negotiate(viewer)
 	}
-
-	dp.pending = map[string]webrtc.ICECandidateInit{}
 }
 
 func (dp *DownPeer) addICECandidate(candidate webrtc.ICECandidateInit, viewer *Member) {
-	if dp.pc.RemoteDescription() == nil {
-		dp.pending[candidate.Candidate] = candidate
-
-		return
-	}
-
-	candErr := dp.pc.AddICECandidate(candidate)
+	candErr := dp.ice.add(dp.pc, candidate)
 	if candErr != nil {
 		viewer.fail("ice-down", candErr)
 	}
