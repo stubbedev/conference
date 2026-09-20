@@ -19,6 +19,7 @@ const (
 	defaultICEUDPPort     = 5000
 	defaultMaxPublishKbps = 2500
 	defaultMaxRoomMembers = 16
+	defaultRoomTTLDays    = 365
 	defaultSessionDays    = 365
 	hoursPerDay           = 24
 )
@@ -62,6 +63,7 @@ type Config struct {
 
 	SessionTTL     time.Duration // authenticated room sessions
 	MaxRoomMembers int           // 0 means unlimited
+	RoomTTL        time.Duration // rooms older than this are reaped; 0 = keep forever
 }
 
 func env(key, def string) string {
@@ -127,6 +129,7 @@ func FromEnv() (*Config, error) {
 		AllowedOrigins: nil,
 		SessionTTL:     defaultSessionDays * hoursPerDay * time.Hour,
 		MaxRoomMembers: defaultMaxRoomMembers,
+		RoomTTL:        0,
 	}
 
 	err := applyHTTPConfig(cfg)
@@ -135,6 +138,11 @@ func FromEnv() (*Config, error) {
 	}
 
 	err = applyMediaConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	err = applyRoomConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +172,7 @@ func applyHTTPConfig(cfg *Config) error {
 	return nil
 }
 
-// applyMediaConfig fills the WebRTC and room-limit settings.
+// applyMediaConfig fills the WebRTC settings.
 func applyMediaConfig(cfg *Config) error {
 	udpPort, err := envInt("ICE_UDP_PORT", defaultICEUDPPort)
 	if err != nil {
@@ -198,6 +206,11 @@ func applyMediaConfig(cfg *Config) error {
 		cfg.MaxPublishKbps = maxPublishKbps
 	}
 
+	return nil
+}
+
+// applyRoomConfig fills the room limit and reap settings.
+func applyRoomConfig(cfg *Config) error {
 	maxRoomMembers, err := envInt("MAX_ROOM_MEMBERS", cfg.MaxRoomMembers)
 	if err != nil {
 		return err
@@ -205,6 +218,15 @@ func applyMediaConfig(cfg *Config) error {
 
 	if maxRoomMembers > 0 {
 		cfg.MaxRoomMembers = maxRoomMembers
+	}
+
+	roomTTLDays, err := envInt("ROOM_TTL_DAYS", defaultRoomTTLDays)
+	if err != nil {
+		return err
+	}
+
+	if roomTTLDays > 0 {
+		cfg.RoomTTL = time.Duration(roomTTLDays) * hoursPerDay * time.Hour
 	}
 
 	return nil

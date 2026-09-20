@@ -12,6 +12,11 @@ import (
 
 const testSlug = "abc-def-ghi"
 
+const (
+	staleRoomAge = 48 * time.Hour
+	reapCutoff   = 24 * time.Hour
+)
+
 func openTest(t *testing.T) *store.Store {
 	t.Helper()
 
@@ -137,6 +142,48 @@ func TestListRooms(t *testing.T) {
 	// Insertion order, not alphabetical.
 	if rooms[0].Slug != "b-slug" || rooms[1].Slug != "a-slug" {
 		t.Errorf("unexpected order: %q, %q", rooms[0].Slug, rooms[1].Slug)
+	}
+}
+
+func TestStaleRooms(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	storage := openTest(t)
+
+	old := passwordRoom("old-room", "p")
+	old.CreatedAt = time.Now().Add(-staleRoomAge)
+
+	err := storage.CreateRoom(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := passwordRoom("fresh-room", "p")
+	fresh.CreatedAt = time.Now()
+
+	err = storage.CreateRoom(ctx, fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	slugs, err := storage.StaleRooms(ctx, time.Now().Add(-reapCutoff))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(slugs) != 1 || slugs[0] != "old-room" {
+		t.Fatalf("stale = %v, want [old-room]", slugs)
+	}
+
+	err = storage.DeleteRoom(ctx, "old-room")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = storage.GetRoom(ctx, "fresh-room")
+	if err != nil {
+		t.Errorf("fresh room reaped: %v", err)
 	}
 }
 

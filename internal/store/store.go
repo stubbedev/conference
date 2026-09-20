@@ -217,6 +217,46 @@ func (s *Store) DeleteRoom(ctx context.Context, slug string) error {
 	return nil
 }
 
+// StaleRooms returns the slugs of rooms created before cutoff.
+func (s *Store) StaleRooms(ctx context.Context, cutoff time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT slug FROM rooms WHERE created_at < ?`, cutoff.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("store: stale rooms: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	var slugs []string
+
+	for rows.Next() {
+		var slug string
+
+		err = rows.Scan(&slug)
+		if err != nil {
+			return nil, fmt.Errorf("store: stale rooms: %w", err)
+		}
+
+		slugs = append(slugs, slug)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return nil, fmt.Errorf("store: stale rooms: %w", err)
+	}
+
+	return slugs, nil
+}
+
+// PurgeExpiredSessions deletes session grants past their expiry.
+func (s *Store) PurgeExpiredSessions(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < ?`, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("store: purge sessions: %w", err)
+	}
+
+	return nil
+}
+
 // CreateSession stores a session grant for the given opaque token.
 func (s *Store) CreateSession(ctx context.Context, token, room string, priv bool, ttl time.Duration) error {
 	sum := sha256.Sum256([]byte(token))

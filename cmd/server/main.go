@@ -26,6 +26,8 @@ import (
 const (
 	headerReadTimeout = 10 * time.Second
 	shutdownTimeout   = 5 * time.Second
+	reapInterval      = time.Hour
+	reapTimeout       = 30 * time.Second
 	indexPage         = "index.html"
 	assetsDir         = "assets/"
 	apiPrefix         = "/api/"
@@ -67,6 +69,8 @@ func run() error {
 		MaxMembers:     cfg.MaxRoomMembers,
 		MaxPublishKbps: cfg.MaxPublishKbps,
 	})
+
+	go reapLoop(database, hub, cfg.RoomTTL)
 
 	mux := buildMux(database, hub, cfg)
 
@@ -130,6 +134,62 @@ func serveUntilShutdown(srv *http.Server, hub *sfu.Hub) error {
 	hub.CloseAll()
 
 	return nil
+}
+
+// reapLoop periodically deletes expired session grants and, when a
+// room TTL is configured, rooms older than it — skipping live rooms.
+func reapLoop(database *store.Store, hub *sfu.Hub, ttl time.Duration) {
+	reapOnce(database, hub, ttl)
+
+	ticker := time.NewTicker(reapInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		reapOnce(database, hub, ttl)
+	}
+}
+
+// reapOnce removes stale, not-currently-live rooms and their sessions.
+func reapOnce(database *store.Store, hub *sfu.Hub, ttl time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), reapTimeout)
+	defer cancel()
+
+	err := database.PurgeExpiredSessions(ctx)
+	if err != nil {
+		log.Printf("reap: %v", err)
+	}
+
+	if ttl <= 0 {
+		return
+	}
+
+	slugs, err := database.StaleRooms(ctx, time.Now().Add(-ttl))
+	if err != nil {
+		log.Printf("reap: %v", err)
+
+		return
+	}
+
+	removed := 0
+
+	for _, slug := range slugs {
+		if hub.LiveCount(slug) > 0 {
+			continue
+		}
+
+		err = database.DeleteRoom(ctx, slug)
+		if err != nil {
+			log.Printf("reap: %s: %v", slug, err)
+
+			continue
+		}
+
+		removed++
+	}
+
+	if removed > 0 {
+		log.Printf("reap: removed %d room(s) older than %s", removed, ttl)
+	}
 }
 
 // spaHandler serves the embedded frontend with an index.html fallback

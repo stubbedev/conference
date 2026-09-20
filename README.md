@@ -55,6 +55,7 @@ BASE_URL=meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
 | `DB_PATH`          | `conference.db`          | SQLite database path                             |
 | `API_KEYS`         | empty                    | Comma-separated bearer keys for room creation/deletion; empty = anyone may create |
 | `JOIN_ONLY`        | `false`                  | Hide room creation on the landing page (join-only); requires `API_KEYS` |
+| `ROOM_TTL_DAYS`    | `365`                    | Rooms older than this many days are deleted hourly; live rooms are skipped; `0` keeps rooms forever |
 | `ICE_UDP_PORT`     | `5000`                   | Single UDP port for all WebRTC traffic           |
 | `EXTERNAL_IPS`     | —                        | Comma-separated public IPs advertised for ICE (NAT) |
 | `ICE_SERVERS`      | Google STUN              | JSON array of STUN/TURN servers handed to clients |
@@ -106,6 +107,12 @@ immutable; this is the only time the key and token are revealed):
   camera or screen share, kick. Keep it to the host.
 - `roomKey` and `privToken` are shown exactly once. Store both to rebuild
   the privileged link later; the server cannot re-mint them.
+
+An hourly janitor deletes rooms older than `ROOM_TTL_DAYS` (a year by
+default, matching the session lifetime) along with their sessions,
+skipping any room with a live call. Set `ROOM_TTL_DAYS=0` to keep rooms
+forever; rooms can always be deleted explicitly with
+`DELETE /api/rooms/{slug}`.
 
 ### Auth tokens
 
