@@ -89,6 +89,24 @@ export function dedupeDevices(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
   return unique
 }
 
+// Chrome on Android lists each physical camera multiple times (distinct
+// deviceIds, "Camera N, facing X" labels for the same lens), so on phones
+// the picker collapses cameras by the facing direction parsed from the
+// label — the front/back pair mobile apps present.
+export function dedupeCameras(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
+  if (!isMobileDevice()) return devices
+
+  const seen = new Set<string>()
+  return devices.filter((device) => {
+    const facing = device.label.match(/facing\s+(front|back)/i)
+    if (!facing) return true
+    const key = facing[1].toLowerCase()
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promise<void> } {
   const [groups, setGroups] = useState<DeviceGroups>({ mics: [], cams: [], speakers: [] })
 
@@ -98,7 +116,7 @@ export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promi
       const all = await navigator.mediaDevices.enumerateDevices()
       setGroups({
         mics: dedupeDevices(all.filter((d) => d.kind === 'audioinput' && d.deviceId !== '')),
-        cams: dedupeDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId !== '')),
+        cams: dedupeCameras(dedupeDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId !== ''))),
         speakers: dedupeDevices(all.filter((d) => d.kind === 'audiooutput' && d.deviceId !== '')),
       })
     } catch {

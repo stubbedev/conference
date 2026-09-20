@@ -670,3 +670,81 @@ func TestKeyframeRequestForwarding(t *testing.T) {
 		t.Fatal("publisher never received the viewer's keyframe request")
 	}
 }
+
+// watchRembOnPublisher closes capped once the publisher's video sender
+// receives a REMB at or below the cap.
+func watchRembOnPublisher(sender *webrtc.RTPSender, rembCap float64, capped chan<- struct{}) {
+	go func() {
+		for {
+			packets, _, readErr := sender.ReadRTCP()
+			if readErr != nil {
+				return
+			}
+
+			for _, packet := range packets {
+				remb, ok := packet.(*rtcp.ReceiverEstimatedMaximumBitrate)
+				if ok && float64(remb.Bitrate) <= rembCap*1.01 {
+					close(capped)
+
+					return
+				}
+			}
+		}
+	}()
+}
+
+// TestViewerRembCapsPublisher asserts that a viewer's REMB drives the REMB
+// the hub feeds the publisher: a constrained downlink must throttle the
+// publisher instead of flooding it into a frozen picture (Galène-style
+// adaptive forwarding).
+func TestViewerRembCapsPublisher(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+
+	publisher := newTestPeer(t, hub, engine, "alice", false)
+	audioTrack, videoTrack := publisherOffer(t, publisher)
+
+	go pumpMedia(audioTrack)
+	go pumpMedia(videoTrack)
+
+	viewer := newTestPeer(t, hub, engine, "bob", false)
+	video, _ := viewerSubscribe(t, viewer, engine)
+
+	const rembCap = 200_000.0
+
+	capped := make(chan struct{})
+
+	for _, transceiver := range publisher.localPC().GetTransceivers() {
+		sender := transceiver.Sender()
+		if sender == nil || sender.Track() == nil || sender.Track().Kind() != webrtc.RTPCodecTypeVideo {
+			continue
+		}
+
+		watchRembOnPublisher(sender, rembCap, capped)
+	}
+
+	err = viewer.localPC().WriteRTCP([]rtcp.Packet{
+		&rtcp.ReceiverEstimatedMaximumBitrate{
+			SenderSSRC: 1,
+			Bitrate:    rembCap,
+			SSRCs:      []uint32{uint32(video.SSRC())},
+		},
+	})
+	if err != nil {
+		t.Fatalf("viewer remb: %v", err)
+	}
+
+	select {
+	case <-capped:
+	case <-time.After(testTimeout):
+		t.Fatal("publisher never received a viewer-capped REMB")
+	}
+}

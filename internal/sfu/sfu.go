@@ -38,6 +38,16 @@ const (
 	// Minimum spacing between keyframe requests forwarded for one
 	// viewer, so a PLI burst cannot thrash the publisher's encoder.
 	keyframeRequestInterval = 200 * time.Millisecond
+
+	// Downlink rate control, following Galène's rtpconn: a per-viewer
+	// loss-driven AIMD estimate clamped by the viewer's REMB, aggregated
+	// as the minimum across viewers and fed back to the publisher. A
+	// fixed ceiling floods constrained mobile downlinks into a frozen
+	// picture no keyframe relay can recover.
+	minViewerBitrate    = 9_600
+	initViewerBitrate   = 512_000
+	minPublisherBitrate = 100_000
+	rembInterval        = time.Second
 )
 
 // Sentinel errors surfaced to signaling clients and the API layer.
@@ -391,7 +401,7 @@ func (r *Room) startRembTicker() {
 	r.mu.Unlock()
 
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(rembInterval)
 		defer ticker.Stop()
 
 		for {
@@ -405,8 +415,19 @@ func (r *Room) startRembTicker() {
 	}()
 }
 
+// publishCeilingBps converts the configured kbps ceiling into bps; a
+// missing or invalid configuration returns 0, which disables REMB.
+func publishCeilingBps(kbps int) uint64 {
+	if kbps <= 0 {
+		return 0
+	}
+
+	return uint64(kbps) * bpsPerKbps
+}
+
 func (r *Room) sendRemb() {
-	if r.cfg.MaxPublishKbps <= 0 {
+	ceiling := publishCeilingBps(r.cfg.MaxPublishKbps)
+	if ceiling == 0 {
 		return
 	}
 
@@ -423,7 +444,7 @@ func (r *Room) sendRemb() {
 
 		packet := &rtcp.ReceiverEstimatedMaximumBitrate{
 			SenderSSRC: 1,
-			Bitrate:    float32(r.cfg.MaxPublishKbps) * bpsPerKbps,
+			Bitrate:    float32(upPeer.adaptiveBitrate(ceiling)),
 			SSRCs:      ssrcs,
 		}
 
@@ -862,7 +883,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 
 		down.sends[track.mid] = &downSend{local: local, kind: track.kind}
 		track.addViewer(m.ID, local)
-		down.watchKeyframeRequests(transceiver.Sender(), m)
+		down.watchFeedback(transceiver.Sender(), m, track)
 
 		added = true
 	})
@@ -1028,8 +1049,82 @@ type UpTrack struct {
 	pc     *webrtc.PeerConnection
 
 	mu      sync.RWMutex
-	viewers map[string]*webrtc.TrackLocalStaticRTP
+	viewers map[string]*upViewer
 	stop    chan struct{}
+}
+
+// upViewer is one viewer of one forwarded track, with the downlink rate
+// state derived from that viewer's RTCP feedback.
+type upViewer struct {
+	local *webrtc.TrackLocalStaticRTP
+	rate  viewerRate
+}
+
+// viewerRate tracks a sustainable downlink bitrate for one viewer,
+// following Galène's loss-based controller: additive increase while loss
+// is low, multiplicative decrease on loss, clamped by whatever REMB the
+// viewer itself reports.
+type viewerRate struct {
+	mu   sync.Mutex
+	loss uint64 // bps, AIMD estimate from receiver reports
+	remb uint64 // bps cap from the viewer's REMB, 0 = none seen
+}
+
+// Galène's loss-controller tuning: receiver-report fraction-lost
+// thresholds (in 1/256 units) and the multiplicative rate factors
+// between them.
+const (
+	lowLossFraction  = 5
+	highLossFraction = 25
+	rateGainNum      = 269
+	rateGainDen      = 256
+	lossScale        = 512
+)
+
+func (vr *viewerRate) updateLoss(fractionLost uint8) {
+	vr.mu.Lock()
+	defer vr.mu.Unlock()
+
+	rate := vr.loss
+	if rate < minViewerBitrate {
+		rate = initViewerBitrate
+	}
+
+	if fractionLost < lowLossFraction {
+		rate = rate * rateGainNum / rateGainDen
+	} else if fractionLost > highLossFraction {
+		rate = rate * (lossScale - uint64(fractionLost)) / lossScale
+		rate = max(rate, minViewerBitrate)
+	}
+
+	vr.loss = rate
+}
+
+func (vr *viewerRate) setREMB(bitrate float64) {
+	if bitrate <= 0 {
+		return
+	}
+
+	vr.mu.Lock()
+	defer vr.mu.Unlock()
+
+	vr.remb = uint64(bitrate)
+}
+
+func (vr *viewerRate) max() uint64 {
+	vr.mu.Lock()
+	defer vr.mu.Unlock()
+
+	rate := vr.loss
+	if rate < minViewerBitrate {
+		rate = initViewerBitrate
+	}
+
+	if vr.remb != 0 && vr.remb < rate {
+		rate = vr.remb
+	}
+
+	return rate
 }
 
 // isVideo reports whether the track carries video (camera or screen);
@@ -1060,8 +1155,8 @@ func (ut *UpTrack) startForwarding() {
 
 			ut.mu.RUnlock()
 
-			for _, local := range viewers {
-				writeErr := local.WriteRTP(packet)
+			for _, viewer := range viewers {
+				writeErr := viewer.local.WriteRTP(packet)
 				if writeErr != nil {
 					log.Printf("forward: %v", writeErr)
 				}
@@ -1072,8 +1167,54 @@ func (ut *UpTrack) startForwarding() {
 
 func (ut *UpTrack) addViewer(viewerID string, local *webrtc.TrackLocalStaticRTP) {
 	ut.mu.Lock()
-	ut.viewers[viewerID] = local
-	ut.mu.Unlock()
+	defer ut.mu.Unlock()
+
+	if viewer := ut.viewers[viewerID]; viewer != nil {
+		viewer.local = local
+
+		return
+	}
+
+	ut.viewers[viewerID] = &upViewer{local: local, rate: viewerRate{mu: sync.Mutex{}, loss: 0, remb: 0}}
+}
+
+// minViewerRate returns the smallest sustainable bitrate across this
+// track's viewers, or 0 when nobody is watching.
+func (ut *UpTrack) minViewerRate() uint64 {
+	ut.mu.RLock()
+	defer ut.mu.RUnlock()
+
+	var lowest uint64
+
+	for _, viewer := range ut.viewers {
+		rate := viewer.rate.max()
+
+		if lowest == 0 || rate < lowest {
+			lowest = rate
+		}
+	}
+
+	return lowest
+}
+
+func (ut *UpTrack) setViewerREMB(viewerID string, bitrate float64) {
+	ut.mu.RLock()
+	viewer := ut.viewers[viewerID]
+	ut.mu.RUnlock()
+
+	if viewer != nil {
+		viewer.rate.setREMB(bitrate)
+	}
+}
+
+func (ut *UpTrack) updateViewerLoss(viewerID string, fractionLost uint8) {
+	ut.mu.RLock()
+	viewer := ut.viewers[viewerID]
+	ut.mu.RUnlock()
+
+	if viewer != nil {
+		viewer.rate.updateLoss(fractionLost)
+	}
 }
 
 func (ut *UpTrack) dropViewer(viewerID string) {
@@ -1126,6 +1267,35 @@ func (up *UpPeer) videoSSRCs() []uint32 {
 	return ssrcs
 }
 
+// adaptiveBitrate picks the REMB ceiling for this publisher: the room cap
+// unless a viewer's downlink forces it lower (the minimum across viewers,
+// Galène-style), never starving video entirely. Tracks nobody watches do
+// not constrain the publisher.
+func (up *UpPeer) adaptiveBitrate(ceiling uint64) uint64 {
+	rate := ceiling
+
+	for _, track := range up.trackSnapshot() {
+		if !track.isVideo() {
+			continue
+		}
+
+		viewerCap := track.minViewerRate()
+		if viewerCap == 0 {
+			continue
+		}
+
+		if viewerCap < rate {
+			rate = viewerCap
+		}
+	}
+
+	if rate < minPublisherBitrate {
+		rate = minPublisherBitrate
+	}
+
+	return rate
+}
+
 // requestKeyframe sends PLIs for every video track of this publisher.
 func (up *UpPeer) requestKeyframe() {
 	for _, track := range up.trackSnapshot() {
@@ -1167,7 +1337,7 @@ func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemo
 		kind:    kind,
 		remote:  track,
 		pc:      up.pc,
-		viewers: map[string]*webrtc.TrackLocalStaticRTP{},
+		viewers: map[string]*upViewer{},
 		mu:      sync.RWMutex{},
 		stop:    nil,
 	}
@@ -1310,13 +1480,14 @@ type DownPeer struct {
 
 func (dp *DownPeer) pcID() string { return "down-" + dp.sourceID }
 
-// watchKeyframeRequests relays a viewer's RTCP keyframe requests (PLI or
-// FIR, what a browser sends after losing video packets mid-call) to the
-// publisher. Without this relay the first lost packet leaves the viewer's
-// decoder waiting for a keyframe that never arrives, which shows up as
-// video frozen on the last decodable frame. The loop ends when the peer
-// connection closes and ReadRTCP fails.
-func (dp *DownPeer) watchKeyframeRequests(sender *webrtc.RTPSender, viewer *Member) {
+// watchFeedback relays a viewer's RTCP feedback on one forwarded track
+// to the publisher: keyframe requests (PLI or FIR, what a browser sends
+// after losing video packets mid-call) trigger upstream keyframes, while
+// REMB and receiver-report loss feed the per-viewer rate that caps the
+// publisher's bitrate. Without the relay a constrained downlink floods
+// into a frozen picture no keyframe can recover. The loop ends when the
+// peer connection closes and ReadRTCP fails.
+func (dp *DownPeer) watchFeedback(sender *webrtc.RTPSender, viewer *Member, track *UpTrack) {
 	if sender == nil {
 		return
 	}
@@ -1330,22 +1501,24 @@ func (dp *DownPeer) watchKeyframeRequests(sender *webrtc.RTPSender, viewer *Memb
 				return
 			}
 
-			needsKeyframe := false
-
 			for _, packet := range packets {
-				switch packet.(type) {
+				switch feedback := packet.(type) {
 				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
-					needsKeyframe = true
+					if time.Since(lastForward) < keyframeRequestInterval {
+						continue
+					}
+
+					lastForward = time.Now()
+
+					viewer.room.requestKeyframe(dp.sourceID)
+				case *rtcp.ReceiverEstimatedMaximumBitrate:
+					track.setViewerREMB(viewer.ID, float64(feedback.Bitrate))
+				case *rtcp.ReceiverReport:
+					for _, report := range feedback.Reports {
+						track.updateViewerLoss(viewer.ID, report.FractionLost)
+					}
 				}
 			}
-
-			if !needsKeyframe || time.Since(lastForward) < keyframeRequestInterval {
-				continue
-			}
-
-			lastForward = time.Now()
-
-			viewer.room.requestKeyframe(dp.sourceID)
 		}
 	}()
 }
