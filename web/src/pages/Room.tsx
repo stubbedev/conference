@@ -39,7 +39,7 @@ import {
   toB64,
 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
-import { RoomClient, type ChatMessage, type MemberInfo } from '@/lib/sfu'
+import { RoomClient, type ChatMessage, type MemberInfo, type ModerateAction } from '@/lib/sfu'
 import { Button } from '@/components/ui/button'
 import { ChatPanel } from '@/components/ChatPanel'
 import { ControlsBar } from '@/components/ControlsBar'
@@ -715,6 +715,33 @@ export default function Room() {
     [localStream],
   )
 
+  const settingsPopover = useMemo(
+    () => (
+      <DeviceSettingsPopover
+        devices={devices}
+        selected={devicePrefs}
+        micMeter={micMeter}
+        onChange={handleDeviceChange}
+        onResolutionChange={handleResolutionChange}
+        onVolumeChange={handleVolumeChange}
+        onMicGainChange={handleMicGainChange}
+        onEqualizerChange={handleEqualizerChange}
+        onMicMonitor={handleMicMonitor}
+      />
+    ),
+    [
+      devices,
+      devicePrefs,
+      micMeter,
+      handleDeviceChange,
+      handleResolutionChange,
+      handleVolumeChange,
+      handleMicGainChange,
+      handleEqualizerChange,
+      handleMicMonitor,
+    ],
+  )
+
   useEffect(() => {
     const record = (text: string) => {
       pageErrorsRef.current = [...pageErrorsRef.current.slice(-9), text]
@@ -779,27 +806,40 @@ export default function Room() {
     copyTimerRef.current = window.setTimeout(() => void copyInvite(), 450)
   }
 
-  const leave = () => {
+  const leave = useCallback(() => {
     clientRef.current?.leave()
     navigate('/')
-  }
+  }, [navigate])
 
-  const sendChat = async (text: string) => {
+  const sendChat = useCallback(async (text: string) => {
     await clientRef.current?.sendChat(text)
     setMessages((prev) => [
       ...prev,
       { id: `me:${Date.now()}`, name: 'You', text, ts: Date.now(), mine: true },
     ])
-  }
+  }, [])
 
-  const selfMember: MemberInfo = {
-    id: LOCAL_SOURCE,
-    short: 0,
-    name: displayName,
-    mic: controls.mic,
-    cam: controls.cam,
-    sharing: controls.sharing,
-  }
+  const moderateMember = useCallback(
+    (target: string, action: ModerateAction) => clientRef.current?.moderate(target, action),
+    [],
+  )
+
+  const toggleMic = useCallback(() => toggleTrack('mic'), [toggleTrack])
+  const toggleCam = useCallback(() => toggleTrack('cam'), [toggleTrack])
+  const toggleScreen = useCallback(() => void toggleShare(), [toggleShare])
+
+  const selfMember: MemberInfo = useMemo(
+    () => ({
+      id: LOCAL_SOURCE,
+      short: 0,
+      name: displayName,
+      mic: controls.mic,
+      cam: controls.cam,
+      sharing: controls.sharing,
+    }),
+    [displayName, controls],
+  )
+  const memberList = useMemo(() => [selfMember, ...members], [selfMember, members])
 
   const allTiles = useMemo<Tile[]>(() => {
     const list: Tile[] = []
@@ -978,10 +1018,10 @@ export default function Room() {
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <ParticipantsPanel
-            members={[selfMember, ...members]}
+            members={memberList}
             selfId={selfMember.id}
             canModerate={privileged}
-            onModerate={(target, action) => clientRef.current?.moderate(target, action)}
+            onModerate={moderateMember}
           />
           <ThemeToggle />
         </div>
@@ -1036,7 +1076,7 @@ export default function Room() {
             <aside className="absolute inset-y-0 right-0 z-40 flex w-[85%] max-w-xs flex-col bg-background shadow-xl md:static md:z-auto md:w-80 md:max-w-none md:shrink-0 md:border-l md:shadow-none">
               <ChatPanel
                 messages={messages}
-                members={[selfMember, ...members]}
+                members={memberList}
                 onSend={sendChat}
                 onClose={toggleChat}
               />
@@ -1053,24 +1093,14 @@ export default function Room() {
         unread={unread}
         fullscreen={fullscreen}
         canShare={canShare}
-        onMic={() => toggleTrack('mic')}
-        onCam={() => toggleTrack('cam')}
-        onShare={() => void toggleShare()}
+        onMic={toggleMic}
+        onCam={toggleCam}
+        onShare={toggleScreen}
         onLeave={leave}
         onToggleChat={toggleChat}
         onToggleFullscreen={toggleFullscreen}
       >
-        <DeviceSettingsPopover
-          devices={devices}
-          selected={devicePrefs}
-          micMeter={micMeter}
-          onChange={handleDeviceChange}
-          onResolutionChange={handleResolutionChange}
-          onVolumeChange={handleVolumeChange}
-          onMicGainChange={handleMicGainChange}
-          onEqualizerChange={handleEqualizerChange}
-          onMicMonitor={handleMicMonitor}
-        />
+        {settingsPopover}
       </ControlsBar>
       {debugOpen && <DiagnosticsPanel clientRef={clientRef} errorsRef={pageErrorsRef} />}
     </div>

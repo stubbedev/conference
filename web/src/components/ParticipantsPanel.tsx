@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { memo, type ReactNode } from 'react'
 import { Mic, MicOff, MonitorX, UserX, Users, Video, VideoOff } from 'lucide-react'
 
 import type { MemberInfo, ModerateAction } from '@/lib/sfu'
@@ -34,7 +34,7 @@ function actionsFor(member: MemberInfo): ActionButton[] {
   return actions
 }
 
-export function ParticipantsPanel({
+export const ParticipantsPanel = memo(function ParticipantsPanel({
   members,
   selfId,
   canModerate,
@@ -93,4 +93,4 @@ export function ParticipantsPanel({
       </PopoverContent>
     </Popover>
   )
-}
+})

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   Maximize2,
   MessageSquare,
@@ -36,7 +36,7 @@ interface ControlsBarProps {
 
 const AUTO_HIDE_MS = 3000
 
-export function ControlsBar({
+export const ControlsBar = memo(function ControlsBar({
   mic,
   cam,
   sharing,
@@ -149,4 +149,4 @@ export function ControlsBar({
       </Button>
     </footer>
   )
-}
+})

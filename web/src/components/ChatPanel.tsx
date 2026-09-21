@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { ArrowDown, Lock, MicOff, SendHorizonal, Users, VideoOff, X } from 'lucide-react'
 
 import type { ChatMessage, MemberInfo } from '@/lib/sfu'
@@ -13,7 +13,12 @@ interface ChatPanelProps {
   onClose: () => void
 }
 
-export function ChatPanel({ messages, members, onSend, onClose }: ChatPanelProps) {
+export const ChatPanel = memo(function ChatPanel({
+  messages,
+  members,
+  onSend,
+  onClose,
+}: ChatPanelProps) {
   const [text, setText] = useState('')
   const [atBottom, setAtBottom] = useState(true)
   const listRef = useRef<HTMLDivElement>(null)
@@ -139,4 +144,4 @@ export function ChatPanel({ messages, members, onSend, onClose }: ChatPanelProps
       </form>
     </div>
   )
-}
+})
