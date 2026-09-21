@@ -186,6 +186,22 @@ export function dedupeCameras(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
   })
 }
 
+function sameDeviceList(a: MediaDeviceInfo[], b: MediaDeviceInfo[]): boolean {
+  if (a.length !== b.length) return false
+  const key = (device: MediaDeviceInfo) => `${device.deviceId}:${device.label}`
+  const ka = a.map(key).sort()
+  const kb = b.map(key).sort()
+  return ka.every((k, i) => k === kb[i])
+}
+
+function sameDeviceGroups(a: DeviceGroups, b: DeviceGroups): boolean {
+  return (
+    sameDeviceList(a.mics, b.mics) &&
+    sameDeviceList(a.cams, b.cams) &&
+    sameDeviceList(a.speakers, b.speakers)
+  )
+}
+
 export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promise<void> } {
   const [groups, setGroups] = useState<DeviceGroups>({ mics: [], cams: [], speakers: [] })
 
@@ -193,11 +209,12 @@ export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promi
     if (!navigator.mediaDevices?.enumerateDevices) return
     try {
       const all = await navigator.mediaDevices.enumerateDevices()
-      setGroups({
+      const next: DeviceGroups = {
         mics: dedupeDevices(all.filter((d) => d.kind === 'audioinput' && d.deviceId !== '')),
         cams: dedupeCameras(dedupeDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId !== ''))),
         speakers: dedupeDevices(all.filter((d) => d.kind === 'audiooutput' && d.deviceId !== '')),
-      })
+      }
+      setGroups((prev) => (sameDeviceGroups(prev, next) ? prev : next))
     } catch {
       return
     }
