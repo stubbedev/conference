@@ -190,9 +190,17 @@ export default function Room() {
     [controlsRef],
   )
 
+  // Returns the previous object when nothing in the patch differs, so
+  // the re-affirmations after a device switch (same id, same facing)
+  // never re-render the settings popover or persist to storage.
   const updateDevicePrefs = useCallback(
     (patch: Partial<DevicePrefs>) => {
-      setDevicePrefs((prev) => ({ ...prev, ...patch }))
+      setDevicePrefs((prev) => {
+        const changed = (Object.keys(patch) as (keyof DevicePrefs)[]).some(
+          (key) => !Object.is(prev[key], patch[key]),
+        )
+        return changed ? { ...prev, ...patch } : prev
+      })
     },
     [setDevicePrefs],
   )
@@ -404,6 +412,10 @@ export default function Room() {
     }
   }, [])
 
+  // Stored device ids are re-validated against the device list, which
+  // is the only thing that can invalidate them: the pickers only ever
+  // store ids taken from that list, so a pref change on its own (a
+  // volume tick, an EQ drag) must not run this.
   useEffect(() => {
     const seen = seenDeviceIdsRef.current
     for (const device of [...devices.mics, ...devices.cams, ...devices.speakers]) {
@@ -413,20 +425,15 @@ export default function Room() {
       const validated = validDeviceId(list, deviceId)
       return validated === deviceId || seen.has(deviceId) ? deviceId : validated
     }
-    const next: DevicePrefs = {
-      ...devicePrefs,
-      mic: sanitize(devices.mics, devicePrefs.mic),
-      cam: sanitize(devices.cams, devicePrefs.cam),
-      speaker: sanitize(devices.speakers, devicePrefs.speaker),
-    }
-    if (
-      next.mic !== devicePrefs.mic ||
-      next.cam !== devicePrefs.cam ||
-      next.speaker !== devicePrefs.speaker
-    ) {
-      setDevicePrefs(next)
-    }
-  }, [devices, devicePrefs, setDevicePrefs])
+    setDevicePrefs((prev) => {
+      const mic = sanitize(devices.mics, prev.mic)
+      const cam = sanitize(devices.cams, prev.cam)
+      const speaker = sanitize(devices.speakers, prev.speaker)
+      return mic === prev.mic && cam === prev.cam && speaker === prev.speaker
+        ? prev
+        : { ...prev, mic, cam, speaker }
+    })
+  }, [devices, setDevicePrefs])
 
   const joinCall = useCallback(async () => {
     const stream = localStreamRef.current
@@ -824,15 +831,19 @@ export default function Room() {
     micPipelineRef.current?.setMonitoring(on)
   }, [])
 
+  // Keyed on mic presence, not stream identity: a camera switch replaces
+  // the stream but must not rebuild the meter (which would restart the
+  // level sampler and re-render the settings popover and controls bar).
+  const hasMic = Boolean(localStream?.getAudioTracks().length)
   const micMeter = useMemo<MicMeterSource | null>(
     () =>
-      localStream?.getAudioTracks().length
+      hasMic
         ? {
             level: () => micPipelineRef.current?.level() ?? 0,
             clipping: () => micPipelineRef.current?.clipping() ?? false,
           }
         : null,
-    [localStream],
+    [hasMic],
   )
 
   const settingsPopover = useMemo(
@@ -1026,6 +1037,9 @@ export default function Room() {
     const isScreen = tile.kind === SCREEN_KIND
     const member = isLocal ? selfMember : members.find((m) => m.id === tile.sourceId)
     const handlers = tileHandlers(tile.key, allTiles.length > 1)
+    // Only a remote camera tile plays audio; local and screen tiles get
+    // no sink or volume so a volume drag does not re-render them.
+    const playsAudio = !isLocal && !isScreen
     return (
       <VideoTile
         key={tile.key}
@@ -1038,8 +1052,8 @@ export default function Room() {
         micOff={!isScreen ? !(member?.mic ?? true) : false}
         camOff={!isScreen ? !(member?.cam ?? true) : false}
         sharing={isScreen}
-        sinkId={isLocal ? undefined : devicePrefs.speaker}
-        volume={isLocal ? undefined : devicePrefs.volume}
+        sinkId={playsAudio ? devicePrefs.speaker : undefined}
+        volume={playsAudio ? devicePrefs.volume : undefined}
         pinned={pinnedKey === tile.key}
         onTogglePin={handlers.canPin ? handlers.onTogglePin : undefined}
         compact={compact}

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 export function usePersistentState<T>(
   key: string,
@@ -17,20 +17,18 @@ export function usePersistentState<T>(
     }
   })
 
-  const update = useCallback(
-    (next: T | ((prev: T) => T)) => {
-      setValue((prev) => {
-        const resolved = typeof next === 'function' ? (next as (prev: T) => T)(prev) : next
-        try {
-          localStorage.setItem(key, JSON.stringify(resolved))
-        } catch {
-          return resolved
-        }
-        return resolved
-      })
-    },
-    [key],
-  )
+  // The updater is pure so React can bail out when it returns the
+  // previous value; persistence happens after the render that changed
+  // the value, which also writes a migrated shape back on first load.
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value))
+    } catch {
+      // storage full or blocked: the state still works for this session
+    }
+  }, [key, value])
+
+  const update = useCallback((next: T | ((prev: T) => T)) => setValue(next), [])
 
   return [value, update]
 }

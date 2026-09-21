@@ -139,12 +139,15 @@ export function supportsSinkSelection(): boolean {
 // Mobile browsers have device lists full of entries the page cannot
 // actually select (Android exposes communication routes as inputs and has
 // no real output switching), so device pickers are desktop-only there.
+let mobileDevice: boolean | undefined
+
 export function isMobileDevice(): boolean {
+  if (mobileDevice !== undefined) return mobileDevice
   if (typeof navigator === 'undefined') return false
-  return (
+  mobileDevice =
     /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
     (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent))
-  )
+  return mobileDevice
 }
 
 // Chrome prefixes duplicate aliases with "Default -"; collapse aliases so
