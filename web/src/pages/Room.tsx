@@ -14,6 +14,7 @@ import {
   openTrack,
   openTrackWithFallback,
   resumeAudio,
+  sanitizeEqBands,
   stopMediaStream,
   trackConstraints,
   useMediaDevices,
@@ -21,6 +22,8 @@ import {
   type CameraResolution,
   type DeviceKind,
   type DevicePrefs,
+  type EqualizerBands,
+  type MicMeterSource,
   type MicPipeline,
   type TrackKind,
 } from '@/hooks/media'
@@ -114,6 +117,7 @@ export default function Room() {
         typeof stored.volume === 'number' ? Math.min(1, Math.max(0, stored.volume)) : 1,
       micGain:
         typeof stored.micGain === 'number' ? Math.min(4, Math.max(0, stored.micGain)) : 1,
+      eqBands: sanitizeEqBands(stored.eqBands),
     }),
   )
   const [chatOpen, setChatOpen] = usePersistentState('conference:chat-open', false)
@@ -208,7 +212,7 @@ export default function Room() {
       micPipelineRef.current = null
       let outboundMic: MediaStreamTrack | null = micTrack
       if (micTrack) {
-        const pipeline = createMicPipeline(micTrack, prefs.micGain)
+        const pipeline = createMicPipeline(micTrack, prefs.micGain, prefs.eqBands)
         if (pipeline) {
           micPipelineRef.current = pipeline
           outboundMic = pipeline.track
@@ -513,7 +517,7 @@ export default function Room() {
           pipeline.rewire(track)
           outbound = pipeline.track
         } else {
-          const created = createMicPipeline(track, prefsRef.current.micGain)
+          const created = createMicPipeline(track, prefsRef.current.micGain, prefsRef.current.eqBands)
           if (created) {
             micPipelineRef.current = created
             outbound = created.track
@@ -583,7 +587,28 @@ export default function Room() {
     [updateDevicePrefs],
   )
 
-  const sampleMicLevel = useCallback((): number => micPipelineRef.current?.level() ?? 0, [])
+  const handleEqualizerChange = useCallback(
+    (bands: EqualizerBands) => {
+      updateDevicePrefs({ eqBands: bands })
+      micPipelineRef.current?.setEqualizer(bands)
+    },
+    [updateDevicePrefs],
+  )
+
+  const handleMicMonitor = useCallback((on: boolean) => {
+    micPipelineRef.current?.setMonitoring(on)
+  }, [])
+
+  const micMeter = useMemo<MicMeterSource | null>(
+    () =>
+      localStream?.getAudioTracks().length
+        ? {
+            level: () => micPipelineRef.current?.level() ?? 0,
+            clipping: () => micPipelineRef.current?.clipping() ?? false,
+          }
+        : null,
+    [localStream],
+  )
 
   useEffect(() => {
     const record = (text: string) => {
@@ -937,11 +962,13 @@ export default function Room() {
         <DeviceSettingsPopover
           devices={devices}
           selected={devicePrefs}
-          micMeter={localStream?.getAudioTracks().length ? sampleMicLevel : null}
+          micMeter={micMeter}
           onChange={handleDeviceChange}
           onResolutionChange={handleResolutionChange}
           onVolumeChange={handleVolumeChange}
           onMicGainChange={handleMicGainChange}
+          onEqualizerChange={handleEqualizerChange}
+          onMicMonitor={handleMicMonitor}
         />
       </ControlsBar>
       {debugOpen && (

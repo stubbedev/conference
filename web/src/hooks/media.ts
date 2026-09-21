@@ -11,6 +11,63 @@ export type DeviceKind = TrackKind | 'speaker'
 
 export type CameraResolution = 'auto' | '360' | '720' | '1080'
 
+export interface EqualizerBands {
+  low: number
+  mid: number
+  high: number
+}
+
+export type EqualizerPreset = 'flat' | 'voice' | 'warm' | 'bright' | 'custom'
+
+export const MIN_EQ_DB = -12
+export const MAX_EQ_DB = 12
+export const FLAT_EQ: EqualizerBands = { low: 0, mid: 0, high: 0 }
+
+export const EQ_PRESETS: Record<Exclude<EqualizerPreset, 'custom'>, EqualizerBands> = {
+  flat: { low: 0, mid: 0, high: 0 },
+  voice: { low: -3, mid: 2, high: 4 },
+  warm: { low: 3, mid: 1, high: -2 },
+  bright: { low: -2, mid: 0, high: 5 },
+}
+
+export function clampEqDb(db: number): number {
+  return Number.isFinite(db) ? Math.min(MAX_EQ_DB, Math.max(MIN_EQ_DB, Math.round(db))) : 0
+}
+
+export function clampEqBands(bands: EqualizerBands): EqualizerBands {
+  return { low: clampEqDb(bands.low), mid: clampEqDb(bands.mid), high: clampEqDb(bands.high) }
+}
+
+export function isFlatEq(bands: EqualizerBands): boolean {
+  return bands.low === 0 && bands.mid === 0 && bands.high === 0
+}
+
+export function eqPresetFor(bands: EqualizerBands): EqualizerPreset {
+  const clamped = clampEqBands(bands)
+  for (const [name, preset] of Object.entries(EQ_PRESETS) as [
+    Exclude<EqualizerPreset, 'custom'>,
+    EqualizerBands,
+  ][]) {
+    if (
+      preset.low === clamped.low &&
+      preset.mid === clamped.mid &&
+      preset.high === clamped.high
+    ) {
+      return name
+    }
+  }
+  return 'custom'
+}
+
+export function sanitizeEqBands(stored: Partial<EqualizerBands> | undefined): EqualizerBands {
+  if (!stored) return FLAT_EQ
+  return clampEqBands({
+    low: typeof stored.low === 'number' ? stored.low : 0,
+    mid: typeof stored.mid === 'number' ? stored.mid : 0,
+    high: typeof stored.high === 'number' ? stored.high : 0,
+  })
+}
+
 export interface DevicePrefs {
   mic: string
   cam: string
@@ -18,6 +75,7 @@ export interface DevicePrefs {
   resolution: CameraResolution
   volume: number
   micGain: number
+  eqBands: EqualizerBands
 }
 
 export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
@@ -27,6 +85,7 @@ export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
   resolution: 'auto',
   volume: 1,
   micGain: 1,
+  eqBands: FLAT_EQ,
 }
 
 // Mic gain is stored linear (1 = untouched) but presented in dB; the
@@ -363,26 +422,43 @@ export function resumeAudio(): void {
 }
 
 // The microphone is routed through a Web Audio graph before it reaches
-// the sender: raw capture track -> GainNode -> MediaStreamAudioDestinationNode,
-// and the destination's track is what gets published and previewed, so
-// gain applies live without re-acquiring the mic. Muting still flips
-// .enabled on the raw capture track: a disabled source track makes the
-// whole graph emit silence, so gain can never defeat mute. Everything
-// runs on the shared AudioContext, which resumeAudio() and the gesture
-// listener above unlock.
+// the sender: raw capture track -> [low shelf -> peaking -> high shelf]
+// -> GainNode -> MediaStreamAudioDestinationNode, and the destination's
+// track is what gets published and previewed, so gain, EQ and hold-to-
+// test monitoring apply live without re-acquiring the mic. With flat EQ
+// the filter chain is bypassed entirely (source straight into the gain
+// node, which is bit-exact at unity) and the filters add no algorithmic
+// latency when engaged; the analyser is a post-gain tap feeding the
+// level meter and the clipping indicator. Muting still flips .enabled
+// on the raw capture track: a disabled source track makes the whole
+// graph emit silence, so gain can never defeat mute. Everything runs on
+// the shared AudioContext, which resumeAudio() and the gesture listener
+// above unlock.
 export interface MicPipeline {
   readonly track: MediaStreamTrack
   setGain(gain: number): void
+  setEqualizer(bands: EqualizerBands): void
   setInputEnabled(enabled: boolean): void
+  setMonitoring(on: boolean): void
   rewire(rawTrack: MediaStreamTrack): void
   /** Post-gain level 0..1, for meters. */
   level(): number
+  /** Whether the post-gain signal hit full scale recently. */
+  clipping(): boolean
   dispose(): void
 }
+
+const EQ_LOW_HZ = 200
+const EQ_MID_HZ = 1000
+const EQ_MID_Q = 1
+const EQ_HIGH_HZ = 4000
+const CLIP_THRESHOLD = 0.98
+const CLIP_HOLD_MS = 1500
 
 export function createMicPipeline(
   rawTrack: MediaStreamTrack,
   gain: number,
+  eq: EqualizerBands = FLAT_EQ,
 ): MicPipeline | null {
   const ctx = audioContext()
   if (!ctx) return null
@@ -390,14 +466,40 @@ export function createMicPipeline(
   try {
     let input = rawTrack
     let source = ctx.createMediaStreamSource(new MediaStream([input]))
+    let bands = clampEqBands(eq)
+    let monitoring = false
+    let clipUntil = 0
+
     const gainNode = ctx.createGain()
+    const low = ctx.createBiquadFilter()
+    low.type = 'lowshelf'
+    low.frequency.value = EQ_LOW_HZ
+    const mid = ctx.createBiquadFilter()
+    mid.type = 'peaking'
+    mid.frequency.value = EQ_MID_HZ
+    mid.Q.value = EQ_MID_Q
+    const high = ctx.createBiquadFilter()
+    high.type = 'highshelf'
+    high.frequency.value = EQ_HIGH_HZ
+    low.connect(mid)
+    mid.connect(high)
+    high.connect(gainNode)
+
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 1024
     const destination = ctx.createMediaStreamDestination()
 
-    source.connect(gainNode)
     gainNode.connect(destination)
     gainNode.connect(analyser)
+
+    const connectSource = () => {
+      try {
+        source.disconnect()
+      } catch {
+        // already detached
+      }
+      source.connect(isFlatEq(bands) ? gainNode : low)
+    }
 
     const samples = new Uint8Array(analyser.fftSize)
     let metered = 0
@@ -407,38 +509,77 @@ export function createMicPipeline(
       setGain(value) {
         gainNode.gain.setTargetAtTime(clampMicGain(value), ctx.currentTime, 0.02)
       },
+      setEqualizer(next) {
+        bands = clampEqBands(next)
+        const now = ctx.currentTime
+        low.gain.setTargetAtTime(bands.low, now, 0.05)
+        mid.gain.setTargetAtTime(bands.mid, now, 0.05)
+        high.gain.setTargetAtTime(bands.high, now, 0.05)
+        connectSource()
+      },
       setInputEnabled(enabled) {
         input.enabled = enabled
+      },
+      setMonitoring(on) {
+        if (monitoring === on) return
+        monitoring = on
+        try {
+          if (on) gainNode.connect(ctx.destination)
+          else gainNode.disconnect(ctx.destination)
+        } catch {
+          // no monitoring edge to remove
+        }
       },
       rewire(next) {
         if (next === input) return
         const nextSource = ctx.createMediaStreamSource(new MediaStream([next]))
-        nextSource.connect(gainNode)
-        source.disconnect()
+        const oldSource = source
+        source = nextSource
+        connectSource()
+        try {
+          oldSource.disconnect()
+        } catch {
+          // already detached
+        }
         input.stop()
         input = next
-        source = nextSource
       },
       level() {
         analyser.getByteTimeDomainData(samples)
         let sum = 0
+        let peak = 0
         for (const value of samples) {
           const deviation = (value - 128) / 128
           sum += deviation * deviation
+          const magnitude = Math.abs(deviation)
+          if (magnitude > peak) peak = magnitude
         }
+        if (peak >= CLIP_THRESHOLD) clipUntil = performance.now() + CLIP_HOLD_MS
         const rms = Math.sqrt(sum / samples.length)
         metered = Math.max(rms, metered * 0.8)
         return Math.min(1, metered * 3)
       },
+      clipping() {
+        return performance.now() < clipUntil
+      },
       dispose() {
-        source.disconnect()
+        try {
+          source.disconnect()
+        } catch {
+          // already detached
+        }
+        low.disconnect()
+        mid.disconnect()
+        high.disconnect()
         gainNode.disconnect()
         analyser.disconnect()
         input.stop()
       },
     }
 
+    connectSource()
     pipeline.setGain(gain)
+    pipeline.setEqualizer(bands)
     if (ctx.state === 'suspended') installGestureRetry()
     return pipeline
   } catch {
@@ -446,28 +587,39 @@ export function createMicPipeline(
   }
 }
 
-// Polls an external level source (e.g. a mic pipeline meter) each
-// frame while mounted; re-renders only when the value actually moves.
-export function useAudioLevel(sample: (() => number) | null | undefined): number {
-  const [level, setLevel] = useState(0)
+export interface MicMeterSource {
+  level(): number
+  clipping(): boolean
+}
+
+// Polls a mic pipeline meter each frame while mounted; re-renders only
+// when the level or the clip flag actually moves.
+export function useMicMeter(meter: MicMeterSource | null | undefined): {
+  level: number
+  clipping: boolean
+} {
+  const [state, setState] = useState({ level: 0, clipping: false })
 
   useEffect(() => {
-    if (!sample) return
+    if (!meter) return
     let frame = 0
-    let last = -1
+    let lastLevel = -1
+    let lastClipping = false
     const tick = () => {
-      const next = sample()
-      if (Math.abs(next - last) >= 0.01) {
-        last = next
-        setLevel(next)
+      const level = meter.level()
+      const clipping = meter.clipping()
+      if (Math.abs(level - lastLevel) >= 0.01 || clipping !== lastClipping) {
+        lastLevel = level
+        lastClipping = clipping
+        setState({ level, clipping })
       }
       frame = requestAnimationFrame(tick)
     }
     tick()
     return () => cancelAnimationFrame(frame)
-  }, [sample])
+  }, [meter])
 
-  return level
+  return state
 }
 
 export function useIsSpeaking(stream: MediaStream | null): boolean {
