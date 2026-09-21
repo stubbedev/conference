@@ -116,10 +116,7 @@ export default function Room() {
         typeof stored.micGain === 'number' ? Math.min(4, Math.max(0, stored.micGain)) : 1,
     }),
   )
-  const [chatOpen, setChatOpen] = usePersistentState(
-    'conference:chat-open',
-    window.innerWidth >= 768,
-  )
+  const [chatOpen, setChatOpen] = usePersistentState('conference:chat-open', false)
 
   const { devices, refresh: refreshDevices } = useMediaDevices()
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
