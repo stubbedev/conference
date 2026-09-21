@@ -69,6 +69,8 @@ const SCREEN_KIND = 'screen'
 const CAMERA_KIND = 'camera'
 const LOCAL_SOURCE = 'local'
 const NO_PIN = 'none'
+const RECOVER_BACKOFF_MS = 5000
+const DEVICE_POLL_MS = 3000
 
 function supportsE2EE(): boolean {
   return 'RTCRtpScriptTransform' in window
@@ -138,6 +140,10 @@ export default function Room() {
   const chatOpenRef = useLatest(chatOpen)
   const membersRef = useLatest(members)
   const kickedRef = useRef(false)
+  const seenDeviceIdsRef = useRef<Set<string>>(new Set())
+  const lossGuardRef = useRef<Partial<Record<TrackKind, MediaStreamTrack>>>({})
+  const recoverLockRef = useRef(false)
+  const lastRecoverRef = useRef(0)
 
   const privToken = searchParams.get('p') ?? ''
   const hashKey = useMemo(() => {
@@ -175,6 +181,36 @@ export default function Room() {
       setDevicePrefs((prev) => ({ ...prev, ...patch }))
     },
     [setDevicePrefs],
+  )
+
+  const handleLocalTrackLoss = useCallback(
+    (kind: TrackKind, outbound: MediaStreamTrack) => {
+      lossGuardRef.current[kind] = undefined
+      const stream = localStreamRef.current
+      if (!stream || !stream.getTracks().includes(outbound)) return
+      stream.removeTrack(outbound)
+      if (kind === 'mic' && micPipelineRef.current?.track === outbound) {
+        micPipelineRef.current.dispose()
+        micPipelineRef.current = null
+      }
+      setLocalStream(new MediaStream(stream.getTracks()))
+      toast.warning(
+        `${DEVICE_LABELS[kind]} disconnected; it rejoins automatically when available again.`,
+      )
+      void refreshDevices()
+    },
+    [refreshDevices],
+  )
+
+  const watchLocalTrack = useCallback(
+    (kind: TrackKind, rawTrack: MediaStreamTrack, outbound: MediaStreamTrack) => {
+      lossGuardRef.current[kind] = rawTrack
+      rawTrack.addEventListener('ended', () => {
+        if (lossGuardRef.current[kind] !== rawTrack) return
+        handleLocalTrackLoss(kind, outbound)
+      })
+    },
+    [handleLocalTrackLoss],
   )
 
   const acquireMedia = useCallback(async () => {
@@ -226,11 +262,13 @@ export default function Room() {
       const stream = new MediaStream([outboundMic, camTrack].filter(Boolean) as MediaStreamTrack[])
       localStreamRef.current = stream
       setLocalStream(stream)
+      if (micTrack && outboundMic) watchLocalTrack('mic', micTrack, outboundMic)
+      if (camTrack) watchLocalTrack('cam', camTrack, camTrack)
       void refreshDevices()
     } finally {
       setMediaBusy(false)
     }
-  }, [refreshDevices, controlsRef, prefsRef])
+  }, [refreshDevices, controlsRef, prefsRef, watchLocalTrack])
 
   const bootstrap = useCallback(
     async (password?: string) => {
@@ -322,11 +360,19 @@ export default function Room() {
   }, [])
 
   useEffect(() => {
+    const seen = seenDeviceIdsRef.current
+    for (const device of [...devices.mics, ...devices.cams, ...devices.speakers]) {
+      seen.add(device.deviceId)
+    }
+    const sanitize = (list: MediaDeviceInfo[], deviceId: string) => {
+      const validated = validDeviceId(list, deviceId)
+      return validated === deviceId || seen.has(deviceId) ? deviceId : validated
+    }
     const next: DevicePrefs = {
       ...devicePrefs,
-      mic: validDeviceId(devices.mics, devicePrefs.mic),
-      cam: validDeviceId(devices.cams, devicePrefs.cam),
-      speaker: validDeviceId(devices.speakers, devicePrefs.speaker),
+      mic: sanitize(devices.mics, devicePrefs.mic),
+      cam: sanitize(devices.cams, devicePrefs.cam),
+      speaker: sanitize(devices.speakers, devicePrefs.speaker),
     }
     if (
       next.mic !== devicePrefs.mic ||
@@ -489,7 +535,13 @@ export default function Room() {
   }, [phase, toggleTrack, toggleShare, navigate, controlsRef, kickedRef])
 
   const switchDevice = useCallback(
-    async (kind: TrackKind, deviceId: string, resolution?: CameraResolution) => {
+    async (
+      kind: TrackKind,
+      deviceId: string,
+      resolution?: CameraResolution,
+      opts: { silent?: boolean } = {},
+    ) => {
+      const silent = opts.silent === true
       const prefs = prefsRef.current
       const { track, deviceId: usedId } = await openTrackWithFallback(
         kind,
@@ -497,10 +549,10 @@ export default function Room() {
         resolution ?? prefs.resolution,
       )
       if (!track) {
-        toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
+        if (!silent) toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
         return
       }
-      if (deviceId && !usedId) {
+      if (deviceId && !usedId && !silent) {
         toast(
           `That ${DEVICE_LABELS[kind].toLowerCase()} is unavailable here, using the system default.`,
         )
@@ -542,6 +594,7 @@ export default function Room() {
         setLocalStream(stream)
       }
 
+      watchLocalTrack(kind, track, outbound)
       updateDevicePrefs(
         kind === 'mic'
           ? { mic: usedId }
@@ -550,9 +603,56 @@ export default function Room() {
       setMediaError('')
       void refreshDevices()
       await clientRef.current?.replaceLocalTrack(kind, outbound)
+      clientRef.current?.setTrackEnabled(kind, controlsRef.current[kind])
+      if (silent) toast.success(`${DEVICE_LABELS[kind]} is back in the call`)
     },
-    [updateDevicePrefs, refreshDevices, controlsRef, prefsRef],
+    [updateDevicePrefs, refreshDevices, controlsRef, prefsRef, watchLocalTrack],
   )
+
+  useEffect(() => {
+    if (phase !== 'prejoin' && phase !== 'live') return
+    if (mediaBusy || recoverLockRef.current) return
+    const stream = localStreamRef.current
+    const wantsCam = !stream?.getVideoTracks().length && devices.cams.length > 0
+    const wantsMic = !stream?.getAudioTracks().length && devices.mics.length > 0
+    if (!wantsCam && !wantsMic) return
+    if (Date.now() - lastRecoverRef.current < RECOVER_BACKOFF_MS) return
+
+    lastRecoverRef.current = Date.now()
+    recoverLockRef.current = true
+    void (async () => {
+      try {
+        if (wantsCam) await switchDevice('cam', prefsRef.current.cam, undefined, { silent: true })
+        if (!localStreamRef.current?.getAudioTracks().length && devices.mics.length > 0) {
+          await switchDevice('mic', prefsRef.current.mic, undefined, { silent: true })
+        }
+      } finally {
+        recoverLockRef.current = false
+      }
+    })()
+  }, [devices, phase, localStream, mediaBusy, switchDevice, prefsRef])
+
+  useEffect(() => {
+    if (phase !== 'prejoin' && phase !== 'live') return
+    const missingTrack = () => {
+      const stream = localStreamRef.current
+      return !stream?.getVideoTracks().length || !stream?.getAudioTracks().length
+    }
+    if (!missingTrack()) return
+
+    const poll = window.setInterval(() => {
+      if (missingTrack()) void refreshDevices()
+    }, DEVICE_POLL_MS)
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible' && missingTrack()) void refreshDevices()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      window.clearInterval(poll)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [phase, localStream, refreshDevices])
 
   const handleDeviceChange = useCallback(
     (kind: DeviceKind, deviceId: string) => {
