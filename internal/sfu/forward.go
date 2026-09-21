@@ -3,6 +3,7 @@ package sfu
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"sync"
@@ -72,6 +73,8 @@ func (f *forwardTrack) Kind() webrtc.RTPCodecType { return f.kind }
 func (f *forwardTrack) Bind(ctx webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, error) {
 	codec, ok := matchCodec(f.codec, ctx.CodecParameters())
 	if !ok {
+		log.Printf("sfu: bind track=%s codec=%s: no matching codec among %d negotiated", f.id, f.codec.MimeType, len(ctx.CodecParameters()))
+
 		return webrtc.RTPCodecParameters{}, errNoCodecMatch
 	}
 
@@ -91,6 +94,8 @@ func (f *forwardTrack) Bind(ctx webrtc.TrackLocalContext) (webrtc.RTPCodecParame
 	}
 	f.mu.Unlock()
 
+	log.Printf("sfu: bind track=%s ssrc=%d pt=%d codec=%s exts=%d", f.id, ctx.SSRC(), codec.PayloadType, codec.MimeType, len(extIDs))
+
 	return codec, nil
 }
 
@@ -103,9 +108,22 @@ func (f *forwardTrack) Unbind(webrtc.TrackLocalContext) error {
 	return nil
 }
 
+// midExtensionURI names the sdes:mid header extension. Its value
+// identifies an m-line of the peer connection that produced the packet,
+// so it is only meaningful inside that negotiation: the downstream
+// m-line numbering routinely differs from the publisher's (tracks are
+// added in whatever order they register), and a forwarded mid value
+// makes browsers demux bundled RTP onto the wrong receiver — audio
+// packets cached onto the video m-line decode as nothing and the call
+// goes one-way until reload. Viewers fall back to the a=ssrc lines the
+// downstream offer announces per m-line, which are per-viewer and
+// always correct, so the extension is stripped rather than re-numbered.
+const midExtensionURI = "urn:ietf:params:rtp-hdrext:sdes:mid"
+
 // WriteRTP forwards one publisher packet. srcExtURIs maps the
 // publisher's negotiated extension IDs to their URIs; extensions the
-// viewer also negotiated are re-numbered, the rest are dropped. Packets
+// viewer also negotiated are re-numbered, the mid extension is
+// stripped (see midExtensionURI), and the rest are dropped. Packets
 // written before Bind are discarded silently, matching pion's own
 // TrackLocalStaticRTP.
 func (f *forwardTrack) WriteRTP(packet *rtp.Packet, srcExtURIs map[uint8]string) error {
@@ -126,7 +144,7 @@ func (f *forwardTrack) WriteRTP(packet *rtp.Packet, srcExtURIs map[uint8]string)
 
 	for _, srcID := range packet.GetExtensionIDs() {
 		uri, known := srcExtURIs[srcID]
-		if !known {
+		if !known || uri == midExtensionURI {
 			continue
 		}
 

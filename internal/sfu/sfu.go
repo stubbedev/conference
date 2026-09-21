@@ -736,7 +736,7 @@ func (m *Member) ensureUpPeer() {
 				return
 			}
 
-			publisher.register(receiver, track, publisher.labels)
+			publisher.register(receiver, track, publisher.labels, "ontrack")
 			m.room.notifyTracksAdded(m)
 		})
 	})
@@ -847,6 +847,8 @@ func (m *Member) ensureDownPeer(sourceID string) {
 
 	sourceUp := source.upstream()
 	if sourceUp == nil || !sourceUp.hasTracks() {
+		log.Printf("sfu: down %s viewer=%.6s source=%.6s skipped (no tracks)", m.room.slug, m.ID, sourceID)
+
 		return
 	}
 
@@ -855,7 +857,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		return
 	}
 
-	added := false
+	beforeSends := len(down.sends)
 
 	sourceUp.forEachTrack(func(track *UpTrack) {
 		if _, ok := down.sends[track.mid]; ok {
@@ -879,11 +881,13 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		down.sends[track.mid] = &downSend{local: local, kind: track.kind}
 		track.addViewer(m.ID, local)
 		down.watchFeedback(transceiver.Sender(), m, track)
-
-		added = true
 	})
 
-	if added {
+	added := len(down.sends) - beforeSends
+
+	if added > 0 {
+		log.Printf("sfu: down %s viewer=%.6s source=%.6s added=%d negotiating", m.room.slug, m.ID, sourceID, added)
+
 		down.negotiate(m)
 	}
 
@@ -1136,6 +1140,8 @@ func (ut *UpTrack) startForwarding() {
 	ut.stop = make(chan struct{})
 
 	go func() {
+		first := true
+
 		for {
 			select {
 			case <-ut.stop:
@@ -1145,7 +1151,15 @@ func (ut *UpTrack) startForwarding() {
 
 			packet, _, err := ut.remote.ReadRTP()
 			if err != nil {
+				log.Printf("sfu: forward loop mid=%s kind=%s ended: %v", ut.mid, ut.kind, err)
+
 				return // peer connection closed
+			}
+
+			if first {
+				first = false
+
+				log.Printf("sfu: first packet mid=%s kind=%s ssrc=%d pt=%d", ut.mid, ut.kind, packet.SSRC, packet.PayloadType)
 			}
 
 			ut.mu.RLock()
@@ -1316,9 +1330,11 @@ func (up *UpPeer) requestKeyframe() {
 
 // register records a discovered upstream track. Idempotent per mid;
 // called both from the post-SRD scan and from OnTrack.
-func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemote, labels map[string]string) {
+func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemote, labels map[string]string, via string) {
 	mid := up.midOf(receiver)
 	if mid == "" {
+		log.Printf("sfu: register member %.6s via=%s ssrc=%d: no mid, dropped", up.member.ID, via, track.SSRC())
+
 		return
 	}
 
@@ -1345,6 +1361,8 @@ func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemo
 	if !up.addTrack(mid, upTrack) {
 		return
 	}
+
+	log.Printf("sfu: register %s member %s via=%s mid=%s kind=%s ssrc=%d", up.member.room.slug, up.member.ID, via, mid, kind, track.SSRC())
 
 	upTrack.startForwarding()
 }
@@ -1389,7 +1407,7 @@ func (up *UpPeer) syncTracks() {
 		}
 
 		if track := receiver.Track(); track != nil {
-			up.register(receiver, track, up.labels)
+			up.register(receiver, track, up.labels, "sync")
 		}
 	}
 }
@@ -1523,6 +1541,55 @@ func (dp *DownPeer) watchFeedback(sender *webrtc.RTPSender, viewer *Member, trac
 	}()
 }
 
+// sdpSection accumulates the fingerprint fields of one media section.
+type sdpSection struct {
+	label   string
+	hasSSRC bool
+}
+
+func (s *sdpSection) apply(line string) {
+	switch {
+	case strings.HasPrefix(line, "m="):
+		s.label = strings.TrimPrefix(line, "m=")
+	case strings.HasPrefix(line, "a=mid:"):
+		s.label += " mid=" + strings.TrimPrefix(line, "a=mid:")
+	case isDirection(line):
+		s.label += " " + strings.TrimPrefix(line, "a=")
+	case strings.HasPrefix(line, "a=ssrc:") && !s.hasSSRC:
+		fields := strings.SplitN(strings.TrimPrefix(line, "a=ssrc:"), " ", 2)
+		s.label += " ssrc=" + fields[0]
+		s.hasSSRC = true
+	}
+}
+
+func isDirection(line string) bool {
+	return line == "a=sendonly" || line == "a=recvonly" || line == "a=sendrecv" || line == "a=inactive"
+}
+
+// sdpFingerprint renders the m-line layout of an SDP compactly for
+// logging: media kind, mid, direction and declared SSRCs per section.
+func sdpFingerprint(sdp string) string {
+	var sections []string
+
+	current := sdpSection{label: "", hasSSRC: false}
+
+	for line := range strings.SplitSeq(sdp, "\r\n") {
+		line = strings.TrimSpace(line)
+
+		if strings.HasPrefix(line, "m=") && current.label != "" {
+			sections = append(sections, current.label)
+		}
+
+		current.apply(line)
+	}
+
+	if current.label != "" {
+		sections = append(sections, current.label)
+	}
+
+	return strings.Join(sections, "; ")
+}
+
 // negotiate sends a fresh offer describing everything currently in sends.
 func (dp *DownPeer) negotiate(viewer *Member) {
 	if dp.offerPending {
@@ -1562,7 +1629,11 @@ func (dp *DownPeer) negotiate(viewer *Member) {
 
 	dp.offerPending = true
 
-	viewer.send(Message{Type: "offer", PC: dp.pcID(), SDP: dp.pc.LocalDescription().SDP, Tracks: tracks})
+	sdp := dp.pc.LocalDescription().SDP
+
+	log.Printf("sfu: offer %s viewer=%.6s source=%.6s [%s]", viewer.room.slug, viewer.ID, dp.sourceID, sdpFingerprint(sdp))
+
+	viewer.send(Message{Type: "offer", PC: dp.pcID(), SDP: sdp, Tracks: tracks})
 }
 
 func (dp *DownPeer) applyAnswer(sdp string, viewer *Member) {

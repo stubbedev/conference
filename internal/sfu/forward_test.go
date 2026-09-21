@@ -67,8 +67,8 @@ func negotiatedExtensionID(t *testing.T, params webrtc.RTPParameters, uri, side 
 
 // publishWithBrowserExtmap negotiates an audio-only upstream from a
 // publisher using browserLikeAPI and returns the track plus the
-// audio-level extension ID that publisher negotiated.
-func publishWithBrowserExtmap(t *testing.T, publisher *testPeer) (*webrtc.TrackLocalStaticRTP, uint8) {
+// audio-level and mid extension IDs that publisher negotiated.
+func publishWithBrowserExtmap(t *testing.T, publisher *testPeer) (*webrtc.TrackLocalStaticRTP, uint8, uint8) {
 	t.Helper()
 
 	publisherPC, err := browserLikeAPI(t).NewPeerConnection(webrtc.Configuration{})
@@ -93,7 +93,11 @@ func publishWithBrowserExtmap(t *testing.T, publisher *testPeer) (*webrtc.TrackL
 
 	negotiateUp(t, publisher, publisherPC)
 
-	return audio, negotiatedExtensionID(t, sender.GetParameters().RTPParameters, audioLevelURI, "publisher")
+	params := sender.GetParameters().RTPParameters
+
+	return audio,
+		negotiatedExtensionID(t, params, audioLevelURI, "publisher"),
+		negotiatedExtensionID(t, params, sdesMidURI, "publisher")
 }
 
 // receiverParams returns the negotiated parameters of the receiver that
@@ -130,7 +134,7 @@ func TestForwardRewritesHeaderExtensionIDs(t *testing.T) {
 	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
 
 	publisher := newTestPeer(t, hub, engine, "alice", false)
-	audio, publisherLevelID := publishWithBrowserExtmap(t, publisher)
+	audio, publisherLevelID, _ := publishWithBrowserExtmap(t, publisher)
 
 	go pumpRTPWithExtension(audio, publisherLevelID)
 
@@ -160,6 +164,53 @@ func TestForwardRewritesHeaderExtensionIDs(t *testing.T) {
 	assertOnlyExtension(t, packet, viewerLevelID)
 }
 
+// TestForwardStripsMidExtension pins the fix for the one-way blackout:
+// the sdes:mid value names an m-line of the publisher's connection, so
+// forwarding it (re-numbered into the viewer's extmap) makes browsers
+// demux bundled RTP by a mid from a different m-line numbering — audio
+// packets land on the video receiver, decode as nothing, and the call
+// stays silent until reload. The extension must be stripped; the viewer
+// demuxes by the a=ssrc lines the downstream offer announces.
+func TestForwardStripsMidExtension(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+
+	publisher := newTestPeer(t, hub, engine, "carol", false)
+	audio, publisherLevelID, publisherMidID := publishWithBrowserExtmap(t, publisher)
+
+	go pumpRTPWithMid(audio, publisherLevelID, publisherMidID)
+
+	viewer := newTestPeer(t, hub, engine, "dave", false)
+	kinds := make(chan *webrtc.TrackRemote, 4)
+
+	_, audioRemote, viewerPC := subscribeLoop(t, viewer, engine, nil, kinds,
+		func(_, gotAudio *webrtc.TrackRemote) bool { return gotAudio != nil },
+		"audio track",
+	)
+
+	viewerLevelID := negotiatedExtensionID(t, receiverParams(t, viewerPC, audioRemote), audioLevelURI, "viewer")
+
+	err = audioRemote.SetReadDeadline(time.Now().Add(readTimeout))
+	if err != nil {
+		t.Fatalf("read deadline: %v", err)
+	}
+
+	packet, _, err := audioRemote.ReadRTP()
+	if err != nil {
+		t.Fatalf("no audio RTP at viewer: %v", err)
+	}
+
+	assertOnlyExtension(t, packet, viewerLevelID)
+}
+
 // assertOnlyExtension checks that packet carries exactly one header
 // extension, the audio level under wantID.
 func assertOnlyExtension(t *testing.T, packet *rtp.Packet, wantID uint8) {
@@ -173,6 +224,38 @@ func assertOnlyExtension(t *testing.T, packet *rtp.Packet, wantID uint8) {
 	level := packet.GetExtension(wantID)
 	if len(level) != 1 || level[0] != audioLevelByte {
 		t.Fatalf("audio-level payload = %x, want %x", level, audioLevelByte)
+	}
+}
+
+// pumpRTPWithMid writes Opus-sized RTP packets carrying both an
+// audio-level extension and a mid extension stamped with the
+// publisher's own m-line numbering, the way a browser does.
+func pumpRTPWithMid(track *webrtc.TrackLocalStaticRTP, levelID, midID uint8) {
+	ticker := time.NewTicker(opusPacketMs * time.Millisecond)
+	defer ticker.Stop()
+
+	var seq uint16
+
+	for range ticker.C {
+		header := rtp.Header{Version: 2, SequenceNumber: seq, Timestamp: uint32(seq) * opusFrameTicks}
+		packet := &rtp.Packet{Header: header, Payload: make([]byte, opusBytes)}
+
+		err := packet.SetExtension(levelID, []byte{audioLevelByte})
+		if err != nil {
+			return
+		}
+
+		err = packet.SetExtension(midID, []byte("0"))
+		if err != nil {
+			return
+		}
+
+		err = track.WriteRTP(packet)
+		if err != nil {
+			return
+		}
+
+		seq++
 	}
 }
 

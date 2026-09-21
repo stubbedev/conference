@@ -6,7 +6,7 @@
 // browser, an SFU that forwards packets the receiver drops, a tile
 // rendered twice — none of which unit tests or type checks can see.
 //
-//   node web/e2e/smoke.mjs [--server path/to/binary] [--chrome binary] [--seconds N]
+//   node web/e2e/smoke.mjs [--server path/to/binary] [--chrome binary] [--seconds N] [--stagger MS]
 //
 // Without --server the binary is built with `go build`. Chrome needs
 // no network access; the server listens on 127.0.0.1 with ephemeral
@@ -22,6 +22,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 const args = parseArgs(process.argv.slice(2))
 const seconds = Number(args.seconds ?? 8)
+const stagger = Number(args.stagger ?? 500)
 const chromeBinary = args.chrome ?? process.env.CHROME ?? findChrome()
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -159,8 +160,22 @@ async function launchChrome(idx, dir) {
 const hook = `
 (() => {
   window.__pcs = [];
+  window.__pcStates = [];
   const OrigPC = window.RTCPeerConnection;
-  window.RTCPeerConnection = function (...a) { const pc = new OrigPC(...a); window.__pcs.push(pc); return pc; };
+  window.RTCPeerConnection = function (...a) {
+    const pc = new OrigPC(...a);
+    window.__pcs.push(pc);
+    const st = { events: [] };
+    const record = (what) => st.events.push(
+      Math.round(performance.now()) + ' ' + what +
+      ' sig=' + pc.signalingState + ' ice=' + pc.iceConnectionState + ' conn=' + pc.connectionState,
+    );
+    pc.addEventListener('connectionstatechange', () => record('conn'));
+    pc.addEventListener('iceconnectionstatechange', () => record('ice'));
+    pc.addEventListener('signalingstatechange', () => record('sig'));
+    window.__pcStates.push(st);
+    return pc;
+  };
   window.RTCPeerConnection.prototype = OrigPC.prototype;
   const OrigWorker = window.Worker;
   window.Worker = function (...a) {
@@ -177,9 +192,29 @@ const hook = `
 
 const probe = `
 (async () => {
-  const out = { videos: [], audioPackets: 0, videoDecoded: 0, e2ee: window.__e2ee || null, errors: window.__errors };
+  const out = { videos: [], audioPackets: 0, videoDecoded: 0, e2ee: window.__e2ee || null, errors: window.__errors, pcs: [] };
   for (const v of document.querySelectorAll('video')) {
     out.videos.push({ frames: v.getVideoPlaybackQuality().totalVideoFrames, w: v.videoWidth, h: v.videoHeight, paused: v.paused });
+  }
+  for (const [i, pc] of window.__pcs.entries()) {
+    const s = {
+      i,
+      sig: pc.signalingState,
+      ice: pc.iceConnectionState,
+      conn: pc.connectionState,
+      senders: pc.getSenders().filter((x) => x.track).length,
+      events: (window.__pcStates[i]?.events ?? []).slice(-8),
+    };
+    for (const r of (await pc.getStats()).values()) {
+      if (r.type === 'inbound-rtp') {
+        s['in_' + r.kind] = r.packetsReceived || 0
+        s['ssrc_' + r.kind] = r.ssrc
+        s['bytes_' + r.kind] = r.bytesReceived || 0
+      }
+      if (r.type === 'outbound-rtp') s['out_' + r.kind] = r.bytesSent || 0
+    }
+    s.recv_kinds = pc.getReceivers().map((x) => x.track?.kind ?? '?').join(',')
+    out.pcs.push(s);
   }
   for (const pc of window.__pcs) {
     for (const r of (await pc.getStats()).values()) {
@@ -251,7 +286,7 @@ async function main() {
 
     for (const b of browsers) {
       await joinRoom(b, url)
-      await sleep(500)
+      await sleep(stagger)
     }
 
     await sleep(seconds * 1000)
@@ -287,6 +322,11 @@ async function main() {
     if (failures.length) {
       console.error('\nSMOKE FAILED')
       for (const f of failures) console.error('  - ' + f)
+      for (const [i, s] of first.entries()) {
+        if (s.audioPackets === 0 || !s.e2ee || s.e2ee.recv === 0) {
+          console.error(`browser ${i} peer connections: ${JSON.stringify(s.pcs)}`)
+        }
+      }
       console.error('\nserver log tail:\n' + server.log().split('\n').slice(-20).join('\n'))
       process.exitCode = 1
     } else {
