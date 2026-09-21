@@ -82,9 +82,11 @@ release-patch: (release "patch")
 release-minor: (release "minor")
 release-major: (release "major")
 
-# Run the CI gates, tag the current commit, and push the branch and the tag
-# (the tag push triggers .github/workflows/release.yml, which publishes the
-# Docker image).
+# Run the CI gates, commit the rebuilt web bundle (the tracked
+# web/dist/index.html picks up the new asset hashes from the check's
+# build), tag that commit, and push the branch and the tag (the tag push
+# triggers .github/workflows/release.yml, which publishes the Docker
+# image).
 release level:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -102,6 +104,11 @@ release level:
     esac
     echo "releasing $v -> $next"
     just check
+    git add web/dist/index.html
+    if ! git diff --cached --quiet -- web/dist/index.html; then
+        git commit -m "release $next: update web bundle"
+        echo "committed rebuilt web/dist/index.html"
+    fi
     git tag "$next"
     git push origin HEAD
     git push origin "$next"
