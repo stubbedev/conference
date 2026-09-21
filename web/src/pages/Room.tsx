@@ -240,6 +240,15 @@ export default function Room() {
       const camFacing = mobile
         ? prefs.camFacing || facingFromLabel(chosenCam?.label ?? '') || undefined
         : undefined
+      if (mobile) {
+        // Android lets a page hold one camera at a time: a retry that
+        // asks for the other lens while the current one is still
+        // capturing fails outright, so release everything first.
+        lossGuardRef.current = {}
+        micPipelineRef.current?.dispose()
+        micPipelineRef.current = null
+        stopMediaStream(localStreamRef.current)
+      }
       const combined = await navigator.mediaDevices
         .getUserMedia({
           audio: trackConstraints('mic', prefs.mic),
@@ -286,9 +295,10 @@ export default function Room() {
       setLocalStream(stream)
       if (micTrack && outboundMic) watchLocalTrack('mic', micTrack, outboundMic)
       if (camTrack) watchLocalTrack('cam', camTrack, camTrack)
-      if (camTrack && mobile && (prefs.cam || prefs.camFacing)) {
+      if (camTrack && mobile) {
         // Remember the facing of the camera that actually opened so the
-        // next page load (iOS rotates deviceIds) restores the same lens.
+        // picker names the live lens and the next page load (iOS rotates
+        // deviceIds) restores the same one.
         const facing = facingFromTrack(camTrack) ?? camFacing
         const cams = devicesRef.current.cams
         let cam = prefs.cam
@@ -592,13 +602,48 @@ export default function Room() {
                 (deviceId === prefs.cam ? prefs.camFacing || undefined : undefined))
               : undefined))
           : undefined
-      const { track, deviceId: usedId, facing: usedFacing, fallback } = await openTrackWithFallback(
+      // Android (and iOS) let a page hold one camera at a time: while the
+      // current lens is still capturing, opening the other one fails with
+      // NotReadableError and only the already-open lens can be "opened"
+      // again, which is how picking the back camera used to land on the
+      // front one with a fallback toast. Release the current camera
+      // first, and put it back if the new one does not start.
+      const live = localStreamRef.current
+      const previous = kind === 'cam' && isMobileDevice() ? live?.getVideoTracks()[0] : undefined
+      let previousOpen: { deviceId: string; facing?: CameraFacing } | undefined
+      if (previous) {
+        previousOpen = {
+          deviceId: previous.getSettings().deviceId ?? '',
+          facing: facingFromTrack(previous),
+        }
+        lossGuardRef.current.cam = undefined
+        previous.stop()
+      }
+      let opened = await openTrackWithFallback(
         kind,
         deviceId,
         resolution ?? prefs.resolution,
         requestedFacing,
       )
+      if (!opened.track && previousOpen) {
+        const restored = await openTrackWithFallback(
+          'cam',
+          previousOpen.deviceId,
+          prefs.resolution,
+          previousOpen.facing,
+        )
+        if (restored.track) {
+          if (!silent) toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
+          opened = { ...restored, fallback: true }
+          deviceId = ''
+        }
+      }
+      const { track, deviceId: usedId, facing: usedFacing, fallback } = opened
       if (!track) {
+        if (previous && live) {
+          live.removeTrack(previous)
+          setLocalStream(new MediaStream(live.getTracks()))
+        }
         if (!silent) toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
         return
       }

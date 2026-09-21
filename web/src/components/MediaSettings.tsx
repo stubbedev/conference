@@ -3,6 +3,7 @@ import { Ear, Settings2 } from 'lucide-react'
 
 import {
   CAMERA_RESOLUTIONS,
+  cameraDisplayName,
   DEVICE_LABELS,
   eqPresetFor,
   EQ_PRESETS,
@@ -43,10 +44,13 @@ interface DeviceSelectProps {
   devices: MediaDeviceInfo[]
   selected: string
   onChange: (kind: DeviceKind, deviceId: string) => void
+  displayName?: (device: MediaDeviceInfo, index: number) => string
 }
 
-function DeviceSelect({ kind, devices, selected, onChange }: DeviceSelectProps) {
+function DeviceSelect({ kind, devices, selected, onChange, displayName }: DeviceSelectProps) {
   const label = DEVICE_LABELS[kind]
+  const nameOf = (device: MediaDeviceInfo, index: number) =>
+    displayName ? displayName(device, index) : device.label || `${label} ${index + 1}`
 
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
@@ -65,12 +69,8 @@ function DeviceSelect({ kind, devices, selected, onChange }: DeviceSelectProps) 
         <SelectContent>
           <SelectItem value={DEFAULT_DEVICE}>System default</SelectItem>
           {devices.map((device, index) => (
-            <SelectItem
-              key={device.deviceId}
-              value={device.deviceId}
-              title={device.label || `${label} ${index + 1}`}
-            >
-              {device.label || `${label} ${index + 1}`}
+            <SelectItem key={device.deviceId} value={device.deviceId} title={nameOf(device, index)}>
+              {nameOf(device, index)}
             </SelectItem>
           ))}
         </SelectContent>
@@ -241,6 +241,7 @@ export function DeviceSettings({
         devices={devices.cams}
         selected={selectedCameraId(devices.cams, selected)}
         onChange={onChange}
+        displayName={cameraDisplayName}
       />
       {devices.cams.length > 0 && (
         <div className="flex min-w-0 flex-col gap-1.5">

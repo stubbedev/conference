@@ -193,13 +193,30 @@ export function dedupeCameras(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
   if (!isMobileDevice()) return devices
 
   const seen = new Set<CameraFacing>()
-  return devices.filter((device) => {
+  const unique = devices.filter((device) => {
     const facing = facingFromLabel(device.label)
     if (!facing) return true
     if (seen.has(facing)) return false
     seen.add(facing)
     return true
   })
+  // Front first, back second, anything unrecognised last: the order a
+  // phone user expects, independent of enumeration order.
+  const rank = (device: MediaDeviceInfo) => FACING_ORDER[facingFromLabel(device.label) ?? 'other']
+  return unique.slice().sort((a, b) => rank(a) - rank(b))
+}
+
+const FACING_ORDER: Record<CameraFacing | 'other', number> = { user: 0, environment: 1, other: 2 }
+
+// The picker shows the lens, not the driver's label: "Camera 2, facing
+// back" reads as "Back camera" on phones. Desktop labels are kept as is.
+export function cameraDisplayName(device: MediaDeviceInfo, index: number): string {
+  if (isMobileDevice()) {
+    const facing = facingFromLabel(device.label)
+    if (facing === 'user') return 'Front camera'
+    if (facing === 'environment') return 'Back camera'
+  }
+  return device.label || `Camera ${index + 1}`
 }
 
 function sameDeviceList(a: MediaDeviceInfo[], b: MediaDeviceInfo[]): boolean {
