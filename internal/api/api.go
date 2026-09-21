@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -74,12 +75,14 @@ type configResponse struct {
 	JoinOnly            bool               `json:"joinOnly"`
 }
 
-func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
+	open := s.openCreate(r)
+
 	writeJSON(w, http.StatusOK, configResponse{
 		ICEServers:          s.Cfg.ICEServers,
-		CreateAuthRequired:  len(s.Cfg.APIKeys) > 0,
+		CreateAuthRequired:  len(s.Cfg.APIKeys) > 0 && !open,
 		SessionLifetimeDays: int(s.Cfg.SessionTTL / (hoursPerDay * time.Hour)),
-		JoinOnly:            s.Cfg.JoinOnly,
+		JoinOnly:            s.Cfg.JoinOnly && !open,
 	})
 }
 
@@ -104,8 +107,9 @@ type createRoomResponse struct {
 
 // createRoom makes a new room. Rooms are immutable afterwards; this is
 // the only moment the room key and privileged token are ever revealed.
+// Hosts listed in OpenCreateHosts are exempt from the key check.
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
-	if !s.checkAPIKey(r) {
+	if !s.checkAPIKey(r) && !s.openCreate(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Room creation requires a valid API key.")
 
 		return
@@ -504,6 +508,22 @@ func (s *Server) checkAPIKey(r *http.Request) bool {
 	}
 
 	return false
+}
+
+// requestHost returns the lowercased Host header without its port.
+func requestHost(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host = r.Host
+	}
+
+	return strings.ToLower(host)
+}
+
+// openCreate reports whether the request's host is exempt from the API
+// key requirement and the join-only landing page.
+func (s *Server) openCreate(r *http.Request) bool {
+	return slices.Contains(s.Cfg.OpenCreateHosts, requestHost(r))
 }
 
 func clientIP(r *http.Request) string {

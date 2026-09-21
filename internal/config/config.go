@@ -50,6 +50,11 @@ type Config struct {
 	// without a key creation would stay open to everyone anyway.
 	JoinOnly bool
 
+	// OpenCreateHosts lists hostnames where room creation stays open
+	// (no API key, create form visible) even though APIKeys/JoinOnly
+	// restrict the other domains served by the same process.
+	OpenCreateHosts []string
+
 	ICEUDPPort  int      // single UDP port for the ICE mux (0 = ephemeral ports)
 	ExternalIPs []string // NAT 1:1 addresses announced as host candidates
 	ICEServers  []ICEServer
@@ -117,19 +122,20 @@ var errJoinOnlyNeedsKey = errors.New("config: JOIN_ONLY requires API_KEYS; witho
 // FromEnv builds a Config from the process environment.
 func FromEnv() (*Config, error) {
 	cfg := &Config{
-		HTTPAddr:       "",
-		BaseURL:        "",
-		DBPath:         env("DB_PATH", defaultDBPath),
-		APIKeys:        nil,
-		JoinOnly:       false,
-		ICEUDPPort:     defaultICEUDPPort,
-		ExternalIPs:    nil,
-		ICEServers:     nil,
-		MaxPublishKbps: defaultMaxPublishKbps,
-		AllowedOrigins: nil,
-		SessionTTL:     defaultSessionDays * hoursPerDay * time.Hour,
-		MaxRoomMembers: defaultMaxRoomMembers,
-		RoomTTL:        0,
+		HTTPAddr:        "",
+		BaseURL:         "",
+		DBPath:          env("DB_PATH", defaultDBPath),
+		APIKeys:         nil,
+		JoinOnly:        false,
+		OpenCreateHosts: nil,
+		ICEUDPPort:      defaultICEUDPPort,
+		ExternalIPs:     nil,
+		ICEServers:      nil,
+		MaxPublishKbps:  defaultMaxPublishKbps,
+		AllowedOrigins:  nil,
+		SessionTTL:      defaultSessionDays * hoursPerDay * time.Hour,
+		MaxRoomMembers:  defaultMaxRoomMembers,
+		RoomTTL:         0,
 	}
 
 	err := applyHTTPConfig(cfg)
@@ -167,6 +173,11 @@ func applyHTTPConfig(cfg *Config) error {
 	cfg.BaseURL = strings.TrimRight(env("BASE_URL", ""), "/")
 	cfg.APIKeys = splitList(env("API_KEYS", ""))
 	cfg.JoinOnly = envBool("JOIN_ONLY")
+
+	for _, host := range splitList(env("OPEN_CREATE_HOSTS", "")) {
+		cfg.OpenCreateHosts = append(cfg.OpenCreateHosts, strings.ToLower(host))
+	}
+
 	cfg.AllowedOrigins = splitList(env("ALLOWED_ORIGINS", ""))
 
 	return nil

@@ -31,6 +31,7 @@ services:
       BASE_URL: ${BASE_URL}
       API_KEYS: ${API_KEYS}
       JOIN_ONLY: ${JOIN_ONLY:-false}
+      OPEN_CREATE_HOSTS: ${OPEN_CREATE_HOSTS:-}
       ROOM_TTL_DAYS: ${ROOM_TTL_DAYS:-365}
       EXTERNAL_IPS: ${EXTERNAL_IPS}
     volumes:

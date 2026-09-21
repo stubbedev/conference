@@ -55,6 +55,7 @@ BASE_URL=meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
 | `DB_PATH`          | `conference.db`          | SQLite database path                             |
 | `API_KEYS`         | empty                    | Comma-separated bearer keys for room creation/deletion; empty = anyone may create |
 | `JOIN_ONLY`        | `false`                  | Hide room creation on the landing page (join-only); requires `API_KEYS` |
+| `OPEN_CREATE_HOSTS` | —                        | Hostnames where anyone may create rooms (no key, create form shown) despite `API_KEYS`/`JOIN_ONLY` |
 | `ROOM_TTL_DAYS`    | `365`                    | Rooms older than this many days are deleted hourly; live rooms are skipped; `0` keeps rooms forever |
 | `ICE_UDP_PORT`     | `5000`                   | Single UDP port for all WebRTC traffic           |
 | `EXTERNAL_IPS`     | —                        | Comma-separated public IPs advertised for ICE (NAT) |
@@ -137,6 +138,19 @@ Set `API_KEYS` **and** `JOIN_ONLY=true`: the landing page then offers
 joining only, and rooms exist solely through the API above. (The server
 refuses to start with `JOIN_ONLY` but no `API_KEYS`, which would leave
 creation open anyway.)
+
+### Mixed policies on one server
+
+When one server answers several domains, `OPEN_CREATE_HOSTS` exempts
+individual hosts from `API_KEYS`/`JOIN_ONLY`:
+
+```bash
+API_KEYS=s3cret JOIN_ONLY=true OPEN_CREATE_HOSTS=stubbe.dev ./conference
+```
+
+Visitors on `stubbe.dev` get the create form and need no key, while every
+other host the server answers stays join-only with keyed creation. The
+hosts share one room database, so links work on any of the domains.
 
 ### Other endpoints
 
