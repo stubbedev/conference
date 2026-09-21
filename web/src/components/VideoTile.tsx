@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { MicOff, MonitorUp, Pin, PinOff, VideoOff, VolumeX } from 'lucide-react'
 
 import { useLatest } from '@/hooks/latest'
@@ -70,7 +70,7 @@ function watchVisibility(element: HTMLMediaElement, start: () => void): () => vo
 // muted (muted playback is always allowed) and remote audio plays through
 // a dedicated <audio> element that retries on the next user gesture if
 // the initial play is refused.
-export function VideoTile({
+export const VideoTile = memo(function VideoTile({
   stream,
   name,
   muted,
@@ -279,4 +279,4 @@ export function VideoTile({
       )}
     </div>
   )
-}
+})

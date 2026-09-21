@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { CircleAlert, Link2, Loader2 } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -63,6 +63,12 @@ interface Tile {
   stream: MediaStream | null
 }
 
+interface TileHandlers {
+  canPin: boolean
+  onTogglePin: () => void
+  onAspectRatio: (ratio: number) => void
+}
+
 type Phase = 'checking' | 'gate' | 'prejoin' | 'joining' | 'live' | 'error'
 
 const SCREEN_KIND = 'screen'
@@ -100,7 +106,6 @@ export default function Room() {
   const [fullscreen, setFullscreen] = useState(false)
   const [privileged, setPrivileged] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
-  const [debugText, setDebugText] = useState('')
   const titleTapsRef = useRef<number[]>([])
   const copyTimerRef = useRef<number | undefined>(undefined)
   const pageErrorsRef = useRef<string[]>([])
@@ -729,32 +734,6 @@ export default function Room() {
   }, [])
 
   useEffect(() => {
-    if (!debugOpen) return
-
-    let alive = true
-
-    const sample = async () => {
-      const client = clientRef.current
-      const report = client
-        ? await client.debugStats().catch(() => 'stats unavailable')
-        : 'not joined yet'
-
-      if (!alive) return
-
-      setDebugText(`${report}\n--- page errors ---\n${pageErrorsRef.current.join('\n') || 'none'}`)
-    }
-
-    void sample()
-
-    const timer = window.setInterval(() => void sample(), 1000)
-
-    return () => {
-      alive = false
-      window.clearInterval(timer)
-    }
-  }, [debugOpen, clientRef])
-
-  useEffect(() => {
     if (phase !== 'live' && phase !== 'prejoin') return
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
@@ -857,14 +836,36 @@ export default function Room() {
     )
   }, [])
 
-  const togglePin = (key: string) => {
-    setUserPin(pinnedKey === key ? NO_PIN : key)
-  }
+  const pinnedKeyRef = useLatest(pinnedKey)
 
-  const renderTile = (tile: Tile, compact = false, onAspectRatio?: (ratio: number) => void) => {
+  const togglePin = useCallback(
+    (key: string) => {
+      setUserPin(pinnedKeyRef.current === key ? NO_PIN : key)
+    },
+    [pinnedKeyRef],
+  )
+
+  const tileHandlersRef = useRef(new Map<string, TileHandlers>())
+  const tileHandlers = useCallback(
+    (key: string, canPin: boolean): TileHandlers => {
+      const cached = tileHandlersRef.current.get(key)
+      if (cached && cached.canPin === canPin) return cached
+      const entry: TileHandlers = {
+        canPin,
+        onTogglePin: () => togglePin(key),
+        onAspectRatio: (ratio: number) => handleTileRatio(key, ratio),
+      }
+      tileHandlersRef.current.set(key, entry)
+      return entry
+    },
+    [togglePin, handleTileRatio],
+  )
+
+  const renderTile = (tile: Tile, compact = false) => {
     const isLocal = tile.sourceId === LOCAL_SOURCE
     const isScreen = tile.kind === SCREEN_KIND
     const member = isLocal ? selfMember : members.find((m) => m.id === tile.sourceId)
+    const handlers = tileHandlers(tile.key, allTiles.length > 1)
     return (
       <VideoTile
         key={tile.key}
@@ -880,9 +881,9 @@ export default function Room() {
         sinkId={isLocal ? undefined : devicePrefs.speaker}
         volume={isLocal ? undefined : devicePrefs.volume}
         pinned={pinnedKey === tile.key}
-        onTogglePin={allTiles.length > 1 ? () => togglePin(tile.key) : undefined}
+        onTogglePin={handlers.canPin ? handlers.onTogglePin : undefined}
         compact={compact}
-        onAspectRatio={onAspectRatio}
+        onAspectRatio={compact ? undefined : handlers.onAspectRatio}
       />
     )
   }
@@ -1017,7 +1018,7 @@ export default function Room() {
                   className="w-full justify-self-center"
                   style={{ aspectRatio: `${ratio}`, maxWidth: `calc(96cqh * ${ratio})` }}
                 >
-                  {renderTile(tile, false, (next) => handleTileRatio(tile.key, next))}
+                  {renderTile(tile, false)}
                 </div>
               )
             })}
@@ -1071,11 +1072,47 @@ export default function Room() {
           onMicMonitor={handleMicMonitor}
         />
       </ControlsBar>
-      {debugOpen && (
-        <pre className="fixed bottom-20 left-2 z-50 max-h-64 w-[22rem] max-w-[90vw] overflow-auto rounded-lg bg-black/85 p-2 font-mono text-[10px] leading-tight break-all whitespace-pre-wrap text-emerald-300">
-          {debugText || 'collecting…'}
-        </pre>
-      )}
+      {debugOpen && <DiagnosticsPanel clientRef={clientRef} errorsRef={pageErrorsRef} />}
     </div>
+  )
+}
+
+function DiagnosticsPanel({
+  clientRef,
+  errorsRef,
+}: {
+  clientRef: RefObject<RoomClient | null>
+  errorsRef: RefObject<string[]>
+}) {
+  const [text, setText] = useState('')
+
+  useEffect(() => {
+    let alive = true
+
+    const sample = async () => {
+      const client = clientRef.current
+      const report = client
+        ? await client.debugStats().catch(() => 'stats unavailable')
+        : 'not joined yet'
+
+      if (!alive) return
+
+      setText(`${report}\n--- page errors ---\n${errorsRef.current.join('\n') || 'none'}`)
+    }
+
+    void sample()
+
+    const timer = window.setInterval(() => void sample(), 1000)
+
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [clientRef, errorsRef])
+
+  return (
+    <pre className="fixed bottom-20 left-2 z-50 max-h-64 w-[22rem] max-w-[90vw] overflow-auto rounded-lg bg-black/85 p-2 font-mono text-[10px] leading-tight break-all whitespace-pre-wrap text-emerald-300">
+      {text || 'collecting…'}
+    </pre>
   )
 }
