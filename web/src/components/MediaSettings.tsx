@@ -5,6 +5,10 @@ import {
   cameraDisplayName,
   DEVICE_LABELS,
   isMobileDevice,
+  MAX_MIC_GAIN_DB,
+  micDbToGain,
+  micGainToDb,
+  MIN_MIC_GAIN_DB,
   selectedCameraId,
   supportsSinkSelection,
   type CameraResolution,
@@ -22,6 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Slider } from '@/components/ui/slider'
 
 const DEFAULT_DEVICE = 'system-default'
 
@@ -68,23 +73,56 @@ function DeviceSelect({ kind, devices, selected, onChange, displayName }: Device
 interface DeviceSettingsProps {
   devices: DeviceGroups
   selected: DevicePrefs
+  hasMic?: boolean
   onChange: (kind: DeviceKind, deviceId: string) => void
   onResolutionChange: (resolution: CameraResolution) => void
+  onVolumeChange: (volume: number) => void
+  onMicGainChange: (gain: number) => void
 }
 
-// Deliberately as small as Google Meet's: which microphone, which
-// camera, how sharp, which speaker. Audio processing (echo cancellation,
-// automatic gain, noise suppression) is always on and has no controls.
-export function DeviceSettings({ devices, selected, onChange, onResolutionChange }: DeviceSettingsProps) {
+// Which microphone and how loud it goes out, which camera and how
+// sharp, which speaker and how loud it comes in. Audio processing
+// (echo cancellation, automatic gain, noise suppression) is always on
+// and has no controls; the mic slider trims what that processing hands
+// over, so it stays useful for a mic that still lands too quiet or too
+// hot.
+export function DeviceSettings({
+  devices,
+  selected,
+  hasMic,
+  onChange,
+  onResolutionChange,
+  onVolumeChange,
+  onMicGainChange,
+}: DeviceSettingsProps) {
   // Mobile device lists are full of entries the page cannot actually
   // switch (Android communication routes, no output selection at all),
-  // so only the camera picker and quality are offered there.
+  // so only the camera picker, quality and the volumes are offered there.
   const mobile = isMobileDevice()
+  const micDb = Math.round(micGainToDb(selected.micGain))
 
   return (
     <div className="flex flex-col gap-3">
       {!mobile && (
         <DeviceSelect kind="mic" devices={devices.mics} selected={selected.mic} onChange={onChange} />
+      )}
+      {hasMic && (
+        <div className="flex min-w-0 flex-col gap-2.5">
+          <div className="flex items-center justify-between">
+            <Label className="text-xs text-muted-foreground">Mic volume</Label>
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {micDb > 0 ? '+' : ''}
+              {micDb} dB
+            </span>
+          </div>
+          <Slider
+            min={MIN_MIC_GAIN_DB}
+            max={MAX_MIC_GAIN_DB}
+            step={1}
+            value={[micDb]}
+            onValueChange={([next]) => onMicGainChange(micDbToGain(next))}
+          />
+        </div>
       )}
       <DeviceSelect
         kind="cam"
@@ -125,6 +163,21 @@ export function DeviceSettings({ devices, selected, onChange, onResolutionChange
           onChange={onChange}
         />
       )}
+      <div className="flex min-w-0 flex-col gap-2.5">
+        <div className="flex items-center justify-between">
+          <Label className="text-xs text-muted-foreground">Speaker volume</Label>
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {Math.round(selected.volume * 100)}%
+          </span>
+        </div>
+        <Slider
+          min={0}
+          max={1}
+          step={0.05}
+          value={[selected.volume]}
+          onValueChange={([volume]) => onVolumeChange(volume)}
+        />
+      </div>
     </div>
   )
 }

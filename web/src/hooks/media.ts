@@ -19,6 +19,8 @@ export interface DevicePrefs {
   camFacing: CameraFacing | ''
   speaker: string
   resolution: CameraResolution
+  volume: number
+  micGain: number
 }
 
 export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
@@ -27,6 +29,26 @@ export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
   camFacing: '',
   speaker: '',
   resolution: 'auto',
+  volume: 1,
+  micGain: 1,
+}
+
+// Mic gain is stored linear (1 = untouched) but presented in dB; the
+// slider range keeps gain between a whisper and a runaway boost.
+export const MIN_MIC_GAIN_DB = -20
+export const MAX_MIC_GAIN_DB = 12
+
+export function clampMicGain(gain: number): number {
+  return Number.isFinite(gain) ? Math.min(4, Math.max(0, gain)) : 1
+}
+
+export function micGainToDb(gain: number): number {
+  const db = 20 * Math.log10(Math.max(gain, 0.01))
+  return Math.max(MIN_MIC_GAIN_DB, Math.min(MAX_MIC_GAIN_DB, db))
+}
+
+export function micDbToGain(db: number): number {
+  return clampMicGain(10 ** (db / 20))
 }
 
 export const CAMERA_RESOLUTIONS: { value: CameraResolution; label: string }[] = [
@@ -462,6 +484,80 @@ export function resumeAudio(): void {
   retryAwaiting()
   const ctx = audioContext()
   if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {})
+}
+
+// The microphone is routed through a Web Audio graph before it reaches
+// the sender: raw capture track -> GainNode ->
+// MediaStreamAudioDestinationNode, and the destination's track is what
+// gets published and previewed, so the gain slider applies live without
+// re-acquiring the mic. The browser's own processing (echo
+// cancellation, automatic gain, noise suppression) still runs on the
+// capture track ahead of this, so the slider trims the already-
+// normalised signal rather than replacing that processing. Muting still
+// flips .enabled on the raw capture track: a disabled source track
+// makes the whole graph emit silence, so gain can never defeat mute.
+// Everything runs on the shared AudioContext, which resumeAudio() and
+// the gesture listener above unlock.
+export interface MicPipeline {
+  readonly track: MediaStreamTrack
+  setGain(gain: number): void
+  setInputEnabled(enabled: boolean): void
+  rewire(rawTrack: MediaStreamTrack): void
+  dispose(): void
+}
+
+export function createMicPipeline(rawTrack: MediaStreamTrack, gain: number): MicPipeline | null {
+  const ctx = audioContext()
+  if (!ctx) return null
+
+  try {
+    let input = rawTrack
+    let source = ctx.createMediaStreamSource(new MediaStream([input]))
+
+    const gainNode = ctx.createGain()
+    const destination = ctx.createMediaStreamDestination()
+    gainNode.connect(destination)
+    source.connect(gainNode)
+
+    const pipeline: MicPipeline = {
+      track: destination.stream.getAudioTracks()[0],
+      setGain(value) {
+        gainNode.gain.setTargetAtTime(clampMicGain(value), ctx.currentTime, 0.02)
+      },
+      setInputEnabled(enabled) {
+        input.enabled = enabled
+      },
+      rewire(next) {
+        if (next === input) return
+        const nextSource = ctx.createMediaStreamSource(new MediaStream([next]))
+        const oldSource = source
+        source = nextSource
+        source.connect(gainNode)
+        try {
+          oldSource.disconnect()
+        } catch {
+          // already detached
+        }
+        input.stop()
+        input = next
+      },
+      dispose() {
+        try {
+          source.disconnect()
+        } catch {
+          // already detached
+        }
+        gainNode.disconnect()
+        input.stop()
+      },
+    }
+
+    pipeline.setGain(gain)
+    if (ctx.state === 'suspended') installGestureRetry()
+    return pipeline
+  } catch {
+    return null
+  }
 }
 
 export function useIsSpeaking(stream: MediaStream | null): boolean {
