@@ -7,6 +7,7 @@ import { useLatest } from '@/hooks/latest'
 import {
   aspectRatioChanged,
   CAMERA_RESOLUTIONS,
+  createMicPipeline,
   DEFAULT_DEVICE_PREFS,
   DEVICE_LABELS,
   FALLBACK_ASPECT_RATIO,
@@ -20,6 +21,7 @@ import {
   type CameraResolution,
   type DeviceKind,
   type DevicePrefs,
+  type MicPipeline,
   type TrackKind,
 } from '@/hooks/media'
 import { usePersistentState } from '@/hooks/persistent'
@@ -110,6 +112,8 @@ export default function Room() {
         : 'auto',
       volume:
         typeof stored.volume === 'number' ? Math.min(1, Math.max(0, stored.volume)) : 1,
+      micGain:
+        typeof stored.micGain === 'number' ? Math.min(4, Math.max(0, stored.micGain)) : 1,
     }),
   )
   const [chatOpen, setChatOpen] = usePersistentState(
@@ -123,6 +127,7 @@ export default function Room() {
   const clientRef = useRef<RoomClient | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
+  const micPipelineRef = useRef<MicPipeline | null>(null)
   const sessionRef = useRef('')
   const roomKeyRef = useRef<Uint8Array<ArrayBuffer> | null>(null)
   const iceRef = useRef<RTCIceServer[]>([])
@@ -199,11 +204,25 @@ export default function Room() {
       if (!micTrack) toast.warning('No microphone found — others will not hear you.')
       if (!camTrack) toast.warning('No camera found — others will not see you.')
 
+      // Route the mic through the gain graph; the pipeline's track is
+      // what the stream (and the sender) carries, while the raw capture
+      // track stays owned by the pipeline for muting and rewiring.
+      micPipelineRef.current?.dispose()
+      micPipelineRef.current = null
+      let outboundMic: MediaStreamTrack | null = micTrack
+      if (micTrack) {
+        const pipeline = createMicPipeline(micTrack, prefs.micGain)
+        if (pipeline) {
+          micPipelineRef.current = pipeline
+          outboundMic = pipeline.track
+        }
+      }
+
       if (micTrack) micTrack.enabled = controlsRef.current.mic
       if (camTrack) camTrack.enabled = controlsRef.current.cam
 
       stopMediaStream(localStreamRef.current)
-      const stream = new MediaStream([micTrack, camTrack].filter(Boolean) as MediaStreamTrack[])
+      const stream = new MediaStream([outboundMic, camTrack].filter(Boolean) as MediaStreamTrack[])
       localStreamRef.current = stream
       setLocalStream(stream)
       void refreshDevices()
@@ -295,6 +314,7 @@ export default function Room() {
   useEffect(() => {
     return () => {
       clientRef.current?.leave()
+      micPipelineRef.current?.dispose()
       stopMediaStream(localStreamRef.current)
       stopMediaStream(screenStreamRef.current)
     }
@@ -395,6 +415,8 @@ export default function Room() {
       const current = localStreamRef.current
       const tracks = kind === 'mic' ? current?.getAudioTracks() : current?.getVideoTracks()
       for (const track of tracks ?? []) track.enabled = enabled
+      // Mute the raw capture track too: gain must not defeat mute.
+      if (kind === 'mic') micPipelineRef.current?.setInputEnabled(enabled)
       clientRef.current?.setTrackEnabled(kind, enabled)
       updateControls(kind === 'mic' ? { mic: enabled } : { cam: enabled })
     },
@@ -484,17 +506,37 @@ export default function Room() {
       }
       track.enabled = controlsRef.current[kind]
 
+      // A mic switch reroutes the new capture track through the gain
+      // graph; when the pipeline already exists the published track is
+      // unchanged, so no replaceTrack churn is needed.
+      let outbound = track
+      if (kind === 'mic') {
+        const pipeline = micPipelineRef.current
+        if (pipeline) {
+          pipeline.rewire(track)
+          outbound = pipeline.track
+        } else {
+          const created = createMicPipeline(track, prefsRef.current.micGain)
+          if (created) {
+            micPipelineRef.current = created
+            outbound = created.track
+          }
+        }
+      }
+
       const current = localStreamRef.current
       if (current) {
         const old = kind === 'mic' ? current.getAudioTracks()[0] : current.getVideoTracks()[0]
-        if (old) {
+        if (old && old !== outbound) {
           current.removeTrack(old)
           old.stop()
         }
-        current.addTrack(track)
+        if (!current.getTracks().some((existing) => existing === outbound)) {
+          current.addTrack(outbound)
+        }
         setLocalStream(new MediaStream(current.getTracks()))
       } else {
-        const stream = new MediaStream([track])
+        const stream = new MediaStream([outbound])
         localStreamRef.current = stream
         setLocalStream(stream)
       }
@@ -506,7 +548,7 @@ export default function Room() {
       )
       setMediaError('')
       void refreshDevices()
-      await clientRef.current?.replaceLocalTrack(kind, track)
+      await clientRef.current?.replaceLocalTrack(kind, outbound)
     },
     [updateDevicePrefs, refreshDevices, controlsRef, prefsRef],
   )
@@ -535,6 +577,16 @@ export default function Room() {
     },
     [updateDevicePrefs],
   )
+
+  const handleMicGainChange = useCallback(
+    (gain: number) => {
+      updateDevicePrefs({ micGain: gain })
+      micPipelineRef.current?.setGain(gain)
+    },
+    [updateDevicePrefs],
+  )
+
+  const sampleMicLevel = useCallback((): number => micPipelineRef.current?.level() ?? 0, [])
 
   useEffect(() => {
     const record = (text: string) => {
@@ -888,9 +940,11 @@ export default function Room() {
         <DeviceSettingsPopover
           devices={devices}
           selected={devicePrefs}
+          micMeter={localStream?.getAudioTracks().length ? sampleMicLevel : null}
           onChange={handleDeviceChange}
           onResolutionChange={handleResolutionChange}
           onVolumeChange={handleVolumeChange}
+          onMicGainChange={handleMicGainChange}
         />
       </ControlsBar>
       {debugOpen && (

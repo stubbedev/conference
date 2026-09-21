@@ -4,7 +4,12 @@ import {
   CAMERA_RESOLUTIONS,
   DEVICE_LABELS,
   isMobileDevice,
+  MAX_MIC_GAIN_DB,
+  micDbToGain,
+  micGainToDb,
+  MIN_MIC_GAIN_DB,
   supportsSinkSelection,
+  useAudioLevel,
   type CameraResolution,
   type DeviceGroups,
   type DeviceKind,
@@ -65,20 +70,66 @@ function DeviceSelect({ kind, devices, selected, onChange }: DeviceSelectProps) 
   )
 }
 
+interface MicGainControlProps {
+  gain: number
+  meter: () => number
+  onChange: (gain: number) => void
+}
+
+// Input gain for your own microphone: a dB slider over the Web Audio
+// gain graph plus a live post-gain level meter, so the classic "can you
+// hear me?" case is fixable without leaving the call.
+function MicGainControl({ gain, meter, onChange }: MicGainControlProps) {
+  const level = useAudioLevel(meter)
+  const db = Math.round(micGainToDb(gain))
+
+  return (
+    <div className="flex min-w-0 flex-col gap-2.5">
+      <div className="flex items-center justify-between">
+        <Label className="text-xs text-muted-foreground">Mic volume</Label>
+        <span className="text-xs tabular-nums text-muted-foreground">
+          {db > 0 ? '+' : ''}
+          {db} dB
+        </span>
+      </div>
+      <Slider
+        min={MIN_MIC_GAIN_DB}
+        max={MAX_MIC_GAIN_DB}
+        step={1}
+        value={[db]}
+        onValueChange={([next]) => onChange(micDbToGain(next))}
+      />
+      <div
+        aria-hidden
+        className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+      >
+        <div
+          className="h-full rounded-full bg-emerald-500"
+          style={{ width: `${Math.round(Math.min(1, Math.max(0, level)) * 100)}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
 interface DeviceSettingsProps {
   devices: DeviceGroups
   selected: DevicePrefs
+  micMeter?: (() => number) | null
   onChange: (kind: DeviceKind, deviceId: string) => void
   onResolutionChange: (resolution: CameraResolution) => void
   onVolumeChange: (volume: number) => void
+  onMicGainChange: (gain: number) => void
 }
 
 export function DeviceSettings({
   devices,
   selected,
+  micMeter,
   onChange,
   onResolutionChange,
   onVolumeChange,
+  onMicGainChange,
 }: DeviceSettingsProps) {
   // Mobile device lists are full of entries the page cannot actually
   // switch (Android communication routes, no output selection at all),
@@ -122,6 +173,9 @@ export function DeviceSettings({
           selected={selected.speaker}
           onChange={onChange}
         />
+      )}
+      {micMeter && (
+        <MicGainControl gain={selected.micGain} meter={micMeter} onChange={onMicGainChange} />
       )}
       <div className="flex min-w-0 flex-col gap-2.5">
         <div className="flex items-center justify-between">

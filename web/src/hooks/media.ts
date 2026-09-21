@@ -17,6 +17,7 @@ export interface DevicePrefs {
   speaker: string
   resolution: CameraResolution
   volume: number
+  micGain: number
 }
 
 export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
@@ -25,6 +26,25 @@ export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
   speaker: '',
   resolution: 'auto',
   volume: 1,
+  micGain: 1,
+}
+
+// Mic gain is stored linear (1 = untouched) but presented in dB; the
+// slider range keeps gain between a whisper and a runaway boost.
+export const MIN_MIC_GAIN_DB = -20
+export const MAX_MIC_GAIN_DB = 12
+
+export function clampMicGain(gain: number): number {
+  return Number.isFinite(gain) ? Math.min(4, Math.max(0, gain)) : 1
+}
+
+export function micGainToDb(gain: number): number {
+  const db = 20 * Math.log10(Math.max(gain, 0.01))
+  return Math.max(MIN_MIC_GAIN_DB, Math.min(MAX_MIC_GAIN_DB, db))
+}
+
+export function micDbToGain(db: number): number {
+  return clampMicGain(10 ** (db / 20))
 }
 
 export const CAMERA_RESOLUTIONS: { value: CameraResolution; label: string }[] = [
@@ -293,12 +313,18 @@ function retryAwaiting(): void {
   }
 }
 
+// One shared gesture listener unblocks stalled playback elements and
+// resumes the shared AudioContext: without a prior gesture iOS and
+// Chrome start it suspended, which would leave the mic gain graph
+// (and its meter) silent.
 function installGestureRetry(): void {
   if (gestureListenerActive || typeof window === 'undefined') return
   gestureListenerActive = true
   const retry = () => {
     retryAwaiting()
-    if (awaitingGesture.size === 0) {
+    const ctx = sharedContext
+    if (ctx?.state === 'suspended') void ctx.resume().catch(() => {})
+    if (awaitingGesture.size === 0 && ctx?.state !== 'suspended') {
       window.removeEventListener('pointerdown', retry)
       window.removeEventListener('keydown', retry)
       gestureListenerActive = false
@@ -334,6 +360,114 @@ export function resumeAudio(): void {
   retryAwaiting()
   const ctx = audioContext()
   if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {})
+}
+
+// The microphone is routed through a Web Audio graph before it reaches
+// the sender: raw capture track -> GainNode -> MediaStreamAudioDestinationNode,
+// and the destination's track is what gets published and previewed, so
+// gain applies live without re-acquiring the mic. Muting still flips
+// .enabled on the raw capture track: a disabled source track makes the
+// whole graph emit silence, so gain can never defeat mute. Everything
+// runs on the shared AudioContext, which resumeAudio() and the gesture
+// listener above unlock.
+export interface MicPipeline {
+  readonly track: MediaStreamTrack
+  setGain(gain: number): void
+  setInputEnabled(enabled: boolean): void
+  rewire(rawTrack: MediaStreamTrack): void
+  /** Post-gain level 0..1, for meters. */
+  level(): number
+  dispose(): void
+}
+
+export function createMicPipeline(
+  rawTrack: MediaStreamTrack,
+  gain: number,
+): MicPipeline | null {
+  const ctx = audioContext()
+  if (!ctx) return null
+
+  try {
+    let input = rawTrack
+    let source = ctx.createMediaStreamSource(new MediaStream([input]))
+    const gainNode = ctx.createGain()
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 1024
+    const destination = ctx.createMediaStreamDestination()
+
+    source.connect(gainNode)
+    gainNode.connect(destination)
+    gainNode.connect(analyser)
+
+    const samples = new Uint8Array(analyser.fftSize)
+    let metered = 0
+
+    const pipeline: MicPipeline = {
+      track: destination.stream.getAudioTracks()[0],
+      setGain(value) {
+        gainNode.gain.setTargetAtTime(clampMicGain(value), ctx.currentTime, 0.02)
+      },
+      setInputEnabled(enabled) {
+        input.enabled = enabled
+      },
+      rewire(next) {
+        if (next === input) return
+        const nextSource = ctx.createMediaStreamSource(new MediaStream([next]))
+        nextSource.connect(gainNode)
+        source.disconnect()
+        input.stop()
+        input = next
+        source = nextSource
+      },
+      level() {
+        analyser.getByteTimeDomainData(samples)
+        let sum = 0
+        for (const value of samples) {
+          const deviation = (value - 128) / 128
+          sum += deviation * deviation
+        }
+        const rms = Math.sqrt(sum / samples.length)
+        metered = Math.max(rms, metered * 0.8)
+        return Math.min(1, metered * 3)
+      },
+      dispose() {
+        source.disconnect()
+        gainNode.disconnect()
+        analyser.disconnect()
+        input.stop()
+      },
+    }
+
+    pipeline.setGain(gain)
+    if (ctx.state === 'suspended') installGestureRetry()
+    return pipeline
+  } catch {
+    return null
+  }
+}
+
+// Polls an external level source (e.g. a mic pipeline meter) each
+// frame while mounted; re-renders only when the value actually moves.
+export function useAudioLevel(sample: (() => number) | null | undefined): number {
+  const [level, setLevel] = useState(0)
+
+  useEffect(() => {
+    if (!sample) return
+    let frame = 0
+    let last = -1
+    const tick = () => {
+      const next = sample()
+      if (Math.abs(next - last) >= 0.01) {
+        last = next
+        setLevel(next)
+      }
+      frame = requestAnimationFrame(tick)
+    }
+    tick()
+    return () => cancelAnimationFrame(frame)
+  }, [sample])
+
+  return level
 }
 
 export function useIsSpeaking(stream: MediaStream | null): boolean {
