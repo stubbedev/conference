@@ -7,7 +7,6 @@ import { useLatest } from '@/hooks/latest'
 import {
   aspectRatioChanged,
   CAMERA_RESOLUTIONS,
-  createMicPipeline,
   DEFAULT_DEVICE_PREFS,
   DEVICE_LABELS,
   FALLBACK_ASPECT_RATIO,
@@ -17,7 +16,6 @@ import {
   openTrack,
   openTrackWithFallback,
   resumeAudio,
-  sanitizeEqBands,
   stopMediaStream,
   trackConstraints,
   useMediaDevices,
@@ -26,9 +24,6 @@ import {
   type CameraResolution,
   type DeviceKind,
   type DevicePrefs,
-  type EqualizerBands,
-  type MicMeterSource,
-  type MicPipeline,
   type TrackKind,
 } from '@/hooks/media'
 import { usePersistentState } from '@/hooks/persistent'
@@ -118,17 +113,15 @@ export default function Room() {
   const [devicePrefs, setDevicePrefs] = usePersistentState<DevicePrefs>(
     'conference:devices',
     DEFAULT_DEVICE_PREFS,
+    // Built field by field so keys from earlier versions (volume, mic
+    // gain, equalizer) are dropped instead of carried along forever.
     (stored) => ({
-      ...DEFAULT_DEVICE_PREFS,
-      ...stored,
+      mic: typeof stored.mic === 'string' ? stored.mic : '',
+      cam: typeof stored.cam === 'string' ? stored.cam : '',
+      speaker: typeof stored.speaker === 'string' ? stored.speaker : '',
       resolution: CAMERA_RESOLUTIONS.some((option) => option.value === stored.resolution)
         ? stored.resolution
         : 'auto',
-      volume:
-        typeof stored.volume === 'number' ? Math.min(1, Math.max(0, stored.volume)) : 1,
-      micGain:
-        typeof stored.micGain === 'number' ? Math.min(4, Math.max(0, stored.micGain)) : 1,
-      eqBands: sanitizeEqBands(stored.eqBands),
       camFacing:
         stored.camFacing === 'user' || stored.camFacing === 'environment'
           ? stored.camFacing
@@ -143,7 +136,6 @@ export default function Room() {
   const clientRef = useRef<RoomClient | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
-  const micPipelineRef = useRef<MicPipeline | null>(null)
   const sessionRef = useRef('')
   const roomKeyRef = useRef<Uint8Array<ArrayBuffer> | null>(null)
   const iceRef = useRef<RTCIceServer[]>([])
@@ -211,10 +203,6 @@ export default function Room() {
       const stream = localStreamRef.current
       if (!stream || !stream.getTracks().includes(outbound)) return
       stream.removeTrack(outbound)
-      if (kind === 'mic' && micPipelineRef.current?.track === outbound) {
-        micPipelineRef.current.dispose()
-        micPipelineRef.current = null
-      }
       setLocalStream(new MediaStream(stream.getTracks()))
       toast.warning(
         `${DEVICE_LABELS[kind]} disconnected; it rejoins automatically when available again.`,
@@ -253,8 +241,6 @@ export default function Room() {
         // asks for the other lens while the current one is still
         // capturing fails outright, so release everything first.
         lossGuardRef.current = {}
-        micPipelineRef.current?.dispose()
-        micPipelineRef.current = null
         stopMediaStream(localStreamRef.current)
       }
       const combined = await navigator.mediaDevices
@@ -280,28 +266,14 @@ export default function Room() {
       if (!micTrack) toast.warning('No microphone found — others will not hear you.')
       if (!camTrack) toast.warning('No camera found — others will not see you.')
 
-      // Route the mic through the gain graph; the pipeline's track is
-      // what the stream (and the sender) carries, while the raw capture
-      // track stays owned by the pipeline for muting and rewiring.
-      micPipelineRef.current?.dispose()
-      micPipelineRef.current = null
-      let outboundMic: MediaStreamTrack | null = micTrack
-      if (micTrack) {
-        const pipeline = createMicPipeline(micTrack, prefs.micGain, prefs.eqBands)
-        if (pipeline) {
-          micPipelineRef.current = pipeline
-          outboundMic = pipeline.track
-        }
-      }
-
       if (micTrack) micTrack.enabled = controlsRef.current.mic
       if (camTrack) camTrack.enabled = controlsRef.current.cam
 
       stopMediaStream(localStreamRef.current)
-      const stream = new MediaStream([outboundMic, camTrack].filter(Boolean) as MediaStreamTrack[])
+      const stream = new MediaStream([micTrack, camTrack].filter(Boolean) as MediaStreamTrack[])
       localStreamRef.current = stream
       setLocalStream(stream)
-      if (micTrack && outboundMic) watchLocalTrack('mic', micTrack, outboundMic)
+      if (micTrack) watchLocalTrack('mic', micTrack, micTrack)
       if (camTrack) watchLocalTrack('cam', camTrack, camTrack)
       if (camTrack && mobile) {
         // Remember the facing of the camera that actually opened so the
@@ -406,7 +378,6 @@ export default function Room() {
   useEffect(() => {
     return () => {
       clientRef.current?.leave()
-      micPipelineRef.current?.dispose()
       stopMediaStream(localStreamRef.current)
       stopMediaStream(screenStreamRef.current)
     }
@@ -415,7 +386,7 @@ export default function Room() {
   // Stored device ids are re-validated against the device list, which
   // is the only thing that can invalidate them: the pickers only ever
   // store ids taken from that list, so a pref change on its own (a
-  // volume tick, an EQ drag) must not run this.
+  // camera-quality pick, a facing update) must not run this.
   useEffect(() => {
     const seen = seenDeviceIdsRef.current
     for (const device of [...devices.mics, ...devices.cams, ...devices.speakers]) {
@@ -514,8 +485,6 @@ export default function Room() {
       const current = localStreamRef.current
       const tracks = kind === 'mic' ? current?.getAudioTracks() : current?.getVideoTracks()
       for (const track of tracks ?? []) track.enabled = enabled
-      // Mute the raw capture track too: gain must not defeat mute.
-      if (kind === 'mic') micPipelineRef.current?.setInputEnabled(enabled)
       clientRef.current?.setTrackEnabled(kind, enabled)
       updateControls(kind === 'mic' ? { mic: enabled } : { cam: enabled })
     },
@@ -660,24 +629,7 @@ export default function Room() {
         )
       }
       track.enabled = controlsRef.current[kind]
-
-      // A mic switch reroutes the new capture track through the gain
-      // graph; when the pipeline already exists the published track is
-      // unchanged, so no replaceTrack churn is needed.
-      let outbound = track
-      if (kind === 'mic') {
-        const pipeline = micPipelineRef.current
-        if (pipeline) {
-          pipeline.rewire(track)
-          outbound = pipeline.track
-        } else {
-          const created = createMicPipeline(track, prefsRef.current.micGain, prefsRef.current.eqBands)
-          if (created) {
-            micPipelineRef.current = created
-            outbound = created.track
-          }
-        }
-      }
+      const outbound = track
 
       const current = localStreamRef.current
       if (current) {
@@ -804,73 +756,16 @@ export default function Room() {
     [switchDevice, prefsRef],
   )
 
-  const handleVolumeChange = useCallback(
-    (volume: number) => {
-      updateDevicePrefs({ volume })
-    },
-    [updateDevicePrefs],
-  )
-
-  const handleMicGainChange = useCallback(
-    (gain: number) => {
-      updateDevicePrefs({ micGain: gain })
-      micPipelineRef.current?.setGain(gain)
-    },
-    [updateDevicePrefs],
-  )
-
-  const handleEqualizerChange = useCallback(
-    (bands: EqualizerBands) => {
-      updateDevicePrefs({ eqBands: bands })
-      micPipelineRef.current?.setEqualizer(bands)
-    },
-    [updateDevicePrefs],
-  )
-
-  const handleMicMonitor = useCallback((on: boolean) => {
-    micPipelineRef.current?.setMonitoring(on)
-  }, [])
-
-  // Keyed on mic presence, not stream identity: a camera switch replaces
-  // the stream but must not rebuild the meter (which would restart the
-  // level sampler and re-render the settings popover and controls bar).
-  const hasMic = Boolean(localStream?.getAudioTracks().length)
-  const micMeter = useMemo<MicMeterSource | null>(
-    () =>
-      hasMic
-        ? {
-            level: () => micPipelineRef.current?.level() ?? 0,
-            clipping: () => micPipelineRef.current?.clipping() ?? false,
-          }
-        : null,
-    [hasMic],
-  )
-
   const settingsPopover = useMemo(
     () => (
       <DeviceSettingsPopover
         devices={devices}
         selected={devicePrefs}
-        micMeter={micMeter}
         onChange={handleDeviceChange}
         onResolutionChange={handleResolutionChange}
-        onVolumeChange={handleVolumeChange}
-        onMicGainChange={handleMicGainChange}
-        onEqualizerChange={handleEqualizerChange}
-        onMicMonitor={handleMicMonitor}
       />
     ),
-    [
-      devices,
-      devicePrefs,
-      micMeter,
-      handleDeviceChange,
-      handleResolutionChange,
-      handleVolumeChange,
-      handleMicGainChange,
-      handleEqualizerChange,
-      handleMicMonitor,
-    ],
+    [devices, devicePrefs, handleDeviceChange, handleResolutionChange],
   )
 
   useEffect(() => {
@@ -1038,7 +933,7 @@ export default function Room() {
     const member = isLocal ? selfMember : members.find((m) => m.id === tile.sourceId)
     const handlers = tileHandlers(tile.key, allTiles.length > 1)
     // Only a remote camera tile plays audio; local and screen tiles get
-    // no sink or volume so a volume drag does not re-render them.
+    // no sink so a speaker change does not re-render them.
     const playsAudio = !isLocal && !isScreen
     return (
       <VideoTile
@@ -1053,7 +948,6 @@ export default function Room() {
         camOff={!isScreen ? !(member?.cam ?? true) : false}
         sharing={isScreen}
         sinkId={playsAudio ? devicePrefs.speaker : undefined}
-        volume={playsAudio ? devicePrefs.volume : undefined}
         pinned={pinnedKey === tile.key}
         onTogglePin={handlers.canPin ? handlers.onTogglePin : undefined}
         compact={compact}

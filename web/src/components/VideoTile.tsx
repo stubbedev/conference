@@ -21,7 +21,6 @@ interface VideoTileProps {
   micOff?: boolean
   camOff?: boolean
   sinkId?: string
-  volume?: number
   pinned?: boolean
   onTogglePin?: () => void
   compact?: boolean
@@ -79,7 +78,6 @@ export const VideoTile = memo(function VideoTile({
   micOff,
   camOff,
   sinkId,
-  volume,
   pinned,
   onTogglePin,
   compact,
@@ -158,12 +156,6 @@ export const VideoTile = memo(function VideoTile({
     if (!audio || !sinkId) return
     if ('setSinkId' in audio) audio.setSinkId(sinkId).catch(() => {})
   }, [sinkId, stream])
-
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio || volume === undefined) return
-    audio.volume = Math.min(1, Math.max(0, volume))
-  }, [volume])
 
   const enableSound = () => {
     resumeAudio()
