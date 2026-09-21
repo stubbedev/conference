@@ -13,6 +13,7 @@ import {
   micGainToDb,
   MIN_EQ_DB,
   MIN_MIC_GAIN_DB,
+  selectedCameraId,
   supportsSinkSelection,
   useMicMeter,
   type CameraResolution,
@@ -235,7 +236,12 @@ export function DeviceSettings({
       {!mobile && (
         <DeviceSelect kind="mic" devices={devices.mics} selected={selected.mic} onChange={onChange} />
       )}
-      <DeviceSelect kind="cam" devices={devices.cams} selected={selected.cam} onChange={onChange} />
+      <DeviceSelect
+        kind="cam"
+        devices={devices.cams}
+        selected={selectedCameraId(devices.cams, selected)}
+        onChange={onChange}
+      />
       {devices.cams.length > 0 && (
         <div className="flex min-w-0 flex-col gap-1.5">
           <Label htmlFor="cam-quality" className="text-xs text-muted-foreground">

@@ -11,6 +11,9 @@ import {
   DEFAULT_DEVICE_PREFS,
   DEVICE_LABELS,
   FALLBACK_ASPECT_RATIO,
+  facingFromLabel,
+  facingFromTrack,
+  isMobileDevice,
   openTrack,
   openTrackWithFallback,
   resumeAudio,
@@ -19,6 +22,7 @@ import {
   trackConstraints,
   useMediaDevices,
   validDeviceId,
+  type CameraFacing,
   type CameraResolution,
   type DeviceKind,
   type DevicePrefs,
@@ -125,6 +129,10 @@ export default function Room() {
       micGain:
         typeof stored.micGain === 'number' ? Math.min(4, Math.max(0, stored.micGain)) : 1,
       eqBands: sanitizeEqBands(stored.eqBands),
+      camFacing:
+        stored.camFacing === 'user' || stored.camFacing === 'environment'
+          ? stored.camFacing
+          : '',
     }),
   )
   const [chatOpen, setChatOpen] = usePersistentState('conference:chat-open', false)
@@ -142,6 +150,7 @@ export default function Room() {
 
   const controlsRef = useLatest(controls)
   const prefsRef = useLatest(devicePrefs)
+  const devicesRef = useLatest(devices)
   const chatOpenRef = useLatest(chatOpen)
   const membersRef = useLatest(members)
   const kickedRef = useRef(false)
@@ -223,10 +232,18 @@ export default function Room() {
     setMediaError('')
     try {
       const prefs = prefsRef.current
+      // On a phone the lens, not the deviceId, is the stable identity:
+      // open the remembered facing directly so an iOS id rotation can
+      // never reset the camera choice to the system default.
+      const mobile = isMobileDevice()
+      const chosenCam = devicesRef.current.cams.find((device) => device.deviceId === prefs.cam)
+      const camFacing = mobile
+        ? prefs.camFacing || facingFromLabel(chosenCam?.label ?? '') || undefined
+        : undefined
       const combined = await navigator.mediaDevices
         .getUserMedia({
           audio: trackConstraints('mic', prefs.mic),
-          video: trackConstraints('cam', prefs.cam, prefs.resolution),
+          video: trackConstraints('cam', prefs.cam, prefs.resolution, camFacing),
         })
         .catch(() => null)
       const micTrack = combined
@@ -234,7 +251,7 @@ export default function Room() {
         : await openTrack('mic', prefs.mic)
       const camTrack = combined
         ? (combined.getVideoTracks()[0] ?? null)
-        : await openTrack('cam', prefs.cam, true, prefs.resolution)
+        : await openTrack('cam', prefs.cam, true, prefs.resolution, camFacing)
 
       if (!micTrack && !camTrack) {
         stopMediaStream(localStreamRef.current)
@@ -269,11 +286,24 @@ export default function Room() {
       setLocalStream(stream)
       if (micTrack && outboundMic) watchLocalTrack('mic', micTrack, outboundMic)
       if (camTrack) watchLocalTrack('cam', camTrack, camTrack)
+      if (camTrack && mobile && (prefs.cam || prefs.camFacing)) {
+        // Remember the facing of the camera that actually opened so the
+        // next page load (iOS rotates deviceIds) restores the same lens.
+        const facing = facingFromTrack(camTrack) ?? camFacing
+        const cams = devicesRef.current.cams
+        let cam = prefs.cam
+        if (facing && (!cam || !cams.some((device) => device.deviceId === cam))) {
+          cam = cams.find((device) => facingFromLabel(device.label) === facing)?.deviceId ?? cam
+        }
+        if (cam !== prefs.cam || (facing ?? '') !== prefs.camFacing) {
+          updateDevicePrefs({ cam, camFacing: facing ?? '' })
+        }
+      }
       void refreshDevices()
     } finally {
       setMediaBusy(false)
     }
-  }, [refreshDevices, controlsRef, prefsRef, watchLocalTrack])
+  }, [refreshDevices, controlsRef, prefsRef, devicesRef, updateDevicePrefs, watchLocalTrack])
 
   const bootstrap = useCallback(
     async (password?: string) => {
@@ -544,20 +574,35 @@ export default function Room() {
       kind: TrackKind,
       deviceId: string,
       resolution?: CameraResolution,
-      opts: { silent?: boolean } = {},
+      opts: { silent?: boolean; facing?: CameraFacing } = {},
     ) => {
       const silent = opts.silent === true
       const prefs = prefsRef.current
-      const { track, deviceId: usedId } = await openTrackWithFallback(
+      // On phones the picked camera opens by its facing — the lens, not
+      // the deviceId, is the stable identity there — so an unopenable
+      // duplicate id or an iOS id rotation cannot make a lens dead.
+      const requestedFacing =
+        kind === 'cam' && isMobileDevice()
+          ? (opts.facing ??
+            (deviceId
+              ? (facingFromLabel(
+                  devicesRef.current.cams.find((device) => device.deviceId === deviceId)?.label ??
+                    '',
+                ) ??
+                (deviceId === prefs.cam ? prefs.camFacing || undefined : undefined))
+              : undefined))
+          : undefined
+      const { track, deviceId: usedId, facing: usedFacing, fallback } = await openTrackWithFallback(
         kind,
         deviceId,
         resolution ?? prefs.resolution,
+        requestedFacing,
       )
       if (!track) {
         if (!silent) toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
         return
       }
-      if (deviceId && !usedId && !silent) {
+      if (deviceId && fallback && !silent) {
         toast(
           `That ${DEVICE_LABELS[kind].toLowerCase()} is unavailable here, using the system default.`,
         )
@@ -600,18 +645,42 @@ export default function Room() {
       }
 
       watchLocalTrack(kind, track, outbound)
-      updateDevicePrefs(
-        kind === 'mic'
-          ? { mic: usedId }
-          : { cam: usedId, ...(resolution ? { resolution } : {}) },
-      )
+      if (kind === 'mic') {
+        updateDevicePrefs({ mic: usedId })
+      } else if (!fallback) {
+        const effectiveFacing = usedFacing ?? requestedFacing
+        let cam = usedId
+        if (effectiveFacing && isMobileDevice()) {
+          // The open may have come back on a sibling id of the same lens
+          // (Android duplicates): re-point at the entry the user picked,
+          // resolved by facing, so the selection stays visible.
+          const cams = devicesRef.current.cams
+          if (!cam || !cams.some((device) => device.deviceId === cam)) {
+            cam =
+              cams.find((device) => facingFromLabel(device.label) === effectiveFacing)?.deviceId ??
+              cam
+          }
+        }
+        updateDevicePrefs({
+          cam,
+          ...(isMobileDevice() ? { camFacing: effectiveFacing ?? '' } : {}),
+          ...(resolution ? { resolution } : {}),
+        })
+      } else if (isMobileDevice()) {
+        // The open fell back to the system default; the picked entry
+        // stays selected in the picker (the toast already says why) and
+        // only an explicit resolution change is remembered.
+        if (resolution) updateDevicePrefs({ resolution })
+      } else {
+        updateDevicePrefs({ cam: usedId, ...(resolution ? { resolution } : {}) })
+      }
       setMediaError('')
       void refreshDevices()
       await clientRef.current?.replaceLocalTrack(kind, outbound)
       clientRef.current?.setTrackEnabled(kind, controlsRef.current[kind])
       if (silent) toast.success(`${DEVICE_LABELS[kind]} is back in the call`)
     },
-    [updateDevicePrefs, refreshDevices, controlsRef, prefsRef, watchLocalTrack],
+    [updateDevicePrefs, refreshDevices, controlsRef, prefsRef, devicesRef, watchLocalTrack],
   )
 
   useEffect(() => {
@@ -627,7 +696,13 @@ export default function Room() {
     recoverLockRef.current = true
     void (async () => {
       try {
-        if (wantsCam) await switchDevice('cam', prefsRef.current.cam, undefined, { silent: true })
+        if (wantsCam) {
+          const prefs = prefsRef.current
+          await switchDevice('cam', prefs.cam, undefined, {
+            silent: true,
+            ...(isMobileDevice() && prefs.camFacing ? { facing: prefs.camFacing } : {}),
+          })
+        }
         if (!localStreamRef.current?.getAudioTracks().length && devices.mics.length > 0) {
           await switchDevice('mic', prefsRef.current.mic, undefined, { silent: true })
         }

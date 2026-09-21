@@ -11,6 +11,8 @@ export type DeviceKind = TrackKind | 'speaker'
 
 export type CameraResolution = 'auto' | '360' | '720' | '1080'
 
+export type CameraFacing = 'user' | 'environment'
+
 export interface EqualizerBands {
   low: number
   mid: number
@@ -71,6 +73,7 @@ export function sanitizeEqBands(stored: Partial<EqualizerBands> | undefined): Eq
 export interface DevicePrefs {
   mic: string
   cam: string
+  camFacing: CameraFacing | ''
   speaker: string
   resolution: CameraResolution
   volume: number
@@ -81,6 +84,7 @@ export interface DevicePrefs {
 export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
   mic: '',
   cam: '',
+  camFacing: '',
   speaker: '',
   resolution: 'auto',
   volume: 1,
@@ -168,6 +172,19 @@ export function dedupeDevices(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
   return unique
 }
 
+// Chrome on Android labels cameras "Camera N, facing front/back" while
+// iOS Safari writes "Front Camera"/"Back Camera"; both wordings must
+// resolve to the lens the user means.
+export function facingFromLabel(label: string): CameraFacing | null {
+  if (/facing\s+front/i.test(label)) return 'user'
+  if (/facing\s+back/i.test(label)) return 'environment'
+  if (/\bfront[-\s]?facing\b/i.test(label)) return 'user'
+  if (/\bback[-\s]?facing\b/i.test(label)) return 'environment'
+  if (/\bfront\s+camera\b/i.test(label)) return 'user'
+  if (/\bback\s+camera\b/i.test(label)) return 'environment'
+  return null
+}
+
 // Chrome on Android lists each physical camera multiple times (distinct
 // deviceIds, "Camera N, facing X" labels for the same lens), so on phones
 // the picker collapses cameras by the facing direction parsed from the
@@ -175,13 +192,12 @@ export function dedupeDevices(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
 export function dedupeCameras(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
   if (!isMobileDevice()) return devices
 
-  const seen = new Set<string>()
+  const seen = new Set<CameraFacing>()
   return devices.filter((device) => {
-    const facing = device.label.match(/facing\s+(front|back)/i)
+    const facing = facingFromLabel(device.label)
     if (!facing) return true
-    const key = facing[1].toLowerCase()
-    if (seen.has(key)) return false
-    seen.add(key)
+    if (seen.has(facing)) return false
+    seen.add(facing)
     return true
   })
 }
@@ -279,6 +295,7 @@ export function trackConstraints(
   kind: TrackKind,
   deviceId: string,
   resolution: CameraResolution = 'auto',
+  facing?: CameraFacing,
 ): MediaTrackConstraints {
   if (kind === 'mic') return deviceId ? { deviceId: { exact: deviceId } } : {}
   const size =
@@ -288,6 +305,10 @@ export function trackConstraints(
           width: { ideal: RESOLUTION_DIMENSIONS[resolution].width },
           height: { ideal: RESOLUTION_DIMENSIONS[resolution].height },
         }
+  // On phones the facing is the stable identity of a camera: duplicate
+  // Android deviceIds and iOS id rotation never get a chance to make a
+  // lens unselectable when the lens itself is what gets requested.
+  if (facing) return { facingMode: { exact: facing }, ...size }
   return deviceId ? { deviceId: { exact: deviceId }, ...size } : size
 }
 
@@ -295,8 +316,9 @@ async function requestTrack(
   kind: TrackKind,
   deviceId: string,
   resolution: CameraResolution,
+  facing?: CameraFacing,
 ): Promise<MediaStreamTrack | null> {
-  const constraints = trackConstraints(kind, deviceId, resolution)
+  const constraints = trackConstraints(kind, deviceId, resolution, facing)
   const request: MediaStreamConstraints = kind === 'mic' ? { audio: constraints } : { video: constraints }
   const stream = await navigator.mediaDevices.getUserMedia(request).catch(() => null)
   if (!stream) return null
@@ -308,21 +330,50 @@ async function requestTrack(
 export interface OpenTrackResult {
   track: MediaStreamTrack | null
   deviceId: string
+  facing?: CameraFacing
+  fallback: boolean
 }
 
 // Tries the requested device, then the system default, and reports which
 // one produced the track: some listed devices cannot actually be opened
-// (Android communication routes, ephemeral ids on iOS).
+// (Android communication routes, ephemeral ids on iOS). On phones a known
+// facing is requested directly, so the fallback path stays rare.
 export async function openTrackWithFallback(
   kind: TrackKind,
   deviceId: string,
   resolution: CameraResolution = 'auto',
+  facing?: CameraFacing,
 ): Promise<OpenTrackResult> {
+  if (kind === 'cam' && facing) {
+    const track = await requestTrack(kind, '', resolution, facing)
+    if (track) return { track, deviceId, facing: facingFromTrack(track) ?? facing, fallback: false }
+    if (deviceId) {
+      const byId = await requestTrack(kind, deviceId, resolution)
+      if (byId) return { track: byId, deviceId, facing: facingFromTrack(byId), fallback: false }
+    }
+    const fallbackTrack = await requestTrack(kind, '', resolution)
+    if (fallbackTrack) {
+      return {
+        track: fallbackTrack,
+        deviceId: '',
+        facing: facingFromTrack(fallbackTrack),
+        fallback: true,
+      }
+    }
+    return { track: null, deviceId, fallback: false }
+  }
   for (const attempt of deviceId ? [deviceId, ''] : ['']) {
     const track = await requestTrack(kind, attempt, resolution)
-    if (track) return { track, deviceId: attempt }
+    if (track) {
+      return {
+        track,
+        deviceId: attempt,
+        facing: kind === 'cam' ? facingFromTrack(track) : undefined,
+        fallback: Boolean(deviceId) && attempt === '',
+      }
+    }
   }
-  return { track: null, deviceId }
+  return { track: null, deviceId, fallback: false }
 }
 
 export async function openTrack(
@@ -330,9 +381,10 @@ export async function openTrack(
   deviceId: string,
   allowFallback = true,
   resolution: CameraResolution = 'auto',
+  facing?: CameraFacing,
 ): Promise<MediaStreamTrack | null> {
-  if (!allowFallback) return requestTrack(kind, deviceId, resolution)
-  return (await openTrackWithFallback(kind, deviceId, resolution)).track
+  if (!allowFallback) return requestTrack(kind, deviceId, resolution, facing)
+  return (await openTrackWithFallback(kind, deviceId, resolution, facing)).track
 }
 
 export function stopMediaStream(stream: MediaStream | null | undefined): void {
@@ -344,6 +396,30 @@ export function validDeviceId(devices: MediaDeviceInfo[], deviceId: string): str
   if (!deviceId || devices.length === 0) return deviceId
   if (devices.some((device) => device.deviceId === deviceId)) return deviceId
   return devices.every((device) => device.label !== '') ? '' : deviceId
+}
+
+// The facing of the camera that actually opened, straight from the live
+// track: labels lie on some Android builds and deviceIds rotate on iOS,
+// so the track's own settings are the only trustworthy source.
+export function facingFromTrack(track: MediaStreamTrack): CameraFacing | undefined {
+  try {
+    const facing = track.getSettings().facingMode
+    return facing === 'user' || facing === 'environment' ? facing : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The picker highlights the entry matching the stored id, or on phones
+// the lens matching the remembered facing when the id rotated away
+// (iOS Safari regenerates videoinput deviceIds on every page load).
+export function selectedCameraId(cams: MediaDeviceInfo[], prefs: DevicePrefs): string {
+  if (prefs.cam && cams.some((device) => device.deviceId === prefs.cam)) return prefs.cam
+  if (isMobileDevice() && prefs.camFacing) {
+    const match = cams.find((device) => facingFromLabel(device.label) === prefs.camFacing)
+    if (match) return match.deviceId
+  }
+  return prefs.cam
 }
 
 const RATIO_EPSILON = 0.01
