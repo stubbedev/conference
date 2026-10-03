@@ -7,5 +7,6 @@
 .env
 /conference
 .direnv/
+/.playwright-mcp/
 /tmp/
 build-errors.log
