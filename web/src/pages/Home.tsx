@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { MessageCircleHeart } from 'lucide-react'
+import { ChevronDown, MessageCircleHeart } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -7,6 +7,11 @@ import { api, type CreatedRoom as CreatedRoomInfo, type ServerConfig } from '@/l
 import { CreatedRoom } from '@/components/CreatedRoom'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { Button } from '@/components/ui/button'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
@@ -85,33 +90,47 @@ export default function Home() {
                 maxLength={80}
               />
             </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="room-password">Password (optional)</Label>
-              <Input
-                id="room-password"
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="Leave empty for an open room"
-                maxLength={128}
-              />
-              <p className="text-xs text-muted-foreground">
-                The password never reaches the server: joining sends a proof, and the room key is
-                unsealed in your browser.
-              </p>
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="room-max">Member limit (optional)</Label>
-              <Input
-                id="room-max"
-                type="number"
-                min={0}
-                max={256}
-                value={maxMembers}
-                onChange={(event) => setMaxMembers(event.target.value)}
-                placeholder="Server default"
-              />
-            </div>
+            <Collapsible>
+              <CollapsibleTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="group mx-auto w-fit justify-center text-muted-foreground"
+                >
+                  Advanced
+                  <ChevronDown className="transition-transform group-data-[state=open]:rotate-180" />
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="grid gap-4 pt-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="room-password">Password (optional)</Label>
+                  <Input
+                    id="room-password"
+                    type="password"
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    placeholder="Leave empty for an open room"
+                    maxLength={128}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The password never reaches the server — joining proves it in your browser.
+                  </p>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="room-max">Member limit (optional)</Label>
+                  <Input
+                    id="room-max"
+                    type="number"
+                    min={0}
+                    max={256}
+                    value={maxMembers}
+                    onChange={(event) => setMaxMembers(event.target.value)}
+                    placeholder="Server default"
+                  />
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
             {config.createAuthRequired && (
               <div className="grid gap-1.5">
                 <Label htmlFor="api-key">API key</Label>
