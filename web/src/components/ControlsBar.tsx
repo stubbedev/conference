@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
+import { Hint } from '@/components/Hint'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 
@@ -102,79 +103,99 @@ export const ControlsBar = memo(function ControlsBar({
           : 'border-t px-2 py-3 sm:px-4',
       )}
     >
-      <Button
-        variant={mic ? 'secondary' : 'destructive'}
-        size="icon"
-        className={ICON_BUTTON}
-        onClick={onMic}
-        title={mic ? 'Mute microphone (M)' : 'Unmute microphone (M)'}
-      >
-        {mic ? <Mic /> : <MicOff />}
-      </Button>
-      <Button
-        variant={cam ? 'secondary' : 'destructive'}
-        size="icon"
-        className={ICON_BUTTON}
-        onClick={onCam}
-        title={cam ? 'Turn camera off (V)' : 'Turn camera on (V)'}
-      >
-        {cam ? <Video /> : <VideoOff />}
-      </Button>
-      {canShare && (
+      <Hint label={mic ? 'Mute microphone (M)' : 'Unmute microphone (M)'}>
         <Button
-          variant={sharing ? 'destructive' : 'secondary'}
+          variant={mic ? 'secondary' : 'destructive'}
           size="icon"
           className={ICON_BUTTON}
-          onClick={onShare}
-          title={sharing ? 'Stop sharing' : 'Share your screen'}
+          onClick={onMic}
+          aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}
         >
-          {sharing ? <MonitorX /> : <MonitorUp />}
+          {mic ? <Mic /> : <MicOff />}
         </Button>
+      </Hint>
+      <Hint label={cam ? 'Turn camera off (V)' : 'Turn camera on (V)'}>
+        <Button
+          variant={cam ? 'secondary' : 'destructive'}
+          size="icon"
+          className={ICON_BUTTON}
+          onClick={onCam}
+          aria-label={cam ? 'Turn camera off' : 'Turn camera on'}
+        >
+          {cam ? <Video /> : <VideoOff />}
+        </Button>
+      </Hint>
+      {canShare && (
+        <Hint label={sharing ? 'Stop sharing' : 'Share your screen'}>
+          <Button
+            variant={sharing ? 'destructive' : 'secondary'}
+            size="icon"
+            className={ICON_BUTTON}
+            onClick={onShare}
+            aria-label={sharing ? 'Stop sharing' : 'Share your screen'}
+          >
+            {sharing ? <MonitorX /> : <MonitorUp />}
+          </Button>
+        </Hint>
       )}
       {canRecord && onRecord && (
-        <Button
-          variant={recording ? 'destructive' : 'secondary'}
-          size="icon"
-          className={ICON_BUTTON}
-          onClick={onRecord}
-          title={recording ? 'Stop recording' : 'Record the call'}
-        >
-          {recording ? <Square className="fill-current" /> : <Circle className="fill-current" />}
-        </Button>
+        <Hint label={recording ? 'Stop recording' : 'Record the call'}>
+          <Button
+            variant={recording ? 'destructive' : 'secondary'}
+            size="icon"
+            className={ICON_BUTTON}
+            onClick={onRecord}
+            aria-label={recording ? 'Stop recording' : 'Record the call'}
+          >
+            {recording ? <Square className="fill-current" /> : <Circle className="fill-current" />}
+          </Button>
+        </Hint>
       )}
 
       <Separator orientation="vertical" className="mx-1 self-center" />
 
-      <Button
-        variant={chatOpen ? 'secondary' : 'ghost'}
-        size="icon"
-        className={cn(ICON_BUTTON, 'relative')}
-        onClick={onToggleChat}
-        title={chatOpen ? 'Close chat (C)' : 'Open chat (C)'}
-      >
-        <MessageSquare />
-        {unread > 0 && (
-          <span className="absolute top-0 right-0 grid size-4 -translate-y-1/4 translate-x-1/4 place-items-center rounded-full bg-destructive text-[10px] font-semibold leading-none text-white">
-            {unread > 9 ? '9+' : unread}
-          </span>
-        )}
-      </Button>
+      <Hint label={chatOpen ? 'Close chat (C)' : 'Open chat (C)'}>
+        <Button
+          variant={chatOpen ? 'secondary' : 'ghost'}
+          size="icon"
+          className={cn(ICON_BUTTON, 'relative')}
+          onClick={onToggleChat}
+          aria-label={chatOpen ? 'Close chat' : 'Open chat'}
+        >
+          <MessageSquare />
+          {unread > 0 && (
+            <span className="absolute top-0 right-0 grid size-4 -translate-y-1/4 translate-x-1/4 place-items-center rounded-full bg-destructive text-[10px] font-semibold leading-none text-white">
+              {unread > 9 ? '9+' : unread}
+            </span>
+          )}
+        </Button>
+      </Hint>
       {children}
-      <Button
-        variant="ghost"
-        size="icon"
-        className={ICON_BUTTON}
-        onClick={onToggleFullscreen}
-        title={fullscreen ? 'Exit fullscreen (F)' : 'Enter fullscreen (F)'}
-      >
-        {fullscreen ? <Minimize2 /> : <Maximize2 />}
-      </Button>
+      <Hint label={fullscreen ? 'Exit fullscreen (F)' : 'Enter fullscreen (F)'}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={ICON_BUTTON}
+          onClick={onToggleFullscreen}
+          aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        >
+          {fullscreen ? <Minimize2 /> : <Maximize2 />}
+        </Button>
+      </Hint>
 
       <Separator orientation="vertical" className="mx-1 self-center" />
 
-      <Button variant="destructive" size="icon" className={ICON_BUTTON} onClick={onLeave} title="Leave">
-        <PhoneOff />
-      </Button>
+      <Hint label="Leave">
+        <Button
+          variant="destructive"
+          size="icon"
+          className={ICON_BUTTON}
+          onClick={onLeave}
+          aria-label="Leave"
+        >
+          <PhoneOff />
+        </Button>
+      </Hint>
     </footer>
   )
 })

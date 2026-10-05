@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { ArrowDown, Lock, MicOff, SendHorizonal, Users, VideoOff, X } from 'lucide-react'
 
 import type { ChatMessage, MemberInfo } from '@/lib/sfu'
+import { Hint } from '@/components/Hint'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
@@ -50,9 +51,11 @@ export const ChatPanel = memo(function ChatPanel({
         <h2 className="flex items-center gap-1.5 text-sm font-semibold">
           Chat <Lock className="size-3 text-muted-foreground" />
         </h2>
-        <Button variant="ghost" size="icon" className="size-8" onClick={onClose} title="Close chat">
-          <X />
-        </Button>
+        <Hint label="Close chat" side="bottom">
+          <Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close chat">
+            <X />
+          </Button>
+        </Hint>
       </div>
 
       <div className="shrink-0 border-b px-4 py-3">
@@ -112,16 +115,18 @@ export const ChatPanel = memo(function ChatPanel({
           )}
         </div>
         {!atBottom && (
-          <button
-            type="button"
-            onClick={() =>
-              listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' })
-            }
-            title="Jump to latest"
-            className="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 cursor-pointer place-items-center rounded-full border bg-background shadow-md"
-          >
-            <ArrowDown className="size-4" />
-          </button>
+          <Hint label="Jump to latest">
+            <button
+              type="button"
+              onClick={() =>
+                listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' })
+              }
+              aria-label="Jump to latest"
+              className="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 cursor-pointer place-items-center rounded-full border bg-background shadow-md"
+            >
+              <ArrowDown className="size-4" />
+            </button>
+          </Hint>
         )}
       </div>
 
@@ -138,9 +143,15 @@ export const ChatPanel = memo(function ChatPanel({
           placeholder="Message…"
           autoComplete="off"
         />
-        <Button size="icon" type="submit" title="Send" disabled={!text.trim()}>
-          <SendHorizonal />
-        </Button>
+        {/* A disabled button swallows pointer events, so the trigger is
+            the span around it and the tooltip survives the empty state. */}
+        <Hint label="Send">
+          <span className="inline-flex">
+            <Button size="icon" type="submit" aria-label="Send" disabled={!text.trim()}>
+              <SendHorizonal />
+            </Button>
+          </span>
+        </Hint>
       </form>
     </div>
   )

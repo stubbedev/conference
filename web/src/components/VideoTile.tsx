@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { MicOff, MonitorUp, Pin, PinOff, VideoOff, VolumeX } from 'lucide-react'
 
 import { useLatest } from '@/hooks/latest'
+import { Hint } from '@/components/Hint'
 import {
   aspectRatioChanged,
   playMediaElement,
@@ -265,17 +266,19 @@ export const VideoTile = memo(function VideoTile({
         {camOff && !sharing && <VideoOff className="size-4" />}
       </div>
       {onTogglePin && (
-        <button
-          type="button"
-          onClick={onTogglePin}
-          title={pinned ? 'Unpin' : 'Pin to main view'}
-          className={cn(
-            'absolute top-2 right-2 grid size-7 cursor-pointer place-items-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-opacity hover:bg-black/80',
-            pinned ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
-          )}
-        >
-          {pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
-        </button>
+        <Hint label={pinned ? 'Unpin' : 'Pin to main view'} side="left">
+          <button
+            type="button"
+            onClick={onTogglePin}
+            aria-label={pinned ? 'Unpin' : 'Pin to main view'}
+            className={cn(
+              'absolute top-2 right-2 grid size-7 cursor-pointer place-items-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-opacity hover:bg-black/80',
+              pinned ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+            )}
+          >
+            {pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+          </button>
+        </Hint>
       )}
     </div>
   )

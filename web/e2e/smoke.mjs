@@ -257,11 +257,11 @@ async function evalJs(browser, expression) {
   return r.result.value
 }
 
-async function clickButtonByTitle(browser, title) {
+async function clickButtonByTitle(browser, label) {
   for (let t = 0; t < 20; t++) {
     const clicked = await evalJs(
       browser,
-      `(() => { const b = [...document.querySelectorAll('button')].find(b => b.title === ${JSON.stringify(title)}); if (b) { b.click(); return true; } return false; })()`,
+      `(() => { const b = [...document.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === ${JSON.stringify(label)}); if (b) { b.click(); return true; } return false; })()`,
     )
     if (clicked) return true
     await sleep(250)
@@ -270,7 +270,7 @@ async function clickButtonByTitle(browser, title) {
 }
 
 const recordingBadgePresent = `(() => { const h = document.querySelector('header'); return Boolean(h && [...h.querySelectorAll('span')].some(s => s.textContent.trim() === 'Recording')); })()`
-const recordButtonPresent = `[...document.querySelectorAll('button')].some(b => b.title === 'Record the call')`
+const recordButtonPresent = `[...document.querySelectorAll('button')].some(b => b.getAttribute('aria-label') === 'Record the call')`
 
 // waitForBadge polls until the badge reaches the wanted state, so the
 // assertions do not depend on event-arrival timing.

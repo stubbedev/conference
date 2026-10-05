@@ -2,6 +2,7 @@ import { memo, type ReactNode } from 'react'
 import { Mic, MicOff, MonitorX, UserX, Users, Video, VideoOff } from 'lucide-react'
 
 import type { MemberInfo, ModerateAction } from '@/lib/sfu'
+import { Hint } from '@/components/Hint'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 
@@ -42,12 +43,14 @@ export const ParticipantsPanel = memo(function ParticipantsPanel({
 }: ParticipantsPanelProps) {
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        <Button variant="secondary" className="h-7 gap-1 px-2.5 text-xs" title="Participants">
-          <Users className="size-3.5" />
-          {members.length}
-        </Button>
-      </PopoverTrigger>
+      <Hint label="Participants" side="bottom">
+        <PopoverTrigger asChild>
+          <Button variant="secondary" className="h-7 gap-1 px-2.5 text-xs" aria-label="Participants">
+            <Users className="size-3.5" />
+            {members.length}
+          </Button>
+        </PopoverTrigger>
+      </Hint>
       <PopoverContent align="end" className="w-72 p-2">
         <div className="grid gap-0.5">
           {members.map((member) => {
@@ -73,16 +76,17 @@ export const ParticipantsPanel = memo(function ParticipantsPanel({
                 {canModerate && !self && (
                   <span className="flex shrink-0 items-center gap-0.5">
                     {actionsFor(member).map(({ action, title, icon, destructive }) => (
-                      <Button
-                        key={action}
-                        variant="ghost"
-                        size="icon"
-                        className={destructive ? 'text-destructive size-7 hover:text-destructive' : 'size-7'}
-                        title={title}
-                        onClick={() => onModerate(member.id, action)}
-                      >
-                        {icon}
-                      </Button>
+                      <Hint key={action} label={title} side="left">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={destructive ? 'text-destructive size-7 hover:text-destructive' : 'size-7'}
+                          aria-label={title}
+                          onClick={() => onModerate(member.id, action)}
+                        >
+                          {icon}
+                        </Button>
+                      </Hint>
                     ))}
                   </span>
                 )}

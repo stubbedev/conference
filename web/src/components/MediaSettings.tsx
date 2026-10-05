@@ -17,6 +17,7 @@ import {
   type DevicePrefs,
 } from '@/hooks/media'
 import { Button } from '@/components/ui/button'
+import { Hint } from '@/components/Hint'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
@@ -185,11 +186,13 @@ export function DeviceSettings({
 export function DeviceSettingsPopover(props: DeviceSettingsProps) {
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" title="Audio and video settings">
-          <Settings2 />
-        </Button>
-      </PopoverTrigger>
+      <Hint label="Audio and video settings" side="top">
+        <PopoverTrigger asChild>
+          <Button variant="ghost" size="icon" aria-label="Audio and video settings">
+            <Settings2 />
+          </Button>
+        </PopoverTrigger>
+      </Hint>
       <PopoverContent side="top" align="end" className="w-80">
         <p className="mb-3 text-sm font-medium">Audio and video</p>
         <DeviceSettings {...props} />
