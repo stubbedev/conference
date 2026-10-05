@@ -11,6 +11,8 @@ export interface RecorderTile {
   stream: MediaStream | null
   name: string
   local: boolean
+  /** Spotlights the tile, mirroring the recorder's pinned view. */
+  pinned: boolean
 }
 
 const CANVAS_WIDTH = 1280
@@ -49,6 +51,7 @@ interface RecorderEntry {
   name: string
   video: HTMLVideoElement
   track: MediaStreamTrack
+  pinned: boolean
 }
 
 // One track mixed into the recording. Remote tracks route through a
@@ -125,10 +128,11 @@ export class CallRecorder {
         video.playsInline = true
         video.srcObject = new MediaStream([track])
         void video.play().catch(() => {})
-        entry = { name: tile.name, video, track }
+        entry = { name: tile.name, video, track, pinned: tile.pinned }
         this.entries.set(tile.key, entry)
       } else {
         if (entry.name !== tile.name) entry.name = tile.name
+        if (entry.pinned !== tile.pinned) entry.pinned = tile.pinned
         // A device switch replaces the tile's track under the same key;
         // re-bind so the composite follows the live capture.
         if (entry.track !== track) {
@@ -327,6 +331,16 @@ export class CallRecorder {
     const { ctx, canvas } = this
     ctx.fillStyle = '#000000'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
+    if (this.entries.size === 0) return
+
+    // Mirror the recorder's view: a pinned tile gets the spotlight with
+    // the rest in a bottom strip, exactly like the room layout (which
+    // also auto-pins screen shares). No pin, uniform grid.
+    const pinned = [...this.entries.values()].find((entry) => entry.pinned)
+    if (pinned) {
+      this.paintSpotlight(pinned)
+      return
+    }
 
     // A video without decoded frames yet would draw nothing and leave a
     // black cell; skipping it keeps the grid packed instead.
@@ -346,6 +360,34 @@ export class CallRecorder {
       this.drawCover(entry.video, x, y, cellWidth, cellHeight)
       this.drawLabel(entry.name, x, y, cellWidth, cellHeight)
     })
+  }
+
+  private paintSpotlight(pinned: RecorderEntry): void {
+    const { canvas } = this
+    const gap = 8
+    const others = [...this.entries.values()].filter((entry) => entry !== pinned)
+    const stripHeight = others.length > 0 ? Math.round(canvas.height * 0.18) : 0
+    const mainHeight = canvas.height - (stripHeight > 0 ? stripHeight + gap : 0)
+
+    // The pinned cell stays black until frames arrive; the layout does
+    // not jump around while it decodes.
+    if (pinned.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      this.drawCover(pinned.video, 0, 0, canvas.width, mainHeight)
+      this.drawLabel(pinned.name, 0, 0, canvas.width, mainHeight)
+    }
+
+    if (stripHeight === 0) return
+
+    const cellWidth = Math.round((stripHeight * 16) / 9)
+    let x = 0
+    for (const entry of others) {
+      // Overflow clips like the live strip's horizontal scroll.
+      if (x >= canvas.width) break
+      if (entry.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) continue
+      this.drawCover(entry.video, x, canvas.height - stripHeight, cellWidth, stripHeight)
+      this.drawLabel(entry.name, x, canvas.height - stripHeight, cellWidth, stripHeight)
+      x += cellWidth + gap
+    }
   }
 
   private drawCover(video: HTMLVideoElement, x: number, y: number, w: number, h: number): void {

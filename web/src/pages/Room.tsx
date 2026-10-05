@@ -46,6 +46,7 @@ import { Button } from '@/components/ui/button'
 import { ChatPanel } from '@/components/ChatPanel'
 import { ControlsBar } from '@/components/ControlsBar'
 import { DeviceSettingsPopover } from '@/components/MediaSettings'
+import { Hint } from '@/components/Hint'
 import { JoinGate } from '@/components/JoinGate'
 import { ParticipantsPanel } from '@/components/ParticipantsPanel'
 import { Prejoin } from '@/components/Prejoin'
@@ -1047,24 +1048,6 @@ export default function Room() {
     return list
   }, [screenStream, localStream, tiles])
 
-  // While recording, every tile change (member joins or leaves, a
-  // screen share starts or stops) re-lays out the composite.
-  const recorderTiles = useMemo<RecorderTile[]>(
-    () =>
-      allTiles.map((tile) => ({
-        key: tile.key,
-        stream: tile.stream,
-        name: tileLabel(tile, displayName, members),
-        local: tile.sourceId === LOCAL_SOURCE,
-      })),
-    [allTiles, displayName, members],
-  )
-
-  useEffect(() => {
-    if (!recording) return
-    recorderRef.current?.setTiles(recorderTiles)
-  }, [recording, recorderTiles])
-
   const pinnedKey =
     userPin === NO_PIN
       ? null
@@ -1073,6 +1056,26 @@ export default function Room() {
         : (allTiles.find((tile) => tile.kind === SCREEN_KIND)?.key ?? null)
   const pinnedTile = pinnedKey ? (allTiles.find((tile) => tile.key === pinnedKey) ?? null) : null
   const stripTiles = pinnedTile ? allTiles.filter((tile) => tile.key !== pinnedKey) : []
+
+  // While recording, every tile change (member joins or leaves, a pin
+  // changes, a screen share starts or stops) re-lays out the composite
+  // to mirror what the recorder sees on screen.
+  const recorderTiles = useMemo<RecorderTile[]>(
+    () =>
+      allTiles.map((tile) => ({
+        key: tile.key,
+        stream: tile.stream,
+        name: tileLabel(tile, displayName, members),
+        local: tile.sourceId === LOCAL_SOURCE,
+        pinned: pinnedKey === tile.key,
+      })),
+    [allTiles, displayName, members, pinnedKey],
+  )
+
+  useEffect(() => {
+    if (!recording) return
+    recorderRef.current?.setTiles(recorderTiles)
+  }, [recording, recorderTiles])
 
   const handleTileRatio = useCallback((key: string, ratio: number) => {
     setTileRatios((prev) =>
@@ -1211,15 +1214,17 @@ export default function Room() {
     <div className="flex h-dvh flex-col">
       <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-3 sm:px-4">
         <div className="flex min-w-0 items-center gap-2">
-          <button
-            type="button"
-            onClick={onTitleTap}
-            title="Copy invite link (tap 5× for diagnostics)"
-            className="group -mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-sm font-medium transition-colors hover:bg-secondary"
-          >
-            <span className="truncate">{roomInfo?.name || slug}</span>
-            <Link2 className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-          </button>
+          <Hint label="Copy invite link (tap 5× for diagnostics)" side="bottom">
+            <button
+              type="button"
+              onClick={onTitleTap}
+              aria-label="Copy invite link"
+              className="group -mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-sm font-medium transition-colors hover:bg-secondary"
+            >
+              <span className="truncate">{roomInfo?.name || slug}</span>
+              <Link2 className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+            </button>
+          </Hint>
           {recorder && (
             <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
               <Circle className="size-2 animate-pulse fill-current" />
