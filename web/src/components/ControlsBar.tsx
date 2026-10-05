@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
+  Circle,
   Maximize2,
   MessageSquare,
   Mic,
@@ -8,6 +9,7 @@ import {
   MonitorUp,
   MonitorX,
   PhoneOff,
+  Square,
   Video,
   VideoOff,
 } from 'lucide-react'
@@ -25,9 +27,13 @@ interface ControlsBarProps {
   fullscreen: boolean
   /** getDisplayMedia is missing on iOS Safari and some mobile browsers. */
   canShare?: boolean
+  /** Host-only: browsers without MediaRecorder canvas capture hide it too. */
+  canRecord?: boolean
+  recording?: boolean
   onMic: () => void
   onCam: () => void
   onShare: () => void
+  onRecord?: () => void
   onLeave: () => void
   onToggleChat: () => void
   onToggleFullscreen: () => void
@@ -35,6 +41,10 @@ interface ControlsBarProps {
 }
 
 const AUTO_HIDE_MS = 3000
+
+// Eight controls must fit a 360px phone screen: shrink the icons there,
+// keep the full size on anything wider.
+const ICON_BUTTON = 'size-8 sm:size-9'
 
 export const ControlsBar = memo(function ControlsBar({
   mic,
@@ -44,9 +54,12 @@ export const ControlsBar = memo(function ControlsBar({
   unread,
   fullscreen,
   canShare = true,
+  canRecord = false,
+  recording = false,
   onMic,
   onCam,
   onShare,
+  onRecord,
   onLeave,
   onToggleChat,
   onToggleFullscreen,
@@ -86,12 +99,13 @@ export const ControlsBar = memo(function ControlsBar({
               'fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-2xl border bg-background/95 p-2 shadow-lg backdrop-blur transition-all duration-200',
               visible ? 'opacity-100' : 'pointer-events-none translate-y-3 opacity-0',
             )
-          : 'border-t px-4 py-3',
+          : 'border-t px-2 py-3 sm:px-4',
       )}
     >
       <Button
         variant={mic ? 'secondary' : 'destructive'}
         size="icon"
+        className={ICON_BUTTON}
         onClick={onMic}
         title={mic ? 'Mute microphone (M)' : 'Unmute microphone (M)'}
       >
@@ -100,6 +114,7 @@ export const ControlsBar = memo(function ControlsBar({
       <Button
         variant={cam ? 'secondary' : 'destructive'}
         size="icon"
+        className={ICON_BUTTON}
         onClick={onCam}
         title={cam ? 'Turn camera off (V)' : 'Turn camera on (V)'}
       >
@@ -109,10 +124,22 @@ export const ControlsBar = memo(function ControlsBar({
         <Button
           variant={sharing ? 'destructive' : 'secondary'}
           size="icon"
+          className={ICON_BUTTON}
           onClick={onShare}
           title={sharing ? 'Stop sharing' : 'Share your screen'}
         >
           {sharing ? <MonitorX /> : <MonitorUp />}
+        </Button>
+      )}
+      {canRecord && onRecord && (
+        <Button
+          variant={recording ? 'destructive' : 'secondary'}
+          size="icon"
+          className={ICON_BUTTON}
+          onClick={onRecord}
+          title={recording ? 'Stop recording' : 'Record the call'}
+        >
+          {recording ? <Square className="fill-current" /> : <Circle className="fill-current" />}
         </Button>
       )}
 
@@ -121,9 +148,9 @@ export const ControlsBar = memo(function ControlsBar({
       <Button
         variant={chatOpen ? 'secondary' : 'ghost'}
         size="icon"
+        className={cn(ICON_BUTTON, 'relative')}
         onClick={onToggleChat}
         title={chatOpen ? 'Close chat (C)' : 'Open chat (C)'}
-        className="relative"
       >
         <MessageSquare />
         {unread > 0 && (
@@ -136,6 +163,7 @@ export const ControlsBar = memo(function ControlsBar({
       <Button
         variant="ghost"
         size="icon"
+        className={ICON_BUTTON}
         onClick={onToggleFullscreen}
         title={fullscreen ? 'Exit fullscreen (F)' : 'Enter fullscreen (F)'}
       >
@@ -144,7 +172,7 @@ export const ControlsBar = memo(function ControlsBar({
 
       <Separator orientation="vertical" className="mx-1 self-center" />
 
-      <Button variant="destructive" size="icon" onClick={onLeave} title="Leave">
+      <Button variant="destructive" size="icon" className={ICON_BUTTON} onClick={onLeave} title="Leave">
         <PhoneOff />
       </Button>
     </footer>

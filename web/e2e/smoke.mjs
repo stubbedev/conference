@@ -12,7 +12,7 @@
 // no network access; the server listens on 127.0.0.1 with ephemeral
 // ICE ports. Exit code 0 means every assertion held on both browsers.
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -248,6 +248,52 @@ async function joinRoom(browser, url) {
   throw new Error('Join call button never became clickable')
 }
 
+async function evalJs(browser, expression) {
+  const r = await browser.cdp.send(
+    'Runtime.evaluate',
+    { expression, returnByValue: true, awaitPromise: true },
+    browser.sessionId,
+  )
+  return r.result.value
+}
+
+async function clickButtonByTitle(browser, title) {
+  for (let t = 0; t < 20; t++) {
+    const clicked = await evalJs(
+      browser,
+      `(() => { const b = [...document.querySelectorAll('button')].find(b => b.title === ${JSON.stringify(title)}); if (b) { b.click(); return true; } return false; })()`,
+    )
+    if (clicked) return true
+    await sleep(250)
+  }
+  return false
+}
+
+const recordingBadgePresent = `(() => { const h = document.querySelector('header'); return Boolean(h && [...h.querySelectorAll('span')].some(s => s.textContent.trim() === 'Recording')); })()`
+const recordButtonPresent = `[...document.querySelectorAll('button')].some(b => b.title === 'Record the call')`
+
+// waitForBadge polls until the badge reaches the wanted state, so the
+// assertions do not depend on event-arrival timing.
+async function waitForBadge(browser, present, timeoutMs = 8000) {
+  for (let t = 0; t < timeoutMs; t += 250) {
+    const has = await evalJs(browser, present ? recordingBadgePresent : `!(${recordingBadgePresent})`)
+    if (has) return true
+    await sleep(250)
+  }
+  return false
+}
+
+async function waitForDownload(dir, timeoutMs = 15000) {
+  for (let t = 0; t < timeoutMs; t += 500) {
+    const files = readdirSync(dir).filter((f) => /\.(webm|mp4)$/.test(f))
+    if (files.length > 0 && statSync(join(dir, files[0])).size > 0) {
+      return { name: files[0], size: statSync(join(dir, files[0])).size }
+    }
+    await sleep(500)
+  }
+  return null
+}
+
 async function sample(browser) {
   const r = await browser.cdp.send(
     'Runtime.evaluate',
@@ -279,15 +325,18 @@ async function main() {
       })
     ).json()
     const url = `http://127.0.0.1:${port}/r/${room.slug}#k=${room.roomKey}`
+    const privUrl = `http://127.0.0.1:${port}${room.privPath}#k=${room.roomKey}`
 
     const browsers = [await launchChrome(0, dir), await launchChrome(1, dir)]
     for (const b of browsers) procs.push(b.proc)
     console.log(`smoke: ${browsers[0].browser}, room ${room.slug}`)
 
-    for (const b of browsers) {
-      await joinRoom(b, url)
-      await sleep(stagger)
-    }
+    // The first browser joins through the privileged link so it can
+    // host the recording phase; the second joins like a normal guest.
+    await joinRoom(browsers[0], privUrl)
+    await sleep(stagger)
+    await joinRoom(browsers[1], url)
+    await sleep(stagger)
 
     await sleep(seconds * 1000)
     const first = await Promise.all(browsers.map(sample))
@@ -317,6 +366,63 @@ async function main() {
         check(failures, label, !v.paused, `video element ${j} is paused`)
       }
       check(failures, label, a.errors.length === 0, `page errors: ${a.errors.join(' | ')}`)
+    }
+
+    // Recording phase. Round one: the host records, a third browser
+    // joins late (the badge must be replayed in its welcome), then the
+    // host navigates away (the badge must clear everywhere — recording
+    // outlives no one). Round two: the second host re-records, stops,
+    // and a file must land on its disk.
+    const dlDir = join(dir, 'downloads')
+    mkdirSync(dlDir)
+
+    const hostRecordButton = await clickButtonByTitle(browsers[0], 'Record the call')
+    check(failures, 'recording', hostRecordButton, 'record button missing on the privileged browser')
+    check(failures, 'recording', !(await evalJs(browsers[1], recordButtonPresent)), 'record button visible on the unprivileged browser')
+
+    if (hostRecordButton) {
+      check(failures, 'recording', await waitForBadge(browsers[0], true), 'recording badge missing on the recorder page')
+      check(failures, 'recording', await waitForBadge(browsers[1], true), 'recording badge missing on the guest page')
+
+      const late = await launchChrome(2, dir)
+      procs.push(late.proc)
+      await joinRoom(late, privUrl)
+      check(failures, 'recording', await waitForBadge(late, true), 'late joiner did not see the recording badge')
+
+      const s = browsers[0].sessionId
+      await browsers[0].cdp.send('Page.navigate', { url: 'about:blank' }, s)
+      check(failures, 'recording', await waitForBadge(browsers[1], false), 'badge did not clear on the guest after the recorder left')
+      check(failures, 'recording', await waitForBadge(late, false), 'badge did not clear on the late joiner after the recorder left')
+
+      // Round two: the late joiner holds a privileged session, so it
+      // becomes the recorder and must deliver a file when it stops.
+      await late.cdp.send('Browser.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath: dlDir,
+      })
+      const reRecord = await clickButtonByTitle(late, 'Record the call')
+      check(failures, 'recording', reRecord, 'record button missing on the second host')
+
+      if (reRecord) {
+        check(failures, 'recording', await waitForBadge(late, true), 'recording badge missing on the second recorder')
+        check(failures, 'recording', await waitForBadge(browsers[1], true), 'recording badge missing on the guest for the second recorder')
+        await sleep(3000)
+
+        const stopped = await clickButtonByTitle(late, 'Stop recording')
+        check(failures, 'recording', stopped, 'stop button missing while recording')
+
+        const download = await waitForDownload(dlDir)
+        check(failures, 'recording', download !== null, 'no recording file was downloaded')
+
+        check(failures, 'recording', await waitForBadge(late, false), 'badge did not clear on the recorder after stop')
+        check(failures, 'recording', await waitForBadge(browsers[1], false), 'badge did not clear on the guest after stop')
+        const recorderErrors = await evalJs(late, 'window.__errors')
+        const guestErrors = await evalJs(browsers[1], 'window.__errors')
+        check(failures, 'recording', recorderErrors.length === 0, `recorder page errors: ${recorderErrors.join(' | ')}`)
+        check(failures, 'recording', guestErrors.length === 0, `guest page errors: ${guestErrors.join(' | ')}`)
+
+        console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes` : 'MISSING'}`)
+      }
     }
 
     if (failures.length) {

@@ -21,6 +21,14 @@ media and chat are encrypted end-to-end in the browser.
   created — even the operator can only delete them, not edit them.
 - **Screen sharing**, mic/camera controls with per-member state,
   end-to-end-encrypted chat.
+- **Local-first recording** (host-initiated). The host composites the
+  call — every tile plus one mixed audio track — inside their own
+  browser and downloads a video file on stop. The server only announces
+  that a recording is running (the badge everyone sees); the media
+  itself never leaves the recorder, keeping the promise intact.
+  Long calls stream to the origin-private file system, so memory stays
+  flat, and the container follows the browser (WebM on Chrome/Firefox,
+  MP4 on Safari).
 - **Galène-style SFU.** One upstream peer connection per publisher, one
   downstream connection per subscriber, trickle ICE, keyframe requests,
   NACK/receiver-report interceptors and a REMB bandwidth ceiling — all on a

@@ -153,6 +153,21 @@ func (p *testPeer) next(t *testing.T, msgType string) sfu.Message {
 	}
 }
 
+// drain returns everything queued right now, without waiting: it backs
+// assertions that a message did NOT arrive.
+func (p *testPeer) drain() []sfu.Message {
+	var msgs []sfu.Message
+
+	for {
+		select {
+		case msg := <-p.out:
+			msgs = append(msgs, msg)
+		default:
+			return msgs
+		}
+	}
+}
+
 func onICECandidate(member *sfu.Member, pcID string) func(*webrtc.ICECandidate) {
 	return func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
@@ -596,6 +611,116 @@ func TestModeration(t *testing.T) {
 	if live := hub.LiveCount(testSlug); live != 1 {
 		t.Fatalf("expected 1 member left, got %d", live)
 	}
+}
+
+// expectRecording asserts the next recording event on a peer.
+func expectRecording(t *testing.T, peer *testPeer, fromID string, announced bool) {
+	t.Helper()
+
+	msg := peer.next(t, "recording")
+
+	if msg.From != fromID || msg.On != announced {
+		t.Fatalf("%s expected recording on=%v from %q, got on=%v from %q", peer.member.Name, announced, fromID, msg.On, msg.From)
+	}
+}
+
+func TestRecordingAnnouncement(t *testing.T) {
+	t.Parallel()
+
+	const record = "record"
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	// Unprivileged members cannot announce a recording.
+	guest.member.Handle(sfu.Message{Type: record, On: true})
+
+	if msg := guest.next(t, "error"); msg.Code != "not-allowed" {
+		t.Fatalf("guest expected not-allowed, got %q", msg.Code)
+	}
+
+	// The announcement reaches everyone, the announcing host included,
+	// so its own badge comes from the room rather than local state.
+	host.member.Handle(sfu.Message{Type: record, On: true})
+	expectRecording(t, host, host.member.ID, true)
+	expectRecording(t, guest, host.member.ID, true)
+
+	// A second recorder is rejected while one is announced.
+	host2 := newTestPeer(t, hub, engine, "host2", true)
+	host2.member.Handle(sfu.Message{Type: record, On: true})
+
+	if msg := host2.next(t, "error"); msg.Code != "record-busy" {
+		t.Fatalf("host2 expected record-busy, got %q", msg.Code)
+	}
+
+	// Late joiners get the flag replayed in the welcome.
+	late := newTestPeer(t, hub, engine, "late", false)
+
+	if msg := late.next(t, "welcome"); msg.Recorder != host.member.ID {
+		t.Fatalf("late joiner expected recorder %q, got %q", host.member.ID, msg.Recorder)
+	}
+}
+
+func TestRecordingLifecycle(t *testing.T) {
+	t.Parallel()
+
+	const record = "record"
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	host.member.Handle(sfu.Message{Type: record, On: true})
+	expectRecording(t, host, host.member.ID, true)
+	expectRecording(t, guest, host.member.ID, true)
+
+	// Re-announcing by the active recorder changes nothing: the room is
+	// not flooded with duplicate recording events.
+	host.member.Handle(sfu.Message{Type: record, On: true})
+	time.Sleep(100 * time.Millisecond)
+
+	for _, msg := range guest.drain() {
+		if msg.Type == "recording" {
+			t.Fatalf("re-announce produced a duplicate recording event: %+v", msg)
+		}
+	}
+
+	// Releasing by anyone but the recorder is a no-op.
+	guest.member.Handle(sfu.Message{Type: record, On: false})
+	time.Sleep(100 * time.Millisecond)
+
+	for _, msg := range host.drain() {
+		if msg.Type == "recording" {
+			t.Fatalf("release by a non-recorder produced a recording event: %+v", msg)
+		}
+	}
+
+	// The recorder leaving clears the flag for everyone still present.
+	host.member.Leave()
+	expectRecording(t, guest, host.member.ID, false)
+
+	// The room accepts a new recorder again.
+	host2 := newTestPeer(t, hub, engine, "host2", true)
+	host2.member.Handle(sfu.Message{Type: record, On: true})
+	expectRecording(t, host2, host2.member.ID, true)
+	expectRecording(t, guest, host2.member.ID, true)
 }
 
 // watchKeyframeOnPublisher closes keyframe once the publisher's video

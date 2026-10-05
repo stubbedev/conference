@@ -404,7 +404,10 @@ export function aspectRatioChanged(prev: number, next: number): boolean {
 
 let sharedContext: AudioContext | null = null
 
-function audioContext(): AudioContext | null {
+// The shared AudioContext backs the mic gain graph and any other Web
+// Audio consumer in the call (the recording mixer), so one gesture
+// unlock covers all of them.
+export function audioContext(): AudioContext | null {
   if (sharedContext) return sharedContext
   try {
     sharedContext = new AudioContext()

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import { CircleAlert, Link2, Loader2 } from 'lucide-react'
+import { Circle, CircleAlert, Link2, Loader2 } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -40,6 +40,7 @@ import {
   toB64,
 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
+import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
 import { RoomClient, type ChatMessage, type MemberInfo, type ModerateAction } from '@/lib/sfu'
 import { Button } from '@/components/ui/button'
 import { ChatPanel } from '@/components/ChatPanel'
@@ -83,6 +84,17 @@ function supportsE2EE(): boolean {
   return 'RTCRtpScriptTransform' in window
 }
 
+// The name a tile carries, on screen and in the recording composite;
+// screens are labeled by their owner, since the picture alone does not
+// say whose it is.
+function tileLabel(tile: Tile, displayName: string, members: MemberInfo[]): string {
+  if (tile.sourceId === LOCAL_SOURCE) {
+    return tile.kind === SCREEN_KIND ? 'Your screen' : `${displayName} (you)`
+  }
+  const name = members.find((member) => member.id === tile.sourceId)?.name ?? 'Guest'
+  return tile.kind === SCREEN_KIND ? `${name}'s screen` : name
+}
+
 export default function Room() {
   const { slug = '' } = useParams()
   const [searchParams] = useSearchParams()
@@ -107,6 +119,8 @@ export default function Room() {
   const [fullscreen, setFullscreen] = useState(false)
   const [privileged, setPrivileged] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
+  const [recorder, setRecorder] = useState<string | null>(null)
+  const [recording, setRecording] = useState(false)
   const titleTapsRef = useRef<number[]>([])
   const copyTimerRef = useRef<number | undefined>(undefined)
   const pageErrorsRef = useRef<string[]>([])
@@ -138,6 +152,7 @@ export default function Room() {
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
 
   const clientRef = useRef<RoomClient | null>(null)
+  const recorderRef = useRef<CallRecorder | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
   const micPipelineRef = useRef<MicPipeline | null>(null)
@@ -403,6 +418,7 @@ export default function Room() {
   useEffect(() => {
     return () => {
       clientRef.current?.leave()
+      recorderRef.current?.stop().catch(() => {})
       micPipelineRef.current?.dispose()
       stopMediaStream(localStreamRef.current)
       stopMediaStream(screenStreamRef.current)
@@ -432,6 +448,49 @@ export default function Room() {
     })
   }, [devices, setDevicePrefs])
 
+  const stopRecording = useCallback(async () => {
+    const active = recorderRef.current
+    if (!active) return
+    recorderRef.current = null
+    setRecording(false)
+    try {
+      await active.stop()
+    } catch {
+      toast.error('The recording could not be saved.')
+    }
+    clientRef.current?.announceRecording(false)
+  }, [])
+
+  const startRecording = useCallback(() => {
+    if (recorderRef.current) return
+    if (!recorderSupported()) {
+      toast.error('This browser cannot record the call.')
+      return
+    }
+
+    let instance: CallRecorder
+    try {
+      instance = new CallRecorder(slug)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Recording is unavailable.')
+      return
+    }
+    recorderRef.current = instance
+    setRecording(true)
+    instance.start().catch((err: unknown) => {
+      recorderRef.current = null
+      setRecording(false)
+      toast.error(err instanceof Error ? err.message : 'Recording failed to start.')
+      clientRef.current?.announceRecording(false)
+    })
+    clientRef.current?.announceRecording(true)
+  }, [slug])
+
+  const toggleRecording = useCallback(() => {
+    if (recorderRef.current) void stopRecording()
+    else startRecording()
+  }, [startRecording, stopRecording])
+
   const joinCall = useCallback(async () => {
     const stream = localStreamRef.current
     const info = roomInfo
@@ -456,7 +515,10 @@ export default function Room() {
       })
       clientRef.current = client
 
-      client.on('welcome', ({ members: initial }) => setMembers(initial))
+      client.on('welcome', ({ members: initial, recorder }) => {
+        setMembers(initial)
+        setRecorder(recorder || null)
+      })
       client.on('member-joined', (member) => {
         setMembers((prev) => [...prev.filter((m) => m.id !== member.id), member])
         toast(`${member.name} joined`)
@@ -487,11 +549,33 @@ export default function Room() {
         setMessages((prev) => [...prev, message])
         if (!message.mine && !chatOpenRef.current) setUnread((count) => count + 1)
       })
-      client.on('error', ({ text }) => toast.error(text))
+      client.on('recording', ({ from, on }) => {
+        setRecorder(on ? from : null)
+        if (from === client.memberId) {
+          setRecording(on)
+          if (on) toast.success('Recording started')
+          else toast('Recording stopped, the file is downloading')
+          return
+        }
+        const name = client.memberName(from)
+        if (on) toast(`${name} started recording this call`)
+        else toast(`${name} stopped recording`)
+      })
+      client.on('error', ({ code, text }) => {
+        toast.error(text)
+        // A rejected announce (not host, or someone else got there
+        // first) rolls the local recorder back so the badge and the
+        // button match what the room actually accepted.
+        if ((code === 'not-allowed' || code === 'record-busy') && recorderRef.current) {
+          void stopRecording()
+        }
+      })
       client.on('closed', () => {
         if (kickedRef.current) return
-        toast.error('The connection was closed.')
-        navigate('/')
+        void stopRecording().finally(() => {
+          toast.error('The connection was closed.')
+          navigate('/')
+        })
       })
 
       await client.connect()
@@ -503,7 +587,7 @@ export default function Room() {
       setFatalError(err instanceof Error ? err.message : 'Could not join the room.')
       setPhase('error')
     }
-  }, [slug, displayName, roomInfo, navigate, chatOpenRef, membersRef, kickedRef])
+  }, [slug, displayName, roomInfo, navigate, chatOpenRef, membersRef, kickedRef, stopRecording])
 
   const toggleTrack = useCallback(
     (kind: TrackKind) => {
@@ -907,10 +991,11 @@ export default function Room() {
     copyTimerRef.current = window.setTimeout(() => void copyInvite(), 450)
   }
 
-  const leave = useCallback(() => {
+  const leave = useCallback(async () => {
+    await stopRecording()
     clientRef.current?.leave()
     navigate('/')
-  }, [navigate])
+  }, [navigate, stopRecording])
 
   const sendChat = useCallback(async (text: string) => {
     await clientRef.current?.sendChat(text)
@@ -961,6 +1046,24 @@ export default function Room() {
     }
     return list
   }, [screenStream, localStream, tiles])
+
+  // While recording, every tile change (member joins or leaves, a
+  // screen share starts or stops) re-lays out the composite.
+  const recorderTiles = useMemo<RecorderTile[]>(
+    () =>
+      allTiles.map((tile) => ({
+        key: tile.key,
+        stream: tile.stream,
+        name: tileLabel(tile, displayName, members),
+        local: tile.sourceId === LOCAL_SOURCE,
+      })),
+    [allTiles, displayName, members],
+  )
+
+  useEffect(() => {
+    if (!recording) return
+    recorderRef.current?.setTiles(recorderTiles)
+  }, [recording, recorderTiles])
 
   const pinnedKey =
     userPin === NO_PIN
@@ -1014,9 +1117,7 @@ export default function Room() {
       <VideoTile
         key={tile.key}
         stream={tile.stream}
-        name={
-          isLocal ? (isScreen ? 'Your screen' : `${displayName} (you)`) : member?.name ?? 'Guest'
-        }
+        name={tileLabel(tile, displayName, members)}
         muted={isLocal}
         mirrored={isLocal && !isScreen}
         micOff={!isScreen ? !(member?.mic ?? true) : false}
@@ -1119,6 +1220,12 @@ export default function Room() {
             <span className="truncate">{roomInfo?.name || slug}</span>
             <Link2 className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
           </button>
+          {recorder && (
+            <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+              <Circle className="size-2 animate-pulse fill-current" />
+              Recording
+            </span>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <ParticipantsPanel
@@ -1197,9 +1304,12 @@ export default function Room() {
         unread={unread}
         fullscreen={fullscreen}
         canShare={canShare}
+        canRecord={privileged && recorderSupported()}
+        recording={recording}
         onMic={toggleMic}
         onCam={toggleCam}
         onShare={toggleScreen}
+        onRecord={toggleRecording}
         onLeave={leave}
         onToggleChat={toggleChat}
         onToggleFullscreen={toggleFullscreen}

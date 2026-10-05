@@ -55,6 +55,9 @@ var (
 	ErrRoomFull   = errors.New("sfu: room full")
 	ErrBadRequest = errors.New("sfu: bad request")
 	ErrForbidden  = errors.New("sfu: moderator access required")
+
+	// ErrRecordingActive rejects a second recorder while one is announced.
+	ErrRecordingActive = errors.New("sfu: the call is already being recorded")
 )
 
 // TrackInfo maps an SDP media section to a logical stream kind so the
@@ -127,6 +130,11 @@ type Message struct {
 	CT      string `json:"ct,omitempty"`
 	TS      int64  `json:"ts,omitempty"`
 
+	// recording announce and state (Recorder in welcome replays the
+	// flag to late joiners)
+	On       bool   `json:"on,omitempty"`
+	Recorder string `json:"recorder,omitempty"`
+
 	// moderate
 	Target string `json:"target,omitempty"`
 	Action string `json:"action,omitempty"`
@@ -172,7 +180,7 @@ func (h *Hub) JoinRoom(req JoinRequest, send func(Message)) (*Member, error) {
 			slug: req.Slug, name: req.RoomName,
 			limit: limit, cfg: &h.cfg,
 			members: map[string]*Member{}, hub: h,
-			mu: sync.Mutex{}, nextShort: 0, rembStop: nil,
+			mu: sync.Mutex{}, nextShort: 0, recorder: "", rembStop: nil,
 		}
 		h.rooms[req.Slug] = room
 	}
@@ -252,6 +260,7 @@ type Room struct {
 	mu        sync.Mutex
 	members   map[string]*Member
 	nextShort uint32
+	recorder  string
 
 	rembStop chan struct{}
 }
@@ -306,6 +315,8 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 
 	var others []MemberInfo
 
+	recorder := r.recorder
+
 	for _, other := range r.members {
 		others = append(others, other.Info())
 	}
@@ -318,7 +329,9 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 
 	self := member.Info()
 
-	member.send(Message{Type: "welcome", Self: &self, RoomInfo: r.info(), Members: others})
+	member.send(Message{
+		Type: "welcome", Self: &self, RoomInfo: r.info(), Members: others, Recorder: recorder,
+	})
 	r.broadcastExcept(member.ID, Message{
 		Type: "member-joined", ID: member.ID, Short: member.Short, Name: member.Name,
 	})
@@ -342,6 +355,8 @@ func (r *Room) removeMember(member *Member) {
 	delete(r.members, member.ID)
 	remaining := slices.Collect(maps.Values(r.members))
 	empty := len(r.members) == 0
+	recorderLeft := r.recorder == member.ID
+	r.recorder = ""
 	r.mu.Unlock()
 
 	if !empty {
@@ -364,7 +379,44 @@ func (r *Room) removeMember(member *Member) {
 		r.hub.drop(r)
 	}
 
+	if recorderLeft {
+		r.broadcast(Message{Type: "recording", From: member.ID, On: false})
+	}
+
 	r.broadcast(Message{Type: "member-left", ID: member.ID})
+}
+
+// claimRecording makes id the room's single announced recorder and
+// reports whether the announce was allowed at all and whether it
+// changed the state: the recorder re-announcing is a no-op, so no
+// duplicate event reaches the room.
+func (r *Room) claimRecording(id string) (bool, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.recorder != "" && r.recorder != id {
+		return false, false
+	}
+
+	changed := r.recorder != id
+	r.recorder = id
+
+	return changed, true
+}
+
+// releaseRecording clears the announced recorder and reports whether id
+// actually held it.
+func (r *Room) releaseRecording(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.recorder != id {
+		return false
+	}
+
+	r.recorder = ""
+
+	return true
 }
 
 // broadcast sends msg to every member.
@@ -623,6 +675,8 @@ func (m *Member) apply(msg Message) {
 		m.handleState(msg)
 	case "chat":
 		m.handleChat(msg)
+	case "record":
+		m.handleRecord(msg)
 	case "moderate":
 		m.handleModerate(msg)
 	}
@@ -663,6 +717,37 @@ func (m *Member) handleChat(msg Message) {
 	m.room.broadcastExcept(m.ID, Message{
 		Type: "chat", From: m.ID, IV: msg.IV, CT: msg.CT, TS: time.Now().UnixMilli(),
 	})
+}
+
+// handleRecord toggles this member's local-recording announcement.
+// Recording itself happens entirely in the announcing browser — the SFU
+// never sees plaintext media — so the flag exists only to drive the
+// consent badge every participant must see. It is therefore tracked
+// like any other room state: one recorder at a time, host-gated,
+// replayed to late joiners and cleared when the recorder leaves.
+func (m *Member) handleRecord(msg Message) {
+	if !m.priv {
+		m.fail("not-allowed", ErrForbidden)
+
+		return
+	}
+
+	if msg.On {
+		changed, allowed := m.room.claimRecording(m.ID)
+		if !allowed {
+			m.fail("record-busy", ErrRecordingActive)
+
+			return
+		}
+
+		if !changed {
+			return
+		}
+	} else if !m.room.releaseRecording(m.ID) {
+		return
+	}
+
+	m.room.broadcast(Message{Type: "recording", From: m.ID, On: msg.On})
 }
 
 // handleModerate applies a privileged member's action against another

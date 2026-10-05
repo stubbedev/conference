@@ -67,16 +67,19 @@ interface WireMessage {
   text?: string
   target?: string
   action?: string
+  on?: boolean
+  recorder?: string
 }
 
 interface Events {
-  welcome: { self: MemberInfo; members: MemberInfo[] }
+  welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string }
   'member-joined': MemberInfo
   'member-left': { id: string }
   'member-state': { id: string; mic: boolean; cam: boolean; sharing: boolean }
   track: RemoteTrack
   'track-removed': { sourceId: string; mid: string }
   chat: ChatMessage
+  recording: { from: string; on: boolean }
   error: { code: string; text: string }
   forced: { action: ForcedAction }
   kicked: Record<string, never>
@@ -196,7 +199,11 @@ export class RoomClient {
           clearTimeout(timeout)
           if (msg.self) this.selfId = msg.self.id
           for (const member of msg.members ?? []) this.members.set(member.id, member)
-          this.emit('welcome', { self: msg.self as MemberInfo, members: msg.members ?? [] })
+          this.emit('welcome', {
+            self: msg.self as MemberInfo,
+            members: msg.members ?? [],
+            recorder: msg.recorder ?? '',
+          })
           resolve()
           return
         }
@@ -332,6 +339,13 @@ export class RoomClient {
     this.send({ type: 'moderate', target, action })
   }
 
+  // announceRecording claims (or releases) the room's recording badge.
+  // The server arbitrates: host-only, one recorder, cleared if the
+  // recorder drops. The denial arrives as an error event.
+  announceRecording(on: boolean): void {
+    this.send({ type: 'record', on })
+  }
+
   leave(): void {
     this.ws?.close()
     this.up?.close()
@@ -463,6 +477,9 @@ export class RoomClient {
         return
       case 'chat':
         await this.handleChat(msg)
+        return
+      case 'recording':
+        if (msg.from) this.emit('recording', { from: msg.from, on: msg.on ?? false })
         return
       case 'forced': {
         const action = msg.action
