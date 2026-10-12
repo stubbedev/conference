@@ -294,6 +294,63 @@ async function waitForDownload(dir, timeoutMs = 15000) {
   return null
 }
 
+const tileMedia = `
+(() => {
+  const remote = document.querySelector('audio')?.closest('.group');
+  const video = remote?.querySelector('video');
+  const audio = remote?.querySelector('audio');
+  const live = (el) => (el?.srcObject?.getTracks() ?? []).filter((t) => t.readyState === 'live').length;
+  return {
+    found: Boolean(video && audio),
+    unpinButtons: [...document.querySelectorAll('button')].filter((b) => b.getAttribute('aria-label') === 'Unpin').length,
+    videoFrames: video ? video.getVideoPlaybackQuality().totalVideoFrames : 0,
+    videoPaused: video ? video.paused : true,
+    videoTracks: live(video),
+    audioTime: audio ? audio.currentTime : 0,
+    audioPaused: audio ? audio.paused : true,
+    audioTracks: live(audio),
+  };
+})()
+`
+
+const clickRemotePin = (label) => `
+(() => {
+  const remote = document.querySelector('audio')?.closest('.group');
+  const button = remote && [...remote.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(label)});
+  if (!button) return false;
+  button.click();
+  return true;
+})()
+`
+
+async function checkRemoteTilePlays(failures, label, browser, phase) {
+  const before = await evalJs(browser, tileMedia)
+  await sleep(2000)
+  const after = await evalJs(browser, tileMedia)
+  console.log(`${label} ${phase}: ${JSON.stringify(before)} → frames ${after.videoFrames}, audio t=${after.audioTime.toFixed(2)}`)
+  check(failures, label, after.found, `${phase}: remote tile has no video/audio element`)
+  if (!after.found) return after
+  check(failures, label, after.videoTracks > 0, `${phase}: remote video element has no live track`)
+  check(failures, label, after.audioTracks > 0, `${phase}: remote audio element has no live track`)
+  check(failures, label, !after.videoPaused, `${phase}: remote video is paused`)
+  check(failures, label, !after.audioPaused, `${phase}: remote audio is paused`)
+  check(failures, label, after.videoFrames > before.videoFrames, `${phase}: remote video stopped rendering (${before.videoFrames}→${after.videoFrames})`)
+  check(failures, label, after.audioTime > before.audioTime, `${phase}: remote audio stopped playing (t=${before.audioTime}→${after.audioTime})`)
+  return after
+}
+
+async function checkPinRoundTrip(failures, label, browser) {
+  check(failures, label, await evalJs(browser, clickRemotePin('Pin to main view')), 'no pin button on the remote tile')
+  await sleep(500)
+  const pinned = await checkRemoteTilePlays(failures, label, browser, 'pinned')
+  check(failures, label, pinned.unpinButtons === 1, `expected the remote tile to be pinned, found ${pinned.unpinButtons} pinned tiles`)
+
+  check(failures, label, await evalJs(browser, clickRemotePin('Unpin')), 'no unpin button on the pinned remote tile')
+  await sleep(500)
+  const unpinned = await checkRemoteTilePlays(failures, label, browser, 'unpinned')
+  check(failures, label, unpinned.unpinButtons === 0, `expected no pinned tile after unpinning, found ${unpinned.unpinButtons}`)
+}
+
 async function sample(browser) {
   const r = await browser.cdp.send(
     'Runtime.evaluate',
@@ -366,6 +423,10 @@ async function main() {
         check(failures, label, !v.paused, `video element ${j} is paused`)
       }
       check(failures, label, a.errors.length === 0, `page errors: ${a.errors.join(' | ')}`)
+    }
+
+    for (const [i, browser] of browsers.entries()) {
+      await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
     }
 
     // Recording phase. Round one: the host records, a third browser
