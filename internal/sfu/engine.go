@@ -66,17 +66,6 @@ func newSettingEngine(udpPort int, externalIPs []string) (webrtc.SettingEngine, 
 
 	noop := func() {}
 
-	if udpPort > 0 {
-		mux, err := ice.NewMultiUDPMuxFromPort(udpPort)
-		if err != nil {
-			return settingEngine, noop, fmt.Errorf("sfu: ice mux on port %d: %w", udpPort, err)
-		}
-
-		settingEngine.SetICEUDPMux(mux)
-
-		return settingEngine, func() { _ = mux.Close() }, nil
-	}
-
 	rules := make([]webrtc.ICEAddressRewriteRule, 0, len(externalIPs))
 	for _, addr := range externalIPs {
 		rules = append(rules, webrtc.ICEAddressRewriteRule{
@@ -89,11 +78,22 @@ func newSettingEngine(udpPort int, externalIPs []string) (webrtc.SettingEngine, 
 	if len(rules) > 0 {
 		err := settingEngine.SetICEAddressRewriteRules(rules...)
 		if err != nil {
-			return settingEngine, noop, fmt.Errorf("sfu: address rewrite: %w", err)
+			return settingEngine, noop, fmt.Errorf("sfu: address rewrite %v: %w", externalIPs, err)
 		}
 	}
 
-	return settingEngine, noop, nil
+	if udpPort == 0 {
+		return settingEngine, noop, nil
+	}
+
+	mux, err := ice.NewMultiUDPMuxFromPort(udpPort)
+	if err != nil {
+		return settingEngine, noop, fmt.Errorf("sfu: ice mux on port %d: %w", udpPort, err)
+	}
+
+	settingEngine.SetICEUDPMux(mux)
+
+	return settingEngine, func() { _ = mux.Close() }, nil
 }
 
 // newMediaEngine registers the codecs and header extensions negotiated
