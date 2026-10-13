@@ -10,10 +10,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/stubbe/conference/internal/relay"
@@ -52,6 +54,9 @@ const (
 	initViewerBitrate   = 512_000
 	minPublisherBitrate = 100_000
 	rembInterval        = time.Second
+
+	// A simulcast layer without packets for this long counts as paused.
+	layerIdleAfter = time.Second
 )
 
 // Sentinel errors surfaced to signaling clients and the API layer.
@@ -156,6 +161,9 @@ type Message struct {
 	// flag to late joiners)
 	On       bool   `json:"on,omitempty"`
 	Recorder string `json:"recorder,omitempty"`
+
+	// layer (Member names the source, Layer is a simulcast rid)
+	Layer string `json:"layer,omitempty"`
 
 	// moderate
 	Target string `json:"target,omitempty"`
@@ -339,6 +347,8 @@ func newMember(room *Room, short uint32, req JoinRequest, send func(Message)) *M
 		up:     nil,
 		downs:  map[string]*DownPeer{},
 		state:  State{Mic: false, Cam: false, Sharing: false},
+
+		layerPrefs: map[string]int{},
 	}
 }
 
@@ -565,6 +575,7 @@ func (r *Room) startRembTicker() {
 				return
 			case <-ticker.C:
 				r.sendRemb()
+				r.adaptLayers()
 			}
 		}
 	}()
@@ -608,6 +619,43 @@ func (r *Room) sendRemb() {
 			log.Printf("room %s: remb: %v", r.slug, err)
 		}
 	}
+}
+
+// adaptLayers closes one adaptation period for every simulcast track:
+// viewers move between layers as the publisher pauses or resumes
+// encodings and as their own loss changes, and the layers someone is
+// waiting to switch to get a keyframe request.
+func (r *Room) adaptLayers() {
+	now := time.Now()
+
+	for _, source := range r.snapshot() {
+		up := source.upstream()
+		if up == nil {
+			continue
+		}
+
+		for _, track := range up.trackSnapshot() {
+			if track.simulcast {
+				r.requestLayerKeyframes(source, track, track.retarget(now, true))
+			}
+		}
+	}
+}
+
+// requestLayerKeyframes asks the publisher for keyframes on the given
+// layers of one track, on the publisher's task loop.
+func (r *Room) requestLayerKeyframes(source *Member, track *UpTrack, layers []int) {
+	if len(layers) == 0 {
+		return
+	}
+
+	ssrcs := track.layerSSRCs(layers)
+
+	source.enqueue(func() {
+		if up := source.upstream(); up != nil {
+			up.sendPLI(ssrcs)
+		}
+	})
 }
 
 // notifyTracksAdded tells every other member to subscribe to any new
@@ -675,6 +723,10 @@ type Member struct {
 	up    *UpPeer
 	downs map[string]*DownPeer
 	state State
+
+	// layerPrefs maps source member IDs to the highest simulcast layer
+	// this member's layout can use; guarded by mu.
+	layerPrefs map[string]int
 }
 
 // State mirrors a member's UI toggles for remote indicators.
@@ -785,7 +837,57 @@ func (m *Member) apply(msg Message) {
 		m.handleRecord(msg)
 	case "moderate":
 		m.handleModerate(msg)
+	case "layer":
+		m.handleLayer(msg)
 	}
+}
+
+// handleLayer records the highest simulcast layer this member's layout
+// can use for one source (a filmstrip thumbnail needs far less than a
+// pinned tile) and retargets the source's tracks at once.
+func (m *Member) handleLayer(msg Message) {
+	layer, ok := layerOf(msg.Layer)
+	if msg.Layer == "" || !ok || msg.Member == "" {
+		m.fail("bad-layer", ErrBadRequest)
+
+		return
+	}
+
+	m.mu.Lock()
+	m.layerPrefs[msg.Member] = layer
+	m.mu.Unlock()
+
+	source := m.room.member(msg.Member)
+	if source == nil {
+		return
+	}
+
+	up := source.upstream()
+	if up == nil {
+		return
+	}
+
+	for _, track := range up.trackSnapshot() {
+		if !track.simulcast {
+			continue
+		}
+
+		track.setViewerPreference(m.ID, layer)
+		m.room.requestLayerKeyframes(source, track, track.retarget(time.Now(), false))
+	}
+}
+
+// layerPreference is the layout preference for one source, defaulting
+// to the highest layer.
+func (m *Member) layerPreference(sourceID string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if layer, ok := m.layerPrefs[sourceID]; ok {
+		return layer
+	}
+
+	return layerHigh
 }
 
 func (m *Member) handleDownAnswer(msg Message) {
@@ -1056,7 +1158,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		}
 
 		local := newForwardTrack(
-			track.remote.Codec().RTPCodecCapability, track.remote.ID(), track.remote.StreamID())
+			track.first.Codec().RTPCodecCapability, track.first.ID(), track.first.StreamID())
 
 		sendOnly := webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionSendonly,
@@ -1070,7 +1172,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		}
 
 		down.sends[track.mid] = &downSend{local: local, kind: track.kind}
-		track.addViewer(m.ID, local)
+		track.addViewer(m.ID, local, m.layerPreference(sourceID))
 		down.watchFeedback(transceiver.Sender(), m, track)
 	})
 
@@ -1231,27 +1333,51 @@ type UpPeer struct {
 	ice    iceStash
 }
 
-// UpTrack is one forwarded upstream track, keyed by its SDP mid.
+// UpTrack is one forwarded upstream track, keyed by its SDP mid. A
+// simulcast camera has one layer per encoding; everything else has a
+// single layer.
 type UpTrack struct {
-	mid    string
-	kind   string
-	remote *webrtc.TrackRemote
-	pc     *webrtc.PeerConnection
+	mid  string
+	kind string
+	pc   *webrtc.PeerConnection
+
+	// first is the first layer to arrive; its codec and stream IDs,
+	// shared by all layers, describe the track to viewers.
+	first *webrtc.TrackRemote
+
+	simulcast bool // published as rid-named encodings
+	vp8       bool // the payload format the layer switch understands
 
 	// extURIs maps the publisher's negotiated RTP header-extension IDs
 	// to their URIs, so forwarded packets can be re-numbered per viewer.
 	extURIs map[uint8]string
 
 	mu      sync.RWMutex
+	layers  [layerCount]*upLayer
 	viewers map[string]*upViewer
 	stop    chan struct{}
 }
 
-// upViewer is one viewer of one forwarded track, with the downlink rate
-// state derived from that viewer's RTCP feedback.
+// upLayer is one encoding of an upstream track.
+type upLayer struct {
+	remote     *webrtc.TrackRemote
+	lastPacket atomic.Int64 // unix nanoseconds
+}
+
+// upViewer is one viewer of one forwarded track: the downlink rate
+// state derived from that viewer's RTCP feedback and, for simulcast,
+// which layer it receives and wants.
 type upViewer struct {
 	local *forwardTrack
 	rate  viewerRate
+
+	mu        sync.Mutex
+	current   int // layer being forwarded, -1 before the first
+	target    int // layer to switch to at its next keyframe, -1 for none
+	preferred int // highest layer the viewer's layout can use
+	steps     ladder
+	mung      munger
+	buf       []byte
 }
 
 // viewerRate tracks a sustainable downlink bitrate for one viewer,
@@ -1327,59 +1453,201 @@ func (ut *UpTrack) isVideo() bool {
 	return ut.kind != KindAudio
 }
 
-func (ut *UpTrack) startForwarding() {
-	ut.stop = make(chan struct{})
+// addLayer stores a newly arrived encoding and starts forwarding it;
+// it reports false when the layer is already known.
+func (ut *UpTrack) addLayer(index int, remote *webrtc.TrackRemote) bool {
+	ut.mu.Lock()
 
-	go func() {
-		first := true
+	if ut.layers[index] != nil {
+		ut.mu.Unlock()
 
-		for {
-			select {
-			case <-ut.stop:
-				return
-			default:
-			}
+		return false
+	}
 
-			packet, _, err := ut.remote.ReadRTP()
-			if err != nil {
-				log.Printf("sfu: forward loop mid=%s kind=%s ended: %v", ut.mid, ut.kind, err)
+	layer := &upLayer{remote: remote, lastPacket: atomic.Int64{}}
+	layer.lastPacket.Store(time.Now().UnixNano())
+	ut.layers[index] = layer
 
-				return // peer connection closed
-			}
+	ut.mu.Unlock()
 
-			if first {
-				first = false
+	go ut.forwardLayer(index, layer)
 
-				log.Printf("sfu: first packet mid=%s kind=%s ssrc=%d pt=%d", ut.mid, ut.kind, packet.SSRC, packet.PayloadType)
-			}
-
-			ut.mu.RLock()
-
-			viewers := slices.Collect(maps.Values(ut.viewers))
-
-			ut.mu.RUnlock()
-
-			for _, viewer := range viewers {
-				writeErr := viewer.local.WriteRTP(packet, ut.extURIs)
-				if writeErr != nil {
-					log.Printf("forward: %v", writeErr)
-				}
-			}
-		}
-	}()
+	return true
 }
 
-func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack) {
+func (ut *UpTrack) forwardLayer(index int, layer *upLayer) {
+	first := true
+
+	for {
+		select {
+		case <-ut.stop:
+			return
+		default:
+		}
+
+		packet, _, err := layer.remote.ReadRTP()
+		if err != nil {
+			log.Printf("sfu: forward loop mid=%s rid=%q kind=%s ended: %v", ut.mid, layer.remote.RID(), ut.kind, err)
+
+			return // peer connection closed
+		}
+
+		now := time.Now()
+		layer.lastPacket.Store(now.UnixNano())
+
+		if first {
+			first = false
+
+			log.Printf("sfu: first packet mid=%s rid=%q kind=%s ssrc=%d pt=%d", ut.mid, layer.remote.RID(), ut.kind, packet.SSRC, packet.PayloadType)
+		}
+
+		desc := vp8Descriptor{keyframe: false, pictureIDAt: -1, pictureIDLen: 0, tl0PicIdxAt: -1}
+		if ut.vp8 {
+			desc, _ = parseVP8(packet.Payload)
+		}
+
+		ut.mu.RLock()
+
+		viewers := slices.Collect(maps.Values(ut.viewers))
+
+		ut.mu.RUnlock()
+
+		for _, viewer := range viewers {
+			writeErr := viewer.forward(index, packet, desc, ut.extURIs, now)
+			if writeErr != nil {
+				log.Printf("forward: %v", writeErr)
+			}
+		}
+	}
+}
+
+// forward relays one packet of one layer if it is the layer this
+// viewer receives, switching layers at a keyframe of the target.
+func (v *upViewer) forward(layer int, packet *rtp.Packet, desc vp8Descriptor, extURIs map[uint8]string, now time.Time) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if layer != v.current {
+		if layer != v.target || !desc.keyframe {
+			return nil
+		}
+
+		v.mung.rebase(&packet.Header, packet.Payload, desc, now)
+		v.current = layer
+	}
+
+	header, payload := v.mung.apply(packet.Header, packet.Payload, desc, v.buf, now)
+	if len(payload) > 0 && &payload[0] != &packet.Payload[0] {
+		v.buf = payload[:0]
+	}
+
+	return v.local.WriteRTP(&rtp.Packet{Header: header, Payload: payload}, extURIs)
+}
+
+// activeLayers reports which layers the publisher is currently sending:
+// browsers pause the upper encodings when their uplink shrinks.
+func (ut *UpTrack) activeLayers(now time.Time) [layerCount]bool {
+	ut.mu.RLock()
+	defer ut.mu.RUnlock()
+
+	var active [layerCount]bool
+
+	for index, layer := range ut.layers {
+		active[index] = layer != nil && now.UnixNano()-layer.lastPacket.Load() < int64(layerIdleAfter)
+	}
+
+	return active
+}
+
+// retarget re-evaluates every viewer's layer and returns the layers
+// that need a keyframe because a viewer is waiting to switch to them.
+func (ut *UpTrack) retarget(now time.Time, tick bool) []int {
+	active := ut.activeLayers(now)
+
+	ut.mu.RLock()
+	viewers := slices.Collect(maps.Values(ut.viewers))
+	ut.mu.RUnlock()
+
+	var wanted [layerCount]bool
+
+	for _, viewer := range viewers {
+		if layer, waiting := viewer.retarget(active, tick); waiting {
+			wanted[layer] = true
+		}
+	}
+
+	var layers []int
+
+	for layer, want := range wanted {
+		if want {
+			layers = append(layers, layer)
+		}
+	}
+
+	return layers
+}
+
+// retarget picks the viewer's target layer and reports whether the
+// viewer is waiting for a keyframe of it.
+func (v *upViewer) retarget(active [layerCount]bool, tick bool) (int, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if tick {
+		v.steps.tick()
+	}
+
+	v.target = chooseLayer(active, v.preferred, v.steps.ceiling)
+
+	return v.target, v.target >= 0 && v.target != v.current
+}
+
+func (ut *UpTrack) setViewerPreference(viewerID string, layer int) {
+	ut.mu.RLock()
+	viewer := ut.viewers[viewerID]
+	ut.mu.RUnlock()
+
+	if viewer == nil {
+		return
+	}
+
+	viewer.mu.Lock()
+	viewer.preferred = layer
+	viewer.mu.Unlock()
+}
+
+// addViewer starts forwarding to a viewer. A single-layer track flows
+// at once; a simulcast viewer starts at its first target keyframe.
+func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int) {
 	ut.mu.Lock()
-	defer ut.mu.Unlock()
 
 	if viewer := ut.viewers[viewerID]; viewer != nil {
+		ut.mu.Unlock()
+
+		viewer.mu.Lock()
 		viewer.local = local
+		viewer.mu.Unlock()
 
 		return
 	}
 
-	ut.viewers[viewerID] = &upViewer{local: local, rate: viewerRate{mu: sync.Mutex{}, loss: 0, remb: 0}}
+	current := layerLow
+	if ut.simulcast {
+		current = -1
+	}
+
+	viewer := &upViewer{
+		local: local, rate: viewerRate{mu: sync.Mutex{}, loss: 0, remb: 0},
+		mu: sync.Mutex{}, current: current, target: current, preferred: preferred,
+		steps: newLadder(), mung: newMunger(), buf: nil,
+	}
+	ut.viewers[viewerID] = viewer
+
+	ut.mu.Unlock()
+
+	if ut.simulcast {
+		viewer.retarget(ut.activeLayers(time.Now()), false)
+	}
 }
 
 // minViewerRate returns the smallest sustainable bitrate across this
@@ -1416,9 +1684,15 @@ func (ut *UpTrack) updateViewerLoss(viewerID string, fractionLost uint8) {
 	viewer := ut.viewers[viewerID]
 	ut.mu.RUnlock()
 
-	if viewer != nil {
-		viewer.rate.updateLoss(fractionLost)
+	if viewer == nil {
+		return
 	}
+
+	viewer.rate.updateLoss(fractionLost)
+
+	viewer.mu.Lock()
+	viewer.steps.observeLoss(fractionLost, viewer.current)
+	viewer.mu.Unlock()
 }
 
 func (ut *UpTrack) dropViewer(viewerID string) {
@@ -1428,9 +1702,7 @@ func (ut *UpTrack) dropViewer(viewerID string) {
 }
 
 func (ut *UpTrack) close() {
-	if ut.stop != nil {
-		close(ut.stop)
-	}
+	close(ut.stop)
 }
 
 func (up *UpPeer) hasTracks() bool {
@@ -1459,12 +1731,31 @@ func (up *UpPeer) forEachTrack(fn func(*UpTrack)) {
 	}
 }
 
+// layerSSRCs lists the SSRCs of the given layers of a track; nil
+// layers selects all of them.
+func (ut *UpTrack) layerSSRCs(layers []int) []uint32 {
+	ut.mu.RLock()
+	defer ut.mu.RUnlock()
+
+	var ssrcs []uint32
+
+	for index, layer := range ut.layers {
+		if layer == nil || (layers != nil && !slices.Contains(layers, index)) {
+			continue
+		}
+
+		ssrcs = append(ssrcs, uint32(layer.remote.SSRC()))
+	}
+
+	return ssrcs
+}
+
 func (up *UpPeer) videoSSRCs() []uint32 {
 	var ssrcs []uint32
 
 	for _, track := range up.trackSnapshot() {
 		if track.isVideo() {
-			ssrcs = append(ssrcs, uint32(track.remote.SSRC()))
+			ssrcs = append(ssrcs, track.layerSSRCs(nil)...)
 		}
 	}
 
@@ -1479,7 +1770,9 @@ func (up *UpPeer) adaptiveBitrate(ceiling uint64) uint64 {
 	rate := ceiling
 
 	for _, track := range up.trackSnapshot() {
-		if !track.isVideo() {
+		// Simulcast viewers adapt by layer, so they never hold the
+		// publisher back.
+		if !track.isVideo() || track.simulcast {
 			continue
 		}
 
@@ -1500,17 +1793,19 @@ func (up *UpPeer) adaptiveBitrate(ceiling uint64) uint64 {
 	return rate
 }
 
-// requestKeyframe sends PLIs for every video track of this publisher.
+// requestKeyframe sends PLIs for every layer of every video track of
+// this publisher.
 func (up *UpPeer) requestKeyframe() {
 	for _, track := range up.trackSnapshot() {
-		if !track.isVideo() {
-			continue
+		if track.isVideo() {
+			up.sendPLI(track.layerSSRCs(nil))
 		}
+	}
+}
 
-		pli := &rtcp.PictureLossIndication{
-			SenderSSRC: 1,
-			MediaSSRC:  uint32(track.remote.SSRC()),
-		}
+func (up *UpPeer) sendPLI(ssrcs []uint32) {
+	for _, ssrc := range ssrcs {
+		pli := &rtcp.PictureLossIndication{SenderSSRC: 1, MediaSSRC: ssrc}
 
 		err := up.pc.WriteRTCP([]rtcp.Packet{pli})
 		if err != nil {
@@ -1519,14 +1814,46 @@ func (up *UpPeer) requestKeyframe() {
 	}
 }
 
-// register records a discovered upstream track. Idempotent per mid;
-// called both from the post-SRD scan and from OnTrack.
+// register records a discovered upstream track or simulcast layer.
+// Idempotent per mid and layer; called both from the post-SRD scan and
+// from OnTrack.
 func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemote, labels map[string]string, via string) {
 	mid := up.midOf(receiver)
 	if mid == "" {
 		log.Printf("sfu: register member %.6s via=%s ssrc=%d: no mid, dropped", up.member.ID, via, track.SSRC())
 
 		return
+	}
+
+	layer, known := layerOf(track.RID())
+	if !known {
+		log.Printf("sfu: register member %.6s mid=%s: unknown rid %q, dropped", up.member.ID, mid, track.RID())
+
+		return
+	}
+
+	upTrack, created := up.trackFor(mid, receiver, track, labels)
+
+	if !upTrack.addLayer(layer, track) {
+		return
+	}
+
+	if created {
+		log.Printf("sfu: register %s member %s via=%s mid=%s kind=%s simulcast=%v",
+			up.member.room.slug, up.member.ID, via, mid, upTrack.kind, upTrack.simulcast)
+	}
+
+	log.Printf("sfu: layer %s member %.6s mid=%s rid=%q ssrc=%d", up.member.room.slug, up.member.ID, mid, track.RID(), track.SSRC())
+}
+
+// trackFor returns the upstream track for mid, creating it from its
+// first arriving layer.
+func (up *UpPeer) trackFor(mid string, receiver *webrtc.RTPReceiver, track *webrtc.TrackRemote, labels map[string]string) (*UpTrack, bool) {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+
+	if existing := up.tracks[mid]; existing != nil {
+		return existing, false
 	}
 
 	kind := labels[mid]
@@ -1539,38 +1866,21 @@ func (up *UpPeer) register(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemo
 	}
 
 	upTrack := &UpTrack{
-		mid:     mid,
-		kind:    kind,
-		remote:  track,
-		pc:      up.pc,
-		extURIs: extensionURIs(receiver),
-		viewers: map[string]*upViewer{},
-		mu:      sync.RWMutex{},
-		stop:    nil,
+		mid:       mid,
+		kind:      kind,
+		pc:        up.pc,
+		first:     track,
+		simulcast: track.RID() != "",
+		vp8:       strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeVP8),
+		extURIs:   extensionURIs(receiver),
+		mu:        sync.RWMutex{},
+		layers:    [layerCount]*upLayer{},
+		viewers:   map[string]*upViewer{},
+		stop:      make(chan struct{}),
 	}
-
-	if !up.addTrack(mid, upTrack) {
-		return
-	}
-
-	log.Printf("sfu: register %s member %s via=%s mid=%s kind=%s ssrc=%d", up.member.room.slug, up.member.ID, via, mid, kind, track.SSRC())
-
-	upTrack.startForwarding()
-}
-
-// addTrack records an upstream track unless its mid is already taken;
-// it reports whether the track was stored.
-func (up *UpPeer) addTrack(mid string, upTrack *UpTrack) bool {
-	up.mu.Lock()
-	defer up.mu.Unlock()
-
-	if _, ok := up.tracks[mid]; ok {
-		return false
-	}
-
 	up.tracks[mid] = upTrack
 
-	return true
+	return upTrack, true
 }
 
 // midOf finds the SDP mid of the media section belonging to receiver.
@@ -1597,8 +1907,12 @@ func (up *UpPeer) syncTracks() {
 			continue
 		}
 
-		if track := receiver.Track(); track != nil {
-			up.register(receiver, track, up.labels, "sync")
+		// Simulcast layers have no SSRC before their first packet;
+		// OnTrack registers them once they arrive.
+		for _, track := range receiver.Tracks() {
+			if track.RID() == "" {
+				up.register(receiver, track, up.labels, "sync")
+			}
 		}
 	}
 }

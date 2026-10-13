@@ -31,6 +31,9 @@ export interface RemoteTrack {
 }
 
 export type ModerateAction = 'mute' | 'cam' | 'screen' | 'kick'
+
+/** Simulcast layer of a camera, as the SFU names the encodings. */
+export type Layer = 'l' | 'm' | 'h'
 export type ForcedAction = Exclude<ModerateAction, 'kick'>
 
 export interface RoomClientOptions {
@@ -89,6 +92,7 @@ interface WireMessage {
   iceServers?: RTCIceServer[]
   resume?: string
   replaces?: string
+  layer?: Layer
 }
 
 interface Events {
@@ -138,6 +142,15 @@ function preferVP8(transceiver: RTCRtpTransceiver): void {
   transceiver.setCodecPreferences(preferred)
 }
 
+// The camera is published as three encodings so the SFU can give each
+// viewer the one its layout and network can use. Screen shares stay a
+// single full-quality stream: text must stay legible.
+const CAMERA_LAYERS: readonly RTCRtpEncodingParameters[] = [
+  { rid: 'l', scaleResolutionDownBy: 4, maxBitrate: 150_000 },
+  { rid: 'm', scaleResolutionDownBy: 2, maxBitrate: 500_000 },
+  { rid: 'h', scaleResolutionDownBy: 1, maxBitrate: 1_500_000 },
+]
+
 export class RoomClient {
   private ws: WebSocket | null = null
   private opts: RoomClientOptions
@@ -152,6 +165,7 @@ export class RoomClient {
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
   private resumeToken = ''
+  private layerPrefs = new Map<string, Layer>()
   private closing = false
   private handlers = new Map<string, Set<AnyHandler>>()
   private localMic: MediaStreamTrack | null = null
@@ -287,14 +301,12 @@ export class RoomClient {
     const pc = this.newPC('up')
     this.up = pc
 
-    for (const track of stream.getTracks()) pc.addTrack(track, stream)
     this.localMic = stream.getAudioTracks()[0] ?? null
     this.localCam = stream.getVideoTracks()[0] ?? null
+    this.micSender = this.localMic ? pc.addTrack(this.localMic, stream) : null
+    this.camSender = this.localCam ? this.addCamera(pc, this.localCam, stream) : null
 
-    for (const transceiver of pc.getTransceivers()) preferVP8(transceiver)
     for (const sender of pc.getSenders()) this.installSenderTransform(sender)
-    this.micSender = pc.getSenders().find((sender) => sender.track?.kind === 'audio') ?? null
-    this.camSender = pc.getSenders().find((sender) => sender.track?.kind === 'video') ?? null
     await this.sendUpOffer()
 
     this.state = {
@@ -348,7 +360,8 @@ export class RoomClient {
 
     let sender = kind === 'mic' ? this.micSender : this.camSender
     if (!sender) {
-      sender = pc.addTrack(track, new MediaStream([track]))
+      const stream = new MediaStream([track])
+      sender = kind === 'mic' ? pc.addTrack(track, stream) : this.addCamera(pc, track, stream)
       this.installSenderTransform(sender)
       if (kind === 'mic') this.micSender = sender
       else this.camSender = sender
@@ -359,6 +372,13 @@ export class RoomClient {
 
     if (kind === 'mic') this.localMic = track
     else this.localCam = track
+  }
+
+  /** Tells the SFU the highest camera layer this page's layout can use for a source. */
+  preferLayer(sourceId: string, layer: Layer): void {
+    if (this.layerPrefs.get(sourceId) === layer) return
+    this.layerPrefs.set(sourceId, layer)
+    this.send({ type: 'layer', member: sourceId, layer })
   }
 
   setTrackEnabled(kind: 'mic' | 'cam', enabled: boolean): void {
@@ -446,6 +466,16 @@ export class RoomClient {
     if (this.transformed.has(receiver)) return
     this.transformed.add(receiver)
     receiver.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'recv' })
+  }
+
+  private addCamera(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): RTCRtpSender {
+    const transceiver = pc.addTransceiver(track, {
+      direction: 'sendonly',
+      streams: [stream],
+      sendEncodings: CAMERA_LAYERS.map((layer) => ({ ...layer })),
+    })
+    preferVP8(transceiver)
+    return transceiver.sender
   }
 
   private async sendUpOffer(): Promise<void> {
@@ -547,6 +577,7 @@ export class RoomClient {
 
   /** Forgets a member and closes its downstream; reports whether it was known. */
   private dropMember(id: string): boolean {
+    this.layerPrefs.delete(id)
     const known = this.members.delete(id)
     this.downs.get(id)?.close()
     this.downs.delete(id)

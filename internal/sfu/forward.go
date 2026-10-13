@@ -108,22 +108,35 @@ func (f *forwardTrack) Unbind(webrtc.TrackLocalContext) error {
 	return nil
 }
 
-// midExtensionURI names the sdes:mid header extension. Its value
-// identifies an m-line of the peer connection that produced the packet,
-// so it is only meaningful inside that negotiation: the downstream
-// m-line numbering routinely differs from the publisher's (tracks are
-// added in whatever order they register), and a forwarded mid value
-// makes browsers demux bundled RTP onto the wrong receiver — audio
-// packets cached onto the video m-line decode as nothing and the call
-// goes one-way until reload. Viewers fall back to the a=ssrc lines the
-// downstream offer announces per m-line, which are per-viewer and
-// always correct, so the extension is stripped rather than re-numbered.
-const midExtensionURI = "urn:ietf:params:rtp-hdrext:sdes:mid"
+// Header extensions whose values only mean something inside the
+// publisher's negotiation, so they are never forwarded.
+//
+// sdes:mid names an m-line of the peer connection that produced the
+// packet. The downstream m-line numbering routinely differs from the
+// publisher's (tracks are added in whatever order they register), and a
+// forwarded mid value makes browsers demux bundled RTP onto the wrong
+// receiver: audio packets cached onto the video m-line decode as nothing
+// and the call goes one-way until reload. Viewers fall back to the
+// a=ssrc lines the downstream offer announces per m-line, which are
+// per-viewer and always correct.
+//
+// The rtp-stream-id pair names a simulcast layer of the publisher's
+// m-line. The viewer's m-line is a single stream, and a stray rid makes
+// the browser look for a simulcast layer that does not exist there.
+const (
+	midExtensionURI        = "urn:ietf:params:rtp-hdrext:sdes:mid"
+	rtpStreamIDURI         = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
+	repairedRTPStreamIDURI = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"
+)
+
+func publisherScoped(uri string) bool {
+	return uri == midExtensionURI || uri == rtpStreamIDURI || uri == repairedRTPStreamIDURI
+}
 
 // WriteRTP forwards one publisher packet. srcExtURIs maps the
 // publisher's negotiated extension IDs to their URIs; extensions the
-// viewer also negotiated are re-numbered, the mid extension is
-// stripped (see midExtensionURI), and the rest are dropped. Packets
+// viewer also negotiated are re-numbered, publisher-scoped ones are
+// stripped (see publisherScoped), and the rest are dropped. Packets
 // written before Bind are discarded silently, matching pion's own
 // TrackLocalStaticRTP.
 func (f *forwardTrack) WriteRTP(packet *rtp.Packet, srcExtURIs map[uint8]string) error {
@@ -144,7 +157,7 @@ func (f *forwardTrack) WriteRTP(packet *rtp.Packet, srcExtURIs map[uint8]string)
 
 	for _, srcID := range packet.GetExtensionIDs() {
 		uri, known := srcExtURIs[srcID]
-		if !known || uri == midExtensionURI {
+		if !known || publisherScoped(uri) {
 			continue
 		}
 

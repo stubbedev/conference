@@ -168,7 +168,7 @@ func newMediaEngine() (*webrtc.MediaEngine, error) {
 		types []webrtc.RTPCodecType
 	}{
 		{
-			"urn:ietf:params:rtp-hdrext:sdes:mid",
+			midExtensionURI,
 			[]webrtc.RTPCodecType{webrtc.RTPCodecTypeAudio, webrtc.RTPCodecTypeVideo},
 		},
 		{
@@ -179,6 +179,8 @@ func newMediaEngine() (*webrtc.MediaEngine, error) {
 			"urn:ietf:params:rtp-hdrext:video-orientation",
 			[]webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo},
 		},
+		{rtpStreamIDURI, []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo}},
+		{repairedRTPStreamIDURI, []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo}},
 	}
 
 	for _, ext := range extensions {

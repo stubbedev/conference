@@ -45,6 +45,7 @@ import {
   JoinError,
   RoomClient,
   type ChatMessage,
+  type Layer,
   type MemberInfo,
   type ModerateAction,
 } from '@/lib/sfu'
@@ -87,6 +88,16 @@ const NO_PIN = 'none'
 const RECOVER_BACKOFF_MS = 5000
 const RECONNECT_TOAST = 'reconnect'
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000, ...Array<number>(14).fill(10_000)]
+
+// layoutLayer is the camera layer a tile's on-screen size can use: the
+// pinned tile fills the stage, the filmstrip is thumbnails, and grid
+// cells shrink as the call grows.
+function layoutLayer(key: string, pinnedKey: string | null, tileCount: number): Layer {
+  if (pinnedKey) return key === pinnedKey ? 'h' : 'l'
+  if (tileCount <= 2) return 'h'
+  if (tileCount <= 6) return 'm'
+  return 'l'
+}
 
 // waitForRetry sleeps for ms, cut short when the browser comes back
 // online so a restored network reconnects at once.
@@ -1149,6 +1160,15 @@ export default function Room() {
         : (allTiles.find((tile) => tile.kind === SCREEN_KIND)?.key ?? null)
   const pinnedTile = pinnedKey ? (allTiles.find((tile) => tile.key === pinnedKey) ?? null) : null
   const stripTiles = pinnedTile ? allTiles.filter((tile) => tile.key !== pinnedKey) : []
+
+  useEffect(() => {
+    const client = clientRef.current
+    if (phase !== 'live' || !client) return
+    for (const tile of allTiles) {
+      if (tile.sourceId === LOCAL_SOURCE || tile.kind !== CAMERA_KIND) continue
+      client.preferLayer(tile.sourceId, layoutLayer(tile.key, pinnedKey, allTiles.length))
+    }
+  }, [phase, clientGeneration, allTiles, pinnedKey])
 
   // While recording, every tile change (member joins or leaves, a pin
   // changes, a screen share starts or stops) re-lays out the composite

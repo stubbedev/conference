@@ -402,6 +402,65 @@ async function checkRemoteTilePlays(failures, label, browser, phase) {
   return after
 }
 
+const sentLayers = `
+(async () => {
+  const layers = {};
+  for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
+    for (const r of (await pc.getStats()).values()) {
+      if (r.type === 'outbound-rtp' && r.kind === 'video' && r.rid) layers[r.rid] = { bytes: r.bytesSent || 0, width: r.frameWidth || 0 };
+    }
+  }
+  return layers;
+})()
+`
+
+const remoteVideoWidth = `
+(() => {
+  const remote = document.querySelector('audio')?.closest('.group');
+  return remote?.querySelector('video')?.videoWidth ?? 0;
+})()
+`
+
+const clickLocalPin = (label) => `
+(() => {
+  const local = [...document.querySelectorAll('.group')].find((g) => g.querySelector('video') && !g.querySelector('audio'));
+  const button = local && [...local.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(label)});
+  if (!button) return false;
+  button.click();
+  return true;
+})()
+`
+
+async function waitFor(browser, expression, predicate, timeoutMs) {
+  let value
+  for (let t = 0; t < timeoutMs; t += 250) {
+    value = await evalJs(browser, expression)
+    if (predicate(value)) return { ok: true, value }
+    await sleep(250)
+  }
+  return { ok: false, value }
+}
+
+async function checkSimulcast(failures, publisher, viewer) {
+  const sent = await waitFor(publisher, sentLayers, (layers) => ['l', 'm', 'h'].every((rid) => layers[rid]?.bytes > 0), 20000)
+  console.log(`simulcast sent: ${JSON.stringify(sent.value)}`)
+  check(failures, 'simulcast', sent.ok, `publisher is not sending all three layers: ${JSON.stringify(sent.value)}`)
+
+  const steps = [
+    { name: 'grid of two', action: null, want: (w) => w >= 1280 },
+    { name: 'filmstrip', action: 'Pin to main view', want: (w) => w > 0 && w <= 320 },
+    { name: 'grid again', action: 'Unpin', want: (w) => w >= 1280 },
+  ]
+  for (const step of steps) {
+    if (step.action) {
+      check(failures, 'simulcast', await evalJs(viewer, clickLocalPin(step.action)), `no "${step.action}" button on the viewer's own tile`)
+    }
+    const got = await waitFor(viewer, remoteVideoWidth, step.want, 20000)
+    console.log(`simulcast ${step.name}: remote video ${got.value}px wide`)
+    check(failures, 'simulcast', got.ok, `${step.name}: remote video ${got.value}px wide, wrong layer`)
+  }
+}
+
 async function checkPinRoundTrip(failures, label, browser) {
   check(failures, label, await evalJs(browser, clickRemotePin('Pin to main view')), 'no pin button on the remote tile')
   await sleep(500)
@@ -527,6 +586,8 @@ async function main() {
     for (const [i, browser] of browsers.entries()) {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
     }
+
+    await checkSimulcast(failures, browsers[0], browsers[1])
 
     await evalJs(browsers[1], 'window.__sockets.at(-1).close()')
     await checkCall(failures, browsers, ['dropped signaling 0', 'dropped signaling 1'])
