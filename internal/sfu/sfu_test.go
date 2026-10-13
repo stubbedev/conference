@@ -873,3 +873,36 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 		t.Fatal("publisher never received a viewer-capped REMB")
 	}
 }
+
+// TestLeaveAlwaysTearsDown repeats join/leave so that a leave which
+// only sometimes removes the member (a ghost left in the room, never
+// announced) fails reliably.
+func TestLeaveAlwaysTearsDown(t *testing.T) {
+	t.Parallel()
+
+	const rounds = 50
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	stayer := newTestPeer(t, hub, engine, "stayer", false)
+
+	for round := range rounds {
+		leaver := newTestPeer(t, hub, engine, fmt.Sprintf("leaver-%d", round), false)
+		leaver.member.Leave()
+
+		left := stayer.next(t, "member-left")
+		if left.ID != leaver.member.ID {
+			t.Fatalf("round %d: member-left for %s, want %s", round, left.ID, leaver.member.ID)
+		}
+
+		if live := hub.LiveCount(testSlug); live != 1 {
+			t.Fatalf("round %d: %d live members after a leave, want 1", round, live)
+		}
+	}
+}

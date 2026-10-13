@@ -598,9 +598,9 @@ func (m *Member) Handle(msg Message) {
 }
 
 // Leave tears the member down: peer connections close, forwarding stops,
-// peers are notified.
+// peers are notified. The member's own goroutine runs the teardown
+// exactly once, after which queued tasks are dropped.
 func (m *Member) Leave() {
-	m.enqueue(func() { m.teardown() })
 	m.once.Do(func() { close(m.done) })
 }
 
@@ -642,6 +642,8 @@ func (m *Member) run() {
 	for {
 		select {
 		case <-m.done:
+			m.teardown()
+
 			return
 		case task := <-m.tasks:
 			task()
