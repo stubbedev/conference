@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -72,26 +73,40 @@ func freeTURNPort(t *testing.T) int {
 	return addr.Port
 }
 
+const relayBindAttempts = 10
+
 // startRelay runs a TURN server for media and returns credentials for
-// the always-live member.
+// the always-live member. The port is reserved over TCP, so its UDP
+// twin can still be taken by a parallel test; the start is retried on
+// a fresh port then.
 func startRelay(t *testing.T, media []relay.MediaAddr) (int, relay.ICEServer) {
 	t.Helper()
 
-	port := freeTURNPort(t)
+	for range relayBindAttempts {
+		port := freeTURNPort(t)
 
-	creds, err := relay.NewCredentials(relay.Config{Port: port, TLSHost: ""})
-	if err != nil {
-		t.Fatal(err)
+		creds, err := relay.NewCredentials(relay.Config{Port: port, TLSHost: ""})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		server, err := relay.Start(t.Context(), creds, media, func(id string) bool { return id == member })
+		if errors.Is(err, syscall.EADDRINUSE) {
+			continue
+		}
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Cleanup(func() { _ = server.Close() })
+
+		return port, creds.ICEServers("127.0.0.1", member)[0]
 	}
 
-	server, err := relay.Start(t.Context(), creds, media, func(id string) bool { return id == member })
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Fatalf("no free TURN port after %d attempts", relayBindAttempts)
 
-	t.Cleanup(func() { _ = server.Close() })
-
-	return port, creds.ICEServers("127.0.0.1", member)[0]
+	return 0, relay.ICEServer{URLs: nil, Username: "", Credential: ""}
 }
 
 func allocate(t *testing.T, port int, username, password string) (net.PacketConn, error) {

@@ -1,9 +1,11 @@
 package sfu_test
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/pion/ice/v4"
@@ -16,12 +18,46 @@ func testExternalIP() netip.Addr {
 	return netip.MustParseAddr("203.0.113.10")
 }
 
+const muxBindAttempts = 10
+
+// newEngine builds an engine on the given port, or, with mux, on a
+// free fixed port: the mux binds every interface, so a port reserved a
+// moment ago can still be taken by a parallel test's ephemeral ICE
+// socket, and the bind is retried on a fresh port.
+func newEngine(t *testing.T, mux bool) (*sfu.Engine, int) {
+	t.Helper()
+
+	for range muxBindAttempts {
+		port := 0
+		if mux {
+			port = freeUDPPort(t)
+		}
+
+		engine, closeEngine, err := sfu.NewEngine(port, []netip.Addr{testExternalIP()})
+		if mux && errors.Is(err, syscall.EADDRINUSE) {
+			continue
+		}
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Cleanup(closeEngine)
+
+		return engine, port
+	}
+
+	t.Fatalf("no free mux port after %d attempts", muxBindAttempts)
+
+	return nil, 0
+}
+
 func freeUDPPort(t *testing.T) int {
 	t.Helper()
 
 	var listenConfig net.ListenConfig
 
-	conn, err := listenConfig.ListenPacket(t.Context(), "udp4", "127.0.0.1:0")
+	conn, err := listenConfig.ListenPacket(t.Context(), "udp4", ":0")
 	if err != nil {
 		t.Fatalf("reserve udp port: %v", err)
 	}
@@ -100,20 +136,15 @@ func TestEngineAnnouncesExternalIPs(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		port int
+		mux  bool
 	}{
-		{name: "shared udp mux", port: freeUDPPort(t)},
-		{name: "ephemeral ports", port: 0},
+		{name: "shared udp mux", mux: true},
+		{name: "ephemeral ports", mux: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			engine, closeEngine, err := sfu.NewEngine(tc.port, []netip.Addr{testExternalIP()})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			t.Cleanup(closeEngine)
+			engine, port := newEngine(t, tc.mux)
 
 			hosts := ipv4HostCandidates(t, gatheredSDP(t, engine))
 			if len(hosts) == 0 {
@@ -125,8 +156,8 @@ func TestEngineAnnouncesExternalIPs(t *testing.T) {
 					t.Errorf("host candidate %s:%d announced, want only %s", candidate.Address(), candidate.Port(), testExternalIP())
 				}
 
-				if tc.port != 0 && candidate.Port() != tc.port {
-					t.Errorf("host candidate port %d, want the mux port %d", candidate.Port(), tc.port)
+				if tc.mux && candidate.Port() != port {
+					t.Errorf("host candidate port %d, want the mux port %d", candidate.Port(), port)
 				}
 			}
 		})
@@ -136,14 +167,7 @@ func TestEngineAnnouncesExternalIPs(t *testing.T) {
 func TestEngineMediaAddrs(t *testing.T) {
 	t.Parallel()
 
-	port := freeUDPPort(t)
-
-	engine, closeEngine, err := sfu.NewEngine(port, []netip.Addr{testExternalIP()})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(closeEngine)
+	engine, port := newEngine(t, true)
 
 	addrs := engine.MediaAddrs()
 	if len(addrs) != 1 {
@@ -159,12 +183,7 @@ func TestEngineMediaAddrs(t *testing.T) {
 		t.Fatalf("local %s, want an IPv4 mux socket on port %d", addrs[0].Local, port)
 	}
 
-	ephemeral, closeEphemeral, err := sfu.NewEngine(0, []netip.Addr{testExternalIP()})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(closeEphemeral)
+	ephemeral, _ := newEngine(t, false)
 
 	if got := ephemeral.MediaAddrs(); len(got) != 0 {
 		t.Fatalf("ephemeral engine announced media addrs %v", got)
