@@ -8,7 +8,8 @@
 //
 //   node web/e2e/smoke.mjs [--server path/to/binary] [--chrome binary] [--seconds N] [--stagger MS]
 //
-// Without --server the binary is built with `go build`. Chrome needs
+// Without --server the binary is built with the race detector, which
+// stops the server at the first data race the calls provoke. Chrome needs
 // no internet access; the server gets free ICE and TURN ports. A final
 // pair of browsers is forced through the embedded TURN relay (one over
 // UDP, one over TCP) via the machine's LAN address, since Chrome does
@@ -73,10 +74,10 @@ function freeUdpPort() {
 
 function buildServer(dir) {
   const bin = join(dir, 'server')
-  const res = spawnSync('go', ['build', '-o', bin, './cmd/server'], {
+  const res = spawnSync('go', ['build', '-race', '-o', bin, './cmd/server'], {
     cwd: repoRoot,
     stdio: 'inherit',
-    env: { ...process.env, CGO_ENABLED: '0' },
+    env: { ...process.env, CGO_ENABLED: '1' },
   })
   if (res.status !== 0) throw new Error('go build failed')
   return bin
@@ -89,6 +90,7 @@ async function serverEnv(dir, port) {
     ICE_UDP_PORT: String(await freeUdpPort()),
     TURN_PORT: String(await freePort()),
     DB_PATH: join(dir, 'smoke.db'),
+    GORACE: 'halt_on_error=1',
   }
 }
 
