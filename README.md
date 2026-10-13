@@ -216,13 +216,30 @@ The Go code must stay clean under `golangci-lint` with every linter enabled
 media loopback test through the hub and a check that forwarded RTP header
 extensions are renumbered to the viewer's extmap.
 
-`just e2e` (`web/e2e/smoke.mjs`) starts a server, points two headless
-Chromes with fake cameras at one room and asserts that both receive the
-other's audio and video through the E2EE transform with zero dropped
-frames and exactly one tile per participant. It needs Chrome on `PATH`
-(or `CHROME=/path/to/chrome`) and is the gate that catches what type
-checks and unit tests cannot: a pipeline that connects fine and
-transmits nothing.
+`just e2e` (`web/e2e/smoke.mjs`) starts a server built with the race
+detector, points headless Chromes with fake cameras at one room and
+asserts that both receive the other's audio and video through the E2EE
+transform with zero dropped frames and exactly one tile per participant.
+It then pins tiles, checks simulcast layer switching, drops a browser's
+signaling and restarts the server mid-call (both must reconnect),
+records, and finally forces a call through the TURN relay over UDP and
+TCP. It needs Chrome on `PATH` (or `CHROME=/path/to/chrome`) and a
+non-loopback IPv4 address, and is the gate that catches what type checks
+and unit tests cannot: a pipeline that connects fine and transmits
+nothing.
+
+## Monitoring production
+
+`.github/workflows/monitor.yml` places real calls against a deployment
+every 15 minutes (`web/e2e/monitor.mjs`): direct, through TURN over UDP
+and TCP, and over TLS on 443 when `TURN_TLS_HOST` is set. Each run
+creates its rooms with an operator key and deletes them afterwards. A
+failed run is the alert: GitHub notifies about failed scheduled
+workflows. To enable it, add a dedicated key to the server's `API_KEYS`,
+then set the repository variable `MONITOR_URL` (e.g.
+`https://meet.example.com`) and the secret `MONITOR_API_KEY`. Without
+`MONITOR_URL` the workflow does nothing. GitHub pauses scheduled
+workflows in repositories without activity for 60 days.
 
 ## License
 

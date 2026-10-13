@@ -1,0 +1,31 @@
+name: monitor
+
+# Real calls against the production deployment every 15 minutes; a failed
+# run is the alert (GitHub notifies about failed scheduled workflows).
+# Opt-in per repository: set the MONITOR_URL variable and the
+# MONITOR_API_KEY secret (an entry of the server's API_KEYS).
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  calls:
+    if: vars.MONITOR_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: calls
+        run: node web/e2e/monitor.mjs
+        env:
+          MONITOR_URL: ${{ vars.MONITOR_URL }}
+          MONITOR_API_KEY: ${{ secrets.MONITOR_API_KEY }}
+          CHROME: google-chrome
