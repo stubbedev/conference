@@ -964,3 +964,36 @@ func TestLeaveAlwaysTearsDown(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordingSurvivesOtherLeaves checks that only the recorder's own
+// departure clears the room's recording state: late joiners must still
+// be told about a recording after any other member left.
+func TestRecordingSurvivesOtherLeaves(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := newTestHub(t, engine)
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	host.member.Handle(sfu.Message{Type: "record", On: true})
+	expectRecording(t, host, host.member.ID, true)
+
+	guest.member.Leave()
+
+	if left := host.next(t, "member-left"); left.ID != guest.member.ID {
+		t.Fatalf("member-left for %s, want %s", left.ID, guest.member.ID)
+	}
+
+	late := newTestPeer(t, hub, engine, "late", false)
+	if welcome := late.next(t, "welcome"); welcome.Recorder != host.member.ID {
+		t.Fatalf("late joiner told recorder %q, want %s", welcome.Recorder, host.member.ID)
+	}
+}

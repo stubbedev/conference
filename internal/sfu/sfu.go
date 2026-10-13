@@ -384,7 +384,10 @@ func (r *Room) removeMember(member *Member) {
 	remaining := slices.Collect(maps.Values(r.members))
 	empty := len(r.members) == 0
 	recorderLeft := r.recorder == member.ID
-	r.recorder = ""
+
+	if recorderLeft {
+		r.recorder = ""
+	}
 	r.mu.Unlock()
 
 	if !empty {
