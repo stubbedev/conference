@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import { Circle, CircleAlert, Link2, Loader2 } from 'lucide-react'
+import { Circle, CircleAlert, Link2, Loader2, Users } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -55,7 +55,8 @@ import { ControlsBar } from '@/components/ControlsBar'
 import { DeviceSettingsPopover } from '@/components/MediaSettings'
 import { Hint } from '@/components/Hint'
 import { JoinGate } from '@/components/JoinGate'
-import { ParticipantsPanel } from '@/components/ParticipantsPanel'
+import { PeoplePanel } from '@/components/PeoplePanel'
+import { SidePanel, type SidePanelTab } from '@/components/SidePanel'
 import { Prejoin } from '@/components/Prejoin'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { toggleTileDebug, VideoTile } from '@/components/VideoTile'
@@ -180,7 +181,12 @@ export default function Room() {
           : '',
     }),
   )
-  const [chatOpen, setChatOpen] = usePersistentState('conference:chat-open', false)
+  const [sidebar, setSidebar] = usePersistentState<SidePanelTab | null>(
+    'conference:sidebar',
+    null,
+    (stored) => (stored === 'people' || stored === 'chat' ? stored : null),
+  )
+  const chatOpen = sidebar === 'chat'
 
   const { devices, refresh: refreshDevices } = useMediaDevices()
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
@@ -706,11 +712,21 @@ export default function Room() {
     [updateControls, controlsRef],
   )
 
-  const toggleChat = useCallback(() => {
-    const next = !chatOpenRef.current
-    setChatOpen(next)
-    if (next) setUnread(0)
-  }, [setChatOpen, chatOpenRef])
+  const sidebarRef = useLatest(sidebar)
+  const showSidebar = useCallback(
+    (tab: SidePanelTab | null) => {
+      setSidebar(tab)
+      if (tab === 'chat') setUnread(0)
+    },
+    [setSidebar],
+  )
+  const toggleSidebar = useCallback(
+    (tab: SidePanelTab) => showSidebar(sidebarRef.current === tab ? null : tab),
+    [showSidebar, sidebarRef],
+  )
+  const toggleChat = useCallback(() => toggleSidebar('chat'), [toggleSidebar])
+  const togglePeople = useCallback(() => toggleSidebar('people'), [toggleSidebar])
+  const closeSidebar = useCallback(() => showSidebar(null), [showSidebar])
 
   const toggleShare = useCallback(async () => {
     const client = clientRef.current
@@ -1346,12 +1362,18 @@ export default function Room() {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <ParticipantsPanel
-            members={memberList}
-            selfId={selfMember.id}
-            canModerate={privileged}
-            onModerate={moderateMember}
-          />
+          <Hint label={sidebar === 'people' ? 'Hide participants' : 'Show participants'} side="bottom">
+            <Button
+              variant={sidebar === 'people' ? 'default' : 'secondary'}
+              className="h-7 gap-1 px-2.5 text-xs"
+              aria-label="Participants"
+              aria-pressed={sidebar === 'people'}
+              onClick={togglePeople}
+            >
+              <Users className="size-3.5" />
+              {memberList.length}
+            </Button>
+          </Hint>
           <ThemeToggle />
         </div>
       </header>
@@ -1394,20 +1416,30 @@ export default function Room() {
           </main>
         )}
 
-        {chatOpen && (
+        {sidebar && (
           <>
             <button
               type="button"
-              aria-label="Close chat"
+              aria-label="Close panel"
               className="absolute inset-0 z-30 cursor-default bg-black/50 md:hidden"
-              onClick={toggleChat}
+              onClick={closeSidebar}
             />
-            <aside className="absolute inset-y-0 right-0 z-40 flex w-[85%] max-w-xs flex-col bg-background shadow-xl md:static md:z-auto md:w-80 md:max-w-none md:shrink-0 md:border-l md:shadow-none">
-              <ChatPanel
-                messages={messages}
-                members={memberList}
-                onSend={sendChat}
-                onClose={toggleChat}
+            <aside className="absolute inset-y-0 right-0 z-40 flex w-[85%] max-w-sm flex-col bg-background shadow-xl md:static md:z-auto md:w-[22rem] md:max-w-none md:shrink-0 md:border-l md:shadow-none">
+              <SidePanel
+                tab={sidebar}
+                peopleCount={memberList.length}
+                unread={unread}
+                onTab={showSidebar}
+                onClose={closeSidebar}
+                people={
+                  <PeoplePanel
+                    members={memberList}
+                    selfId={selfMember.id}
+                    canModerate={privileged}
+                    onModerate={moderateMember}
+                  />
+                }
+                chat={<ChatPanel messages={messages} onSend={sendChat} />}
               />
             </aside>
           </>

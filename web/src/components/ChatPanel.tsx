@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { ArrowDown, Lock, MicOff, SendHorizonal, Users, VideoOff, X } from 'lucide-react'
+import { ArrowDown, Lock, SendHorizonal } from 'lucide-react'
 
-import type { ChatMessage, MemberInfo } from '@/lib/sfu'
+import type { ChatMessage } from '@/lib/sfu'
 import { Hint } from '@/components/Hint'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,17 +9,10 @@ import { cn } from '@/lib/utils'
 
 interface ChatPanelProps {
   messages: ChatMessage[]
-  members: MemberInfo[]
   onSend: (text: string) => Promise<void>
-  onClose: () => void
 }
 
-export const ChatPanel = memo(function ChatPanel({
-  messages,
-  members,
-  onSend,
-  onClose,
-}: ChatPanelProps) {
+export const ChatPanel = memo(function ChatPanel({ messages, onSend }: ChatPanelProps) {
   const [text, setText] = useState('')
   const [atBottom, setAtBottom] = useState(true)
   const listRef = useRef<HTMLDivElement>(null)
@@ -47,39 +40,6 @@ export const ChatPanel = memo(function ChatPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-12 shrink-0 items-center justify-between border-b px-4">
-        <h2 className="flex items-center gap-1.5 text-sm font-semibold">
-          Chat <Lock className="size-3 text-muted-foreground" />
-        </h2>
-        <Hint label="Close chat" side="bottom">
-          <Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close chat">
-            <X />
-          </Button>
-        </Hint>
-      </div>
-
-      <div className="shrink-0 border-b px-4 py-3">
-        <p className="mb-2 flex items-center gap-1 text-xs font-medium text-muted-foreground">
-          <Users className="size-3" /> In this call — {members.length}
-        </p>
-        <div className="flex flex-wrap gap-1.5">
-          {members.map((member) => (
-            <span
-              key={member.id}
-              title={member.name}
-              className="inline-flex items-center gap-1.5 rounded-full bg-secondary py-0.5 pr-2.5 pl-0.5 text-xs font-medium"
-            >
-              <span className="grid size-5 place-items-center rounded-full bg-primary/10 text-[10px] text-foreground/70">
-                {member.name.slice(0, 2).toUpperCase()}
-              </span>
-              <span className="max-w-28 truncate">{member.name}</span>
-              {!member.mic && <MicOff className="size-3 text-destructive" />}
-              {!member.cam && <VideoOff className="size-3 text-muted-foreground" />}
-            </span>
-          ))}
-        </div>
-      </div>
-
       <div className="relative min-h-0 flex-1">
         <div ref={listRef} onScroll={onScroll} className="h-full space-y-3 overflow-y-auto px-3 py-3">
           {messages.map((message) => (
