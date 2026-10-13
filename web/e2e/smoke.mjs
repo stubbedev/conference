@@ -9,12 +9,16 @@
 //   node web/e2e/smoke.mjs [--server path/to/binary] [--chrome binary] [--seconds N] [--stagger MS]
 //
 // Without --server the binary is built with `go build`. Chrome needs
-// no network access; the server listens on 127.0.0.1 with ephemeral
-// ICE ports. Exit code 0 means every assertion held on both browsers.
+// no internet access; the server gets free ICE and TURN ports. A final
+// pair of browsers is forced through the embedded TURN relay (one over
+// UDP, one over TCP) via the machine's LAN address, since Chrome does
+// not relay TURN/UDP to loopback. Exit code 0 means every assertion
+// held on every browser.
 import { spawn, spawnSync } from 'node:child_process'
+import { createSocket } from 'node:dgram'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -56,6 +60,17 @@ function freePort() {
   })
 }
 
+function freeUdpPort() {
+  return new Promise((resolvePort, reject) => {
+    const sock = createSocket('udp4')
+    sock.on('error', reject)
+    sock.bind(0, () => {
+      const { port } = sock.address()
+      sock.close(() => resolvePort(port))
+    })
+  })
+}
+
 function buildServer(dir) {
   const bin = join(dir, 'server')
   const res = spawnSync('go', ['build', '-o', bin, './cmd/server'], {
@@ -68,8 +83,15 @@ function buildServer(dir) {
 }
 
 async function startServer(bin, dir, port) {
+  const env = {
+    ...process.env,
+    PORT: String(port),
+    ICE_UDP_PORT: String(await freeUdpPort()),
+    TURN_PORT: String(await freePort()),
+    DB_PATH: join(dir, 'smoke.db'),
+  }
   const proc = spawn(bin, [], {
-    env: { ...process.env, PORT: String(port), ICE_UDP_PORT: '0', DB_PATH: join(dir, 'smoke.db') },
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let log = ''
@@ -110,7 +132,15 @@ class CDP {
   }
 }
 
-async function launchChrome(idx, dir) {
+function lanAddress() {
+  for (const addrs of Object.values(networkInterfaces())) {
+    const lan = addrs?.find((a) => a.family === 'IPv4' && !a.internal)
+    if (lan) return lan.address
+  }
+  throw new Error('no non-loopback IPv4 address: Chrome only relays TURN/UDP to a routable host')
+}
+
+async function launchChrome(idx, dir, extraArgs = []) {
   const port = await freePort()
   const profile = mkdtempSync(join(dir, `chrome-${idx}-`))
   const proc = spawn(
@@ -126,6 +156,7 @@ async function launchChrome(idx, dir) {
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${profile}`,
       '--window-size=1200,900',
+      ...extraArgs,
       'about:blank',
     ],
     { stdio: ['ignore', 'ignore', 'pipe'] },
@@ -157,13 +188,24 @@ async function launchChrome(idx, dir) {
 
 // Injected before the app loads: records peer connections and the
 // E2EE worker's stats so the probe can read them from page context.
-const hook = `
+const hook = (relayTransport) => `
 (() => {
   window.__pcs = [];
   window.__pcStates = [];
+  const relayTransport = ${JSON.stringify(relayTransport)};
   const OrigPC = window.RTCPeerConnection;
-  window.RTCPeerConnection = function (...a) {
-    const pc = new OrigPC(...a);
+  window.RTCPeerConnection = function (config, ...rest) {
+    if (relayTransport) {
+      config = {
+        ...config,
+        iceTransportPolicy: 'relay',
+        iceServers: config.iceServers.map((s) => ({
+          ...s,
+          urls: s.urls.filter((u) => u.startsWith('turn:') && u.endsWith('?transport=' + relayTransport)),
+        })),
+      };
+    }
+    const pc = new OrigPC(config, ...rest);
     window.__pcs.push(pc);
     const st = { events: [] };
     const record = (what) => st.events.push(
@@ -173,6 +215,7 @@ const hook = `
     pc.addEventListener('connectionstatechange', () => record('conn'));
     pc.addEventListener('iceconnectionstatechange', () => record('ice'));
     pc.addEventListener('signalingstatechange', () => record('sig'));
+    pc.addEventListener('icecandidateerror', (e) => record('candidate-error ' + e.url + ' ' + e.errorCode + ' ' + e.errorText));
     window.__pcStates.push(st);
     return pc;
   };
@@ -214,6 +257,12 @@ const probe = `
       if (r.type === 'outbound-rtp') s['out_' + r.kind] = r.bytesSent || 0
     }
     s.recv_kinds = pc.getReceivers().map((x) => x.track?.kind ?? '?').join(',')
+    const stats = await pc.getStats();
+    for (const r of stats.values()) {
+      if (r.type !== 'transport' || !r.selectedCandidatePairId) continue;
+      const local = stats.get(stats.get(r.selectedCandidatePairId)?.localCandidateId);
+      s.path = !local ? '?' : local.relayProtocol ? 'relay/' + local.relayProtocol : local.candidateType;
+    }
     out.pcs.push(s);
   }
   for (const pc of window.__pcs) {
@@ -227,11 +276,11 @@ const probe = `
 })()
 `
 
-async function joinRoom(browser, url) {
+async function joinRoom(browser, url, relayTransport = null) {
   const s = browser.sessionId
   await browser.cdp.send('Page.enable', {}, s)
   await browser.cdp.send('Runtime.enable', {}, s)
-  await browser.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook }, s)
+  await browser.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook(relayTransport) }, s)
   await browser.cdp.send('Page.navigate', { url }, s)
   for (let t = 0; t < 80; t++) {
     const r = await browser.cdp.send(
@@ -364,6 +413,61 @@ function check(failures, label, condition, detail) {
   if (!condition) failures.push(`${label}: ${detail}`)
 }
 
+async function createRoom(port, name, host = '127.0.0.1') {
+  const res = await fetch(`http://${host}:${port}/api/rooms`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, password: '', maxMembers: 4 }),
+  })
+  const room = await res.json()
+  return {
+    slug: room.slug,
+    url: `http://${host}:${port}/r/${room.slug}#k=${room.roomKey}`,
+    privUrl: `http://${host}:${port}${room.privPath}#k=${room.roomKey}`,
+  }
+}
+
+async function checkCall(failures, browsers, labels, wantPaths = []) {
+  await sleep(seconds * 1000)
+  const first = await Promise.all(browsers.map(sample))
+  await sleep(2000)
+  const second = await Promise.all(browsers.map(sample))
+
+  for (const [i, a] of first.entries()) {
+    const b = second[i]
+    const label = labels[i]
+    const before = failures.length
+    console.log(
+      `${label}: videos=${a.videos.length} frames=[${a.videos.map((v) => v.frames).join(',')}]→[${b.videos.map((v) => v.frames).join(',')}] ` +
+        `audioPkts=${a.audioPackets}→${b.audioPackets} videoDecoded=${a.videoDecoded}→${b.videoDecoded} ` +
+        `paths=${a.pcs.map((pc) => pc.path).join(',')} e2ee=${JSON.stringify(a.e2ee)}`,
+    )
+    check(failures, label, a.videos.length === 2, `expected 2 video elements (self + one remote), found ${a.videos.length}`)
+    check(failures, label, a.e2ee !== null, 'no E2EE worker stats received')
+    if (a.e2ee) {
+      check(failures, label, a.e2ee.dropSend === 0, `E2EE dropped ${a.e2ee.dropSend} outgoing frames: ${a.e2ee.lastError}`)
+      check(failures, label, a.e2ee.dropRecv === 0, `E2EE dropped ${a.e2ee.dropRecv} incoming frames: ${a.e2ee.lastError}`)
+      check(failures, label, a.e2ee.send > 0, 'E2EE encrypted no outgoing frames')
+      check(failures, label, a.e2ee.recv > 0, 'E2EE decrypted no incoming frames')
+    }
+    check(failures, label, a.audioPackets > 0, 'no remote audio packets received')
+    check(failures, label, b.videoDecoded > a.videoDecoded && a.videoDecoded > 0, `remote video not decoding (${a.videoDecoded}→${b.videoDecoded})`)
+    for (const [j, v] of a.videos.entries()) {
+      check(failures, label, b.videos[j] && b.videos[j].frames > v.frames, `video element ${j} stopped rendering (${v.frames}→${b.videos[j]?.frames})`)
+      check(failures, label, !v.paused, `video element ${j} is paused`)
+    }
+    check(failures, label, a.errors.length === 0, `page errors: ${a.errors.join(' | ')}`)
+    if (wantPaths[i]) {
+      for (const pc of a.pcs) {
+        check(failures, label, pc.path === wantPaths[i], `peer connection ${pc.i} took path ${pc.path}, want ${wantPaths[i]}`)
+      }
+    }
+    if (failures.length > before) {
+      console.error(`${label} peer connections: ${JSON.stringify(a.pcs)}`)
+    }
+  }
+}
+
 async function main() {
   const dir = mkdtempSync(join(tmpdir(), 'conference-smoke-'))
   const procs = []
@@ -374,15 +478,8 @@ async function main() {
     const server = await startServer(bin, dir, port)
     procs.push(server.proc)
 
-    const room = await (
-      await fetch(`http://127.0.0.1:${port}/api/rooms`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: 'smoke', password: '', maxMembers: 4 }),
-      })
-    ).json()
-    const url = `http://127.0.0.1:${port}/r/${room.slug}#k=${room.roomKey}`
-    const privUrl = `http://127.0.0.1:${port}${room.privPath}#k=${room.roomKey}`
+    const room = await createRoom(port, 'smoke')
+    const { url, privUrl } = room
 
     const browsers = [await launchChrome(0, dir), await launchChrome(1, dir)]
     for (const b of browsers) procs.push(b.proc)
@@ -395,35 +492,7 @@ async function main() {
     await joinRoom(browsers[1], url)
     await sleep(stagger)
 
-    await sleep(seconds * 1000)
-    const first = await Promise.all(browsers.map(sample))
-    await sleep(2000)
-    const second = await Promise.all(browsers.map(sample))
-
-    for (const [i, a] of first.entries()) {
-      const b = second[i]
-      const label = `browser ${i}`
-      console.log(
-        `${label}: videos=${a.videos.length} frames=[${a.videos.map((v) => v.frames).join(',')}]→[${b.videos.map((v) => v.frames).join(',')}] ` +
-          `audioPkts=${a.audioPackets}→${b.audioPackets} videoDecoded=${a.videoDecoded}→${b.videoDecoded} ` +
-          `e2ee=${JSON.stringify(a.e2ee)}`,
-      )
-      check(failures, label, a.videos.length === 2, `expected 2 video elements (self + one remote), found ${a.videos.length}`)
-      check(failures, label, a.e2ee !== null, 'no E2EE worker stats received')
-      if (a.e2ee) {
-        check(failures, label, a.e2ee.dropSend === 0, `E2EE dropped ${a.e2ee.dropSend} outgoing frames: ${a.e2ee.lastError}`)
-        check(failures, label, a.e2ee.dropRecv === 0, `E2EE dropped ${a.e2ee.dropRecv} incoming frames: ${a.e2ee.lastError}`)
-        check(failures, label, a.e2ee.send > 0, 'E2EE encrypted no outgoing frames')
-        check(failures, label, a.e2ee.recv > 0, 'E2EE decrypted no incoming frames')
-      }
-      check(failures, label, a.audioPackets > 0, 'no remote audio packets received')
-      check(failures, label, b.videoDecoded > a.videoDecoded && a.videoDecoded > 0, `remote video not decoding (${a.videoDecoded}→${b.videoDecoded})`)
-      for (const [j, v] of a.videos.entries()) {
-        check(failures, label, b.videos[j] && b.videos[j].frames > v.frames, `video element ${j} stopped rendering (${v.frames}→${b.videos[j]?.frames})`)
-        check(failures, label, !v.paused, `video element ${j} is paused`)
-      }
-      check(failures, label, a.errors.length === 0, `page errors: ${a.errors.join(' | ')}`)
-    }
+    await checkCall(failures, browsers, ['browser 0', 'browser 1'])
 
     for (const [i, browser] of browsers.entries()) {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
@@ -486,14 +555,19 @@ async function main() {
       }
     }
 
+    const lan = lanAddress()
+    const relayRoom = await createRoom(port, 'smoke-relay', lan)
+    const secureLan = [`--unsafely-treat-insecure-origin-as-secure=http://${lan}:${port}`]
+    const relayed = [await launchChrome(3, dir, secureLan), await launchChrome(4, dir, secureLan)]
+    for (const b of relayed) procs.push(b.proc)
+    await joinRoom(relayed[0], relayRoom.url, 'udp')
+    await sleep(stagger)
+    await joinRoom(relayed[1], relayRoom.url, 'tcp')
+    await checkCall(failures, relayed, ['relay over udp', 'relay over tcp'], ['relay/udp', 'relay/tcp'])
+
     if (failures.length) {
       console.error('\nSMOKE FAILED')
       for (const f of failures) console.error('  - ' + f)
-      for (const [i, s] of first.entries()) {
-        if (s.audioPackets === 0 || !s.e2ee || s.e2ee.recv === 0) {
-          console.error(`browser ${i} peer connections: ${JSON.stringify(s.pcs)}`)
-        }
-      }
       console.error('\nserver log tail:\n' + server.log().split('\n').slice(-20).join('\n'))
       process.exitCode = 1
     } else {

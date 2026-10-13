@@ -69,17 +69,15 @@ func (s *Server) Routes(mux *http.ServeMux) {
 }
 
 type configResponse struct {
-	ICEServers          []config.ICEServer `json:"iceServers"`
-	CreateAuthRequired  bool               `json:"createAuthRequired"`
-	SessionLifetimeDays int                `json:"sessionLifetimeDays"`
-	JoinOnly            bool               `json:"joinOnly"`
+	CreateAuthRequired  bool `json:"createAuthRequired"`
+	SessionLifetimeDays int  `json:"sessionLifetimeDays"`
+	JoinOnly            bool `json:"joinOnly"`
 }
 
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	open := s.openCreate(r)
 
 	writeJSON(w, http.StatusOK, configResponse{
-		ICEServers:          s.Cfg.ICEServers,
 		CreateAuthRequired:  len(s.Cfg.APIKeys) > 0 && !open,
 		SessionLifetimeDays: int(s.Cfg.SessionTTL / (hoursPerDay * time.Hour)),
 		JoinOnly:            s.Cfg.JoinOnly && !open,

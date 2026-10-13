@@ -1,7 +1,9 @@
 # Bring-up stack: conference behind traefik with Let's Encrypt TLS.
-# Fill in .env (BASE_URL, ACME_EMAIL, API_KEYS, EXTERNAL_IPS) and run
-# `docker compose up -d`. Port 5000/udp must stay reachable for the
-# WebRTC ICE mux.
+# Fill in .env (BASE_URL, TURN_TLS_HOST, ACME_EMAIL, API_KEYS,
+# EXTERNAL_IPS) and run `docker compose up -d`. Port 5000/udp carries
+# the WebRTC ICE mux and 3478/udp+tcp the built-in TURN relay; both must
+# stay reachable. Traefik terminates TLS for TURN_TLS_HOST on 443 and
+# forwards it to the relay, for networks that only allow HTTPS out.
 services:
   traefik:
     image: traefik:v3
@@ -34,16 +36,25 @@ services:
       OPEN_CREATE_HOSTS: ${OPEN_CREATE_HOSTS:-}
       ROOM_TTL_DAYS: ${ROOM_TTL_DAYS:-365}
       EXTERNAL_IPS: ${EXTERNAL_IPS}
+      TURN_TLS_HOST: ${TURN_TLS_HOST}
     volumes:
       - data:/data
     ports:
       - "5000:5000/udp"
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
     labels:
       - traefik.enable=true
       - traefik.http.routers.conference.rule=Host(`${BASE_URL}`)
       - traefik.http.routers.conference.entrypoints=websecure
       - traefik.http.routers.conference.tls.certresolver=letsencrypt
+      - traefik.http.routers.conference.service=conference
       - traefik.http.services.conference.loadbalancer.server.port=8080
+      - traefik.tcp.routers.conference-turn.rule=HostSNI(`${TURN_TLS_HOST}`)
+      - traefik.tcp.routers.conference-turn.entrypoints=websecure
+      - traefik.tcp.routers.conference-turn.tls.certresolver=letsencrypt
+      - traefik.tcp.routers.conference-turn.service=conference-turn
+      - traefik.tcp.services.conference-turn.loadbalancer.server.port=3478
 
 volumes:
   letsencrypt:

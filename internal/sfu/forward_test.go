@@ -131,7 +131,7 @@ func TestForwardRewritesHeaderExtensionIDs(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 
 	publisher := newTestPeer(t, hub, engine, "alice", false)
 	audio, publisherLevelID, _ := publishWithBrowserExtmap(t, publisher)
@@ -181,7 +181,7 @@ func TestForwardStripsMidExtension(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 
 	publisher := newTestPeer(t, hub, engine, "carol", false)
 	audio, publisherLevelID, publisherMidID := publishWithBrowserExtmap(t, publisher)

@@ -11,6 +11,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
+	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
 )
 
@@ -20,7 +21,20 @@ const (
 	readTimeout   = 10 * time.Second
 	frameInterval = 33 * time.Millisecond
 	frameBytes    = 1200
+	testHost      = "127.0.0.1"
+	testTURNPort  = 3478
 )
+
+func newTestHub(t *testing.T, engine *sfu.Engine) *sfu.Hub {
+	t.Helper()
+
+	creds, err := relay.NewCredentials(relay.Config{Port: testTURNPort, TLSHost: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return sfu.NewHub(sfu.HubConfig{Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500})
+}
 
 // testPeer wires one test-side peer connection to one hub member. The
 // pump goroutine applies the server's ICE candidates to the local peer
@@ -57,6 +71,7 @@ func newTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, name string, pr
 		MemberName: name,
 		MaxMembers: 8,
 		Priv:       priv,
+		Host:       testHost,
 	}, func(msg sfu.Message) { peer.raw <- msg })
 	if err != nil {
 		t.Fatalf("%s join: %v", name, err)
@@ -474,11 +489,7 @@ func TestMediaLoopback(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{
-		Engine:         engine,
-		MaxMembers:     8,
-		MaxPublishKbps: 2500,
-	})
+	hub := newTestHub(t, engine)
 
 	publisher := newTestPeer(t, hub, engine, "alice", false)
 	audioTrack, videoTrack := publisherOffer(t, publisher)
@@ -519,7 +530,7 @@ func TestLateVideoTrack(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 
 	publisher := newTestPeer(t, hub, engine, "alice", false)
 	audioTrack := publishAudioOnly(t, publisher)
@@ -571,7 +582,7 @@ func TestModeration(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 
 	host := newTestPeer(t, hub, engine, "host", true)
 	guest := newTestPeer(t, hub, engine, "guest", false)
@@ -636,7 +647,7 @@ func TestRecordingAnnouncement(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 
 	host := newTestPeer(t, hub, engine, "host", true)
 	guest := newTestPeer(t, hub, engine, "guest", false)
@@ -682,7 +693,7 @@ func TestRecordingLifecycle(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 
 	host := newTestPeer(t, hub, engine, "host", true)
 	guest := newTestPeer(t, hub, engine, "guest", false)
@@ -758,7 +769,7 @@ func TestKeyframeRequestForwarding(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 
 	publisher := newTestPeer(t, hub, engine, "alice", false)
 	audioTrack, videoTrack := publisherOffer(t, publisher)
@@ -832,7 +843,7 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 
 	publisher := newTestPeer(t, hub, engine, "alice", false)
 	audioTrack, videoTrack := publisherOffer(t, publisher)
@@ -874,6 +885,53 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 	}
 }
 
+// TestWelcomeCarriesRelayCredentials checks that a member is handed
+// TURN credentials for the host it signaled on, and that the hub
+// vouches for them exactly while the member is in the call.
+func TestWelcomeCarriesRelayCredentials(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := newTestHub(t, engine)
+	peer := newTestPeer(t, hub, engine, "alice", false)
+
+	welcome := peer.next(t, "welcome")
+	if len(welcome.ICEServers) != 1 {
+		t.Fatalf("welcome ICE servers: %+v", welcome.ICEServers)
+	}
+
+	server := welcome.ICEServers[0]
+	if server.Username != peer.member.ID || server.Credential == "" {
+		t.Fatalf("credentials %q/%q for member %s", server.Username, server.Credential, peer.member.ID)
+	}
+
+	want := "turn:127.0.0.1:3478?transport=udp"
+	if len(server.URLs) == 0 || server.URLs[0] != want {
+		t.Fatalf("URLs %v, want %s first", server.URLs, want)
+	}
+
+	if !hub.MemberLive(peer.member.ID) {
+		t.Fatal("joined member is not live")
+	}
+
+	peer.member.Leave()
+
+	deadline := time.Now().Add(testTimeout)
+	for hub.MemberLive(peer.member.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("member still live after leaving")
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestLeaveAlwaysTearsDown repeats join/leave so that a leave which
 // only sometimes removes the member (a ghost left in the room, never
 // announced) fails reliably.
@@ -889,7 +947,7 @@ func TestLeaveAlwaysTearsDown(t *testing.T) {
 
 	defer closeEngine()
 
-	hub := sfu.NewHub(sfu.HubConfig{Engine: engine, MaxMembers: 8, MaxPublishKbps: 2500})
+	hub := newTestHub(t, engine)
 	stayer := newTestPeer(t, hub, engine, "stayer", false)
 
 	for round := range rounds {

@@ -1,11 +1,4 @@
-export interface ICEServer {
-  urls: string[]
-  username?: string
-  credential?: string
-}
-
 export interface ServerConfig {
-  iceServers: ICEServer[]
   createAuthRequired: boolean
   sessionLifetimeDays: number
   joinOnly: boolean

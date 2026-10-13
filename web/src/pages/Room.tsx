@@ -159,7 +159,6 @@ export default function Room() {
   const micPipelineRef = useRef<MicPipeline | null>(null)
   const sessionRef = useRef('')
   const roomKeyRef = useRef<Uint8Array<ArrayBuffer> | null>(null)
-  const iceRef = useRef<RTCIceServer[]>([])
 
   const controlsRef = useLatest(controls)
   const prefsRef = useLatest(devicePrefs)
@@ -390,8 +389,6 @@ export default function Room() {
           )
         }
 
-        const cfg = await api.config()
-        iceRef.current = cfg.iceServers
         sessionRef.current = session
         roomKeyRef.current = fromB64(keyB64)
         setPhase('prejoin')
@@ -512,7 +509,6 @@ export default function Room() {
         name: displayName.trim() || 'Guest',
         mediaKey: mediaKey,
         chatKey,
-        iceServers: iceRef.current,
       })
       clientRef.current = client
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/stubbe/conference/internal/api"
 	"github.com/stubbe/conference/internal/config"
+	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
 	"github.com/stubbe/conference/internal/store"
 	"github.com/stubbe/conference/internal/ws"
@@ -64,11 +65,24 @@ func run() error {
 
 	defer closeEngine()
 
+	creds, err := relay.NewCredentials(cfg.Relay)
+	if err != nil {
+		return fmt.Errorf("relay: %w", err)
+	}
+
 	hub := sfu.NewHub(sfu.HubConfig{
 		Engine:         engine,
+		Relay:          creds,
 		MaxMembers:     cfg.MaxRoomMembers,
 		MaxPublishKbps: cfg.MaxPublishKbps,
 	})
+
+	turnServer, err := relay.Start(context.Background(), creds, engine.MediaAddrs(), hub.MemberLive)
+	if err != nil {
+		return fmt.Errorf("relay: %w", err)
+	}
+
+	defer func() { _ = turnServer.Close() }()
 
 	go reapLoop(database, hub, cfg.RoomTTL)
 
@@ -80,7 +94,8 @@ func run() error {
 		ReadHeaderTimeout: headerReadTimeout,
 	}
 
-	log.Printf("conference listening on %s (db: %s, ice udp: %d)", cfg.HTTPAddr, cfg.DBPath, cfg.ICEUDPPort)
+	log.Printf("conference listening on %s (db: %s, ice udp: %d, turn udp+tcp: %d, turns host: %q)",
+		cfg.HTTPAddr, cfg.DBPath, cfg.ICEUDPPort, cfg.Relay.Port, cfg.Relay.TLSHost)
 
 	return serveUntilShutdown(srv, hub)
 }

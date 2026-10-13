@@ -32,8 +32,9 @@ fmt:
 # http://localhost:5173) with a scratch database — the quickest way to
 # try it locally. Ctrl+C stops both. air rebuilds and restarts the
 # backend on every Go change and passes this shell's environment through
-# to it: :18080 so it never fights other services for 8080, an ephemeral
-# ICE port, and a scratch SQLite in /tmp. vite proxies /api and /ws to
+# to it: :18080 so it never fights other services for 8080, ICE and
+# TURN on 15000/13478 for the same reason, and a scratch SQLite in /tmp.
+# vite proxies /api and /ws to
 # it. The toolchain (go, air, just, node) comes from the flake dev shell
 # — see flake.nix.
 dev:
@@ -41,7 +42,8 @@ dev:
     set -euo pipefail
     (cd web && [ -d node_modules ] || npm ci)
     export PORT=18080
-    export ICE_UDP_PORT=0
+    export ICE_UDP_PORT=15000
+    export TURN_PORT=13478
     export DB_PATH=/tmp/conference-dev.db
     export BACKEND_ORIGIN=http://localhost:18080
     if ! command -v air >/dev/null 2>&1; then

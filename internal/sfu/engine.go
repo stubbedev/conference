@@ -13,25 +13,31 @@ package sfu
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/interceptor/pkg/report"
 	"github.com/pion/webrtc/v4"
+
+	"github.com/stubbe/conference/internal/relay"
 )
 
 // Engine owns the pion API factory shared by all peer connections.
 type Engine struct {
 	API *webrtc.API
+
+	mediaAddrs []relay.MediaAddr
 }
 
 // NewEngine builds the engine. udpPort > 0 binds all ICE traffic to a
 // single UDP port (easy to publish through Docker or a firewall);
 // externalIPs, when set, replace host candidates for NAT 1:1 setups.
 // The returned cleanup closes the UDP mux.
-func NewEngine(udpPort int, externalIPs []string) (*Engine, func(), error) {
-	settingEngine, closeMux, err := newSettingEngine(udpPort, externalIPs)
+func NewEngine(udpPort int, externalIPs []netip.Addr) (*Engine, func(), error) {
+	settingEngine, mediaAddrs, closeMux, err := newSettingEngine(udpPort, externalIPs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -56,12 +62,19 @@ func NewEngine(udpPort int, externalIPs []string) (*Engine, func(), error) {
 		webrtc.WithInterceptorRegistry(registry),
 	)
 
-	return &Engine{API: api}, closeMux, nil
+	return &Engine{API: api, mediaAddrs: mediaAddrs}, closeMux, nil
+}
+
+// MediaAddrs lists the addresses the SFU announces on its UDP mux and
+// the local sockets behind them. It is empty without a mux (ephemeral
+// ports), where no fixed address exists to relay to.
+func (e *Engine) MediaAddrs() []relay.MediaAddr {
+	return e.mediaAddrs
 }
 
 // newSettingEngine binds the shared UDP mux and applies NAT rewrite
 // rules. The returned cleanup releases the mux.
-func newSettingEngine(udpPort int, externalIPs []string) (webrtc.SettingEngine, func(), error) {
+func newSettingEngine(udpPort int, externalIPs []netip.Addr) (webrtc.SettingEngine, []relay.MediaAddr, func(), error) {
 	settingEngine := webrtc.SettingEngine{}
 
 	noop := func() {}
@@ -69,7 +82,7 @@ func newSettingEngine(udpPort int, externalIPs []string) (webrtc.SettingEngine, 
 	rules := make([]webrtc.ICEAddressRewriteRule, 0, len(externalIPs))
 	for _, addr := range externalIPs {
 		rules = append(rules, webrtc.ICEAddressRewriteRule{
-			External:        []string{addr},
+			External:        []string{addr.String()},
 			AsCandidateType: webrtc.ICECandidateTypeHost,
 			Mode:            webrtc.ICEAddressRewriteReplace,
 		})
@@ -78,22 +91,64 @@ func newSettingEngine(udpPort int, externalIPs []string) (webrtc.SettingEngine, 
 	if len(rules) > 0 {
 		err := settingEngine.SetICEAddressRewriteRules(rules...)
 		if err != nil {
-			return settingEngine, noop, fmt.Errorf("sfu: address rewrite %v: %w", externalIPs, err)
+			return settingEngine, nil, noop, fmt.Errorf("sfu: address rewrite %v: %w", externalIPs, err)
 		}
 	}
 
 	if udpPort == 0 {
-		return settingEngine, noop, nil
+		return settingEngine, nil, noop, nil
 	}
 
 	mux, err := ice.NewMultiUDPMuxFromPort(udpPort)
 	if err != nil {
-		return settingEngine, noop, fmt.Errorf("sfu: ice mux on port %d: %w", udpPort, err)
+		return settingEngine, nil, noop, fmt.Errorf("sfu: ice mux on port %d: %w", udpPort, err)
 	}
 
 	settingEngine.SetICEUDPMux(mux)
 
-	return settingEngine, func() { _ = mux.Close() }, nil
+	return settingEngine, mediaAddrs(mux.GetListenAddresses(), externalIPs), func() { _ = mux.Close() }, nil
+}
+
+// mediaAddrs pairs what the SFU announces with where it listens. With
+// external IPs, each one is announced for the first local socket of
+// its family (pion replaces every host candidate of that family with
+// it); without, every local socket announces itself.
+func mediaAddrs(listen []net.Addr, externalIPs []netip.Addr) []relay.MediaAddr {
+	locals := make([]netip.AddrPort, 0, len(listen))
+
+	for _, addr := range listen {
+		udp, ok := addr.(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+
+		local := udp.AddrPort()
+		locals = append(locals, netip.AddrPortFrom(local.Addr().Unmap(), local.Port()))
+	}
+
+	out := make([]relay.MediaAddr, 0, len(locals))
+
+	if len(externalIPs) == 0 {
+		for _, local := range locals {
+			out = append(out, relay.MediaAddr{Announced: local, Local: local})
+		}
+
+		return out
+	}
+
+	for _, external := range externalIPs {
+		for _, local := range locals {
+			if local.Addr().Is4() != external.Is4() {
+				continue
+			}
+
+			out = append(out, relay.MediaAddr{Announced: netip.AddrPortFrom(external, local.Port()), Local: local})
+
+			break
+		}
+	}
+
+	return out
 }
 
 // newMediaEngine registers the codecs and header extensions negotiated

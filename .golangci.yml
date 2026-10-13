@@ -53,6 +53,7 @@ linters:
             - github.com/stubbe/conference/web
             - github.com/stubbe/conference/internal/api
             - github.com/stubbe/conference/internal/config
+            - github.com/stubbe/conference/internal/relay
             - github.com/stubbe/conference/internal/roomcrypt
             - github.com/stubbe/conference/internal/sfu
             - github.com/stubbe/conference/internal/store
@@ -65,6 +66,7 @@ linters:
             - github.com/pion/interceptor
             - github.com/pion/interceptor/pkg/nack
             - github.com/pion/interceptor/pkg/report
+            - github.com/pion/turn/v5
             - github.com/coder/websocket
             - github.com/google/uuid
             - modernc.org/sqlite

@@ -35,18 +35,26 @@ media and chat are encrypted end-to-end in the browser.
   downstream connection per subscriber, trickle ICE, keyframe requests,
   NACK/receiver-report interceptors and a REMB bandwidth ceiling — all on a
   single UDP port.
+- **Built-in TURN relay.** Members whose network blocks UDP to the SFU
+  connect through TURN over UDP, TCP or TLS on 443, served by the same
+  binary: no coturn, no third-party STUN. Credentials are minted per
+  member in the signaling welcome and stop working when the member
+  leaves, and the relay only forwards to the SFU itself, so it cannot be
+  abused as an open proxy.
 - **One binary.** SQLite storage (pure Go, no CGO), the web UI embedded.
 
 ## Quick start
 
 ```bash
-cp .env.example .env        # set BASE_URL, ACME_EMAIL, API_KEYS, EXTERNAL_IPS
+cp .env.example .env        # set BASE_URL, TURN_TLS_HOST, ACME_EMAIL, API_KEYS, EXTERNAL_IPS
 docker compose up -d
 ```
 
-Traefik terminates TLS and routes `BASE_URL` to the server; UDP port 5000
-carries the WebRTC ICE mux and must stay reachable. Rooms live in SQLite
-under the `data` volume.
+Traefik terminates TLS and routes `BASE_URL` to the server, and
+`TURN_TLS_HOST` (a second DNS name for the same host) to the TURN relay.
+UDP port 5000 carries the WebRTC ICE mux and 3478/udp+tcp the TURN relay;
+all three must stay reachable. Rooms live in SQLite under the `data`
+volume.
 
 Or run it bare:
 
@@ -69,7 +77,8 @@ BASE_URL=meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
 | `ROOM_TTL_DAYS`    | `365`                    | Rooms older than this many days are deleted hourly; live rooms are skipped; `0` keeps rooms forever |
 | `ICE_UDP_PORT`     | `5000`                   | Single UDP port for all WebRTC traffic           |
 | `EXTERNAL_IPS`     | —                        | Comma-separated public IPs advertised for ICE (NAT) |
-| `ICE_SERVERS`      | Google STUN              | JSON array of STUN/TURN servers handed to clients |
+| `TURN_PORT`        | `3478`                   | UDP and TCP port of the built-in TURN relay      |
+| `TURN_TLS_HOST`    | —                        | Hostname whose port 443 terminates TLS and forwards to `TURN_PORT`/tcp; adds a `turns:` URL |
 | `MAX_PUBLISH_KBPS` | `2500`                   | REMB ceiling per publisher                       |
 | `MAX_ROOM_MEMBERS` | `16`                     | Default room member limit                        |
 | `ALLOWED_ORIGINS`  | same-origin              | Extra origins allowed on the signaling WebSocket |
@@ -164,8 +173,8 @@ hosts share one room database, so links work on any of the domains.
 
 ### Other endpoints
 
-- `GET /api/config` — ICE servers, whether creation needs a key, whether
-  the landing page is join-only.
+- `GET /api/config` — whether creation needs a key, whether the landing
+  page is join-only.
 - `GET /api/rooms/{slug}` — public room info; password rooms include
   the salts the browser needs to compute a proof.
 - `GET /api/rooms` / `DELETE /api/rooms/{slug}` — operator endpoints (API key).

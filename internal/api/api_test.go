@@ -12,6 +12,7 @@ import (
 
 	"github.com/stubbe/conference/internal/api"
 	"github.com/stubbe/conference/internal/config"
+	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
 	"github.com/stubbe/conference/internal/store"
 )
@@ -48,7 +49,7 @@ func newTestServer(t *testing.T) http.Handler {
 		OpenCreateHosts: []string{openHost},
 		ICEUDPPort:      0,
 		ExternalIPs:     nil,
-		ICEServers:      nil,
+		Relay:           relay.Config{Port: 3478, TLSHost: ""},
 		MaxPublishKbps:  0,
 		AllowedOrigins:  nil,
 		SessionTTL:      365 * 24 * time.Hour,
@@ -56,8 +57,14 @@ func newTestServer(t *testing.T) http.Handler {
 		RoomTTL:         0,
 	}
 
+	creds, err := relay.NewCredentials(cfg.Relay)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	hub := sfu.NewHub(sfu.HubConfig{
 		Engine:         engine,
+		Relay:          creds,
 		MaxMembers:     0,
 		MaxPublishKbps: 0,
 	})

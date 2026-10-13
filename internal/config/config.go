@@ -2,14 +2,16 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/stubbe/conference/internal/relay"
 )
 
 // Defaults, overridable through the environment.
@@ -17,21 +19,14 @@ const (
 	defaultHTTPPort       = "8080"
 	defaultDBPath         = "conference.db"
 	defaultICEUDPPort     = 5000
+	defaultTURNPort       = 3478
+	maxPort               = 65535
 	defaultMaxPublishKbps = 2500
 	defaultMaxRoomMembers = 16
 	defaultRoomTTLDays    = 365
 	defaultSessionDays    = 365
 	hoursPerDay           = 24
 )
-
-// ICEServer mirrors the WebRTC ICEServer dictionary exposed to browsers
-// via GET /api/config. TURN credentials may reference time-limited
-// credentials computed by the operator; no secrets are generated here.
-type ICEServer struct {
-	URLs       []string `json:"urls"`
-	Username   string   `json:"username,omitempty"`
-	Credential string   `json:"credential,omitempty"`
-}
 
 // Config is the complete server configuration.
 type Config struct {
@@ -55,9 +50,9 @@ type Config struct {
 	// restrict the other domains served by the same process.
 	OpenCreateHosts []string
 
-	ICEUDPPort  int      // single UDP port for the ICE mux (0 = ephemeral ports)
-	ExternalIPs []string // NAT 1:1 addresses announced as host candidates
-	ICEServers  []ICEServer
+	ICEUDPPort  int          // single UDP port for the ICE mux
+	ExternalIPs []netip.Addr // NAT 1:1 addresses announced as host candidates
+	Relay       relay.Config // embedded TURN server
 
 	// Ceiling for the REMB estimate the SFU feeds back to publishers.
 	MaxPublishKbps int
@@ -93,6 +88,20 @@ func envInt(key string, def int) (int, error) {
 	return n, nil
 }
 
+// envPort reads a port that must be bound: 1-65535.
+func envPort(key string, def int) (int, error) {
+	port, err := envInt(key, def)
+	if err != nil {
+		return 0, err
+	}
+
+	if port < 1 || port > maxPort {
+		return 0, fmt.Errorf("%w: %s=%d", errPortRange, key, port)
+	}
+
+	return port, nil
+}
+
 func envBool(key string) bool {
 	switch strings.ToLower(os.Getenv(key)) {
 	case "1", "true", "yes":
@@ -117,6 +126,11 @@ func splitList(v string) []string {
 	return out
 }
 
+var (
+	errPortRange = errors.New("config: port out of range 1-65535")
+	errPortClash = errors.New("config: ports must differ")
+)
+
 var errJoinOnlyNeedsKey = errors.New("config: JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
 
 // FromEnv builds a Config from the process environment.
@@ -130,7 +144,7 @@ func FromEnv() (*Config, error) {
 		OpenCreateHosts: nil,
 		ICEUDPPort:      defaultICEUDPPort,
 		ExternalIPs:     nil,
-		ICEServers:      nil,
+		Relay:           relay.Config{Port: defaultTURNPort, TLSHost: ""},
 		MaxPublishKbps:  defaultMaxPublishKbps,
 		AllowedOrigins:  nil,
 		SessionTTL:      defaultSessionDays * hoursPerDay * time.Hour,
@@ -185,27 +199,30 @@ func applyHTTPConfig(cfg *Config) error {
 
 // applyMediaConfig fills the WebRTC settings.
 func applyMediaConfig(cfg *Config) error {
-	udpPort, err := envInt("ICE_UDP_PORT", defaultICEUDPPort)
+	udpPort, err := envPort("ICE_UDP_PORT", defaultICEUDPPort)
 	if err != nil {
 		return err
 	}
 
-	cfg.ICEUDPPort = udpPort
-	cfg.ExternalIPs = splitList(env("EXTERNAL_IPS", ""))
-
-	if iceServers := os.Getenv("ICE_SERVERS"); iceServers != "" {
-		err := json.Unmarshal([]byte(iceServers), &cfg.ICEServers)
-		if err != nil {
-			return fmt.Errorf("ICE_SERVERS: %w", err)
-		}
+	turnPort, err := envPort("TURN_PORT", defaultTURNPort)
+	if err != nil {
+		return err
 	}
 
-	if cfg.ICEServers == nil {
-		cfg.ICEServers = []ICEServer{{
-			URLs:       []string{"stun:stun.l.google.com:19302"},
-			Username:   "",
-			Credential: "",
-		}}
+	if turnPort == udpPort {
+		return fmt.Errorf("%w: TURN_PORT and ICE_UDP_PORT are both %d", errPortClash, udpPort)
+	}
+
+	cfg.ICEUDPPort = udpPort
+	cfg.Relay = relay.Config{Port: turnPort, TLSHost: env("TURN_TLS_HOST", "")}
+
+	for _, raw := range splitList(env("EXTERNAL_IPS", "")) {
+		addr, parseErr := netip.ParseAddr(raw)
+		if parseErr != nil {
+			return fmt.Errorf("EXTERNAL_IPS: %w", parseErr)
+		}
+
+		cfg.ExternalIPs = append(cfg.ExternalIPs, addr.Unmap())
 	}
 
 	maxPublishKbps, err := envInt("MAX_PUBLISH_KBPS", cfg.MaxPublishKbps)

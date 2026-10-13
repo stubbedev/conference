@@ -20,8 +20,10 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/conference ./cmd/s
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/conference /conference
 COPY --from=build /out/data /data
-ENV DB_PATH=/data/conference.db PORT=8080 ICE_UDP_PORT=5000
+ENV DB_PATH=/data/conference.db PORT=8080 ICE_UDP_PORT=5000 TURN_PORT=3478
 EXPOSE 8080
 EXPOSE 5000/udp
+EXPOSE 3478/udp
+EXPOSE 3478/tcp
 VOLUME /data
 ENTRYPOINT ["/conference"]

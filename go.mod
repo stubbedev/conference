@@ -11,6 +11,7 @@ require (
 	github.com/pion/interceptor v0.1.48
 	github.com/pion/rtcp v1.2.17
 	github.com/pion/rtp v1.10.5
+	github.com/pion/turn/v5 v5.1.0
 	github.com/pion/webrtc/v4 v4.2.20
 	modernc.org/sqlite v1.59.0
 )
@@ -29,7 +30,6 @@ require (
 	github.com/pion/srtp/v3 v3.0.13 // indirect
 	github.com/pion/stun/v4 v4.0.0 // indirect
 	github.com/pion/transport/v4 v4.1.0 // indirect
-	github.com/pion/turn/v5 v5.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.57.0 // indirect

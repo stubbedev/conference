@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
+
+	"github.com/stubbe/conference/internal/relay"
 )
 
 // Track kinds as announced by the client in offer metadata.
@@ -93,6 +95,10 @@ type JoinRequest struct {
 	MemberName string
 	MaxMembers int
 	Priv       bool
+
+	// Host is the hostname the member reached signaling on; its TURN
+	// URLs point there.
+	Host string
 }
 
 // Message is the single JSON shape exchanged over the signaling
@@ -113,6 +119,8 @@ type Message struct {
 	Self     *MemberInfo  `json:"self,omitempty"`
 	RoomInfo *RoomInfo    `json:"roomInfo,omitempty"`
 	Members  []MemberInfo `json:"members,omitempty"`
+
+	ICEServers []relay.ICEServer `json:"iceServers,omitempty"`
 
 	// media
 	PC        string                   `json:"pc,omitempty"`
@@ -155,6 +163,7 @@ type Hub struct {
 // HubConfig wires the hub to an engine and applies limits.
 type HubConfig struct {
 	Engine         *Engine
+	Relay          *relay.Credentials
 	MaxMembers     int
 	MaxPublishKbps int
 }
@@ -188,6 +197,20 @@ func (h *Hub) JoinRoom(req JoinRequest, send func(Message)) (*Member, error) {
 	h.mu.Unlock()
 
 	return room.join(req, send)
+}
+
+// MemberLive reports whether id is a member currently in a call.
+func (h *Hub) MemberLive(id string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for _, room := range h.rooms {
+		if room.member(id) != nil {
+			return true
+		}
+	}
+
+	return false
 }
 
 // LiveCount returns the number of connected members in a live room.
@@ -286,6 +309,24 @@ func (r *Room) member(id string) *Member {
 	return r.members[id]
 }
 
+func newMember(room *Room, short uint32, req JoinRequest, send func(Message)) *Member {
+	return &Member{
+		ID:    uuid.NewString(),
+		Short: short,
+		Name:  req.MemberName,
+		room:  room,
+		priv:  req.Priv,
+		send:  send,
+		tasks: make(chan func(), taskQueueDepth),
+		done:  make(chan struct{}),
+		once:  sync.Once{},
+		mu:    sync.RWMutex{},
+		up:    nil,
+		downs: map[string]*DownPeer{},
+		state: State{Mic: false, Cam: false, Sharing: false},
+	}
+}
+
 func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 	r.mu.Lock()
 
@@ -297,21 +338,7 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 
 	r.nextShort++
 
-	member := &Member{
-		ID:    uuid.NewString(),
-		Short: r.nextShort,
-		Name:  req.MemberName,
-		room:  r,
-		priv:  req.Priv,
-		send:  send,
-		tasks: make(chan func(), taskQueueDepth),
-		done:  make(chan struct{}),
-		once:  sync.Once{},
-		mu:    sync.RWMutex{},
-		up:    nil,
-		downs: map[string]*DownPeer{},
-		state: State{Mic: false, Cam: false, Sharing: false},
-	}
+	member := newMember(r, r.nextShort, req, send)
 
 	var others []MemberInfo
 
@@ -331,6 +358,7 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 
 	member.send(Message{
 		Type: "welcome", Self: &self, RoomInfo: r.info(), Members: others, Recorder: recorder,
+		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID),
 	})
 	r.broadcastExcept(member.ID, Message{
 		Type: "member-joined", ID: member.ID, Short: member.Short, Name: member.Name,

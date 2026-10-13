@@ -2,6 +2,7 @@ package sfu_test
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -11,7 +12,9 @@ import (
 	"github.com/stubbe/conference/internal/sfu"
 )
 
-const externalIP = "203.0.113.10"
+func testExternalIP() netip.Addr {
+	return netip.MustParseAddr("203.0.113.10")
+}
 
 func freeUDPPort(t *testing.T) int {
 	t.Helper()
@@ -105,7 +108,7 @@ func TestEngineAnnouncesExternalIPs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			engine, closeEngine, err := sfu.NewEngine(tc.port, []string{externalIP})
+			engine, closeEngine, err := sfu.NewEngine(tc.port, []netip.Addr{testExternalIP()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -118,8 +121,8 @@ func TestEngineAnnouncesExternalIPs(t *testing.T) {
 			}
 
 			for _, candidate := range hosts {
-				if candidate.Address() != externalIP {
-					t.Errorf("host candidate %s:%d announced, want only %s", candidate.Address(), candidate.Port(), externalIP)
+				if candidate.Address() != testExternalIP().String() {
+					t.Errorf("host candidate %s:%d announced, want only %s", candidate.Address(), candidate.Port(), testExternalIP())
 				}
 
 				if tc.port != 0 && candidate.Port() != tc.port {
@@ -127,5 +130,43 @@ func TestEngineAnnouncesExternalIPs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEngineMediaAddrs(t *testing.T) {
+	t.Parallel()
+
+	port := freeUDPPort(t)
+
+	engine, closeEngine, err := sfu.NewEngine(port, []netip.Addr{testExternalIP()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(closeEngine)
+
+	addrs := engine.MediaAddrs()
+	if len(addrs) != 1 {
+		t.Fatalf("media addrs %v, want one for the single IPv4 external IP", addrs)
+	}
+
+	want := netip.AddrPortFrom(testExternalIP(), uint16(port)) //nolint:gosec // freeUDPPort returns a valid port.
+	if addrs[0].Announced != want {
+		t.Fatalf("announced %s, want %s", addrs[0].Announced, want)
+	}
+
+	if !addrs[0].Local.Addr().Is4() || addrs[0].Local.Port() != uint16(port) { //nolint:gosec // as above.
+		t.Fatalf("local %s, want an IPv4 mux socket on port %d", addrs[0].Local, port)
+	}
+
+	ephemeral, closeEphemeral, err := sfu.NewEngine(0, []netip.Addr{testExternalIP()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(closeEphemeral)
+
+	if got := ephemeral.MediaAddrs(); len(got) != 0 {
+		t.Fatalf("ephemeral engine announced media addrs %v", got)
 	}
 }

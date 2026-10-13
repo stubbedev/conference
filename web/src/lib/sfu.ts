@@ -39,7 +39,6 @@ export interface RoomClientOptions {
   name: string
   mediaKey: Uint8Array<ArrayBuffer>
   chatKey: CryptoKey
-  iceServers: RTCIceServer[]
 }
 
 interface WireMessage {
@@ -69,6 +68,7 @@ interface WireMessage {
   action?: string
   on?: boolean
   recorder?: string
+  iceServers?: RTCIceServer[]
 }
 
 interface Events {
@@ -130,6 +130,7 @@ export class RoomClient {
   private screenSenders: RTCRtpSender[] = []
   private transformed = new WeakSet<object>()
   private selfId = ''
+  private iceServers: RTCIceServer[] | null = null
   private handlers = new Map<string, Set<AnyHandler>>()
   private localMic: MediaStreamTrack | null = null
   private localCam: MediaStreamTrack | null = null
@@ -197,6 +198,11 @@ export class RoomClient {
         }
         if (msg.type === 'welcome') {
           clearTimeout(timeout)
+          if (!msg.iceServers?.length) {
+            reject(new Error('The server sent no ICE servers.'))
+            return
+          }
+          this.iceServers = msg.iceServers
           if (msg.self) this.selfId = msg.self.id
           for (const member of msg.members ?? []) this.members.set(member.id, member)
           this.emit('welcome', {
@@ -375,7 +381,8 @@ export class RoomClient {
   }
 
   private newPC(pcID: string): RTCPeerConnection {
-    const pc = new RTCPeerConnection({ iceServers: this.opts.iceServers })
+    if (!this.iceServers) throw new Error(`Peer connection ${pcID} opened before the welcome.`)
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers })
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) return
       this.send({ type: 'ice', pc: pcID, candidate: ev.candidate.toJSON() })

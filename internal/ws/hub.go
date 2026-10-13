@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -54,7 +55,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// as soon as the connection is hijacked.
 	ctx := context.WithoutCancel(r.Context())
 
-	member, out, done, teardown := h.admit(ctx, conn)
+	member, out, done, teardown := h.admit(ctx, conn, requestHost(r.Host))
 	if member == nil {
 		return
 	}
@@ -62,6 +63,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go h.writePump(ctx, conn, out, done, teardown)
 
 	h.readPump(ctx, conn, member, teardown)
+}
+
+// requestHost strips the port and IPv6 brackets from a Host header.
+func requestHost(hostport string) string {
+	host, _, err := net.SplitHostPort(hostport)
+	if err == nil {
+		return host
+	}
+
+	return strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]")
 }
 
 // originPatterns converts the origin policy into websocket.Accept host
@@ -86,7 +97,7 @@ func (h *Handler) originPatterns(r *http.Request) []string {
 // admit performs the join handshake: it reads the join frame, checks it
 // against the room and session store, and joins the live room. A nil
 // member means the connection was rejected and an error frame sent.
-func (h *Handler) admit(ctx context.Context, conn *websocket.Conn) (*sfu.Member, chan sfu.Message, chan struct{}, func()) {
+func (h *Handler) admit(ctx context.Context, conn *websocket.Conn, host string) (*sfu.Member, chan sfu.Message, chan struct{}, func()) {
 	noop := func() {}
 
 	var first sfu.Message
@@ -125,12 +136,7 @@ func (h *Handler) admit(ctx context.Context, conn *websocket.Conn) (*sfu.Member,
 
 	out := make(chan sfu.Message, outQueueDepth)
 
-	member, err := h.Hub.JoinRoom(sfu.JoinRequest{
-		Slug: room.Slug, RoomName: room.Name,
-		MemberName: sanitizeName(first.Name),
-		MaxMembers: room.MaxMembers,
-		Priv:       priv,
-	}, func(msg sfu.Message) {
+	member, err := h.Hub.JoinRoom(joinRequest(room, priv, first.Name, host), func(msg sfu.Message) {
 		select {
 		case out <- msg:
 		case <-done:
@@ -147,6 +153,16 @@ func (h *Handler) admit(ctx context.Context, conn *websocket.Conn) (*sfu.Member,
 	}
 
 	return member, out, done, teardown
+}
+
+func joinRequest(room *store.Room, priv bool, memberName, host string) sfu.JoinRequest {
+	return sfu.JoinRequest{
+		Slug: room.Slug, RoomName: room.Name,
+		MemberName: sanitizeName(memberName),
+		MaxMembers: room.MaxMembers,
+		Priv:       priv,
+		Host:       host,
+	}
 }
 
 // writeJoinError reports a failed join attempt on the signaling channel.
