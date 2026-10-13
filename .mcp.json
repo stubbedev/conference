@@ -5,9 +5,7 @@
       "args": [
         "-y",
         "@playwright/mcp@latest",
-        "--extension",
-        "--profile-dir-name",
-        "Default"
+        "--extension"
       ]
     }
   }
