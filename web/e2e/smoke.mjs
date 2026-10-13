@@ -18,10 +18,23 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createSocket } from 'node:dgram'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
-import { createServer } from 'node:net'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import {
+  check,
+  checkCall,
+  createRoom,
+  evalJs,
+  findChrome,
+  freePort,
+  joinRoom,
+  launchChrome,
+  sleep,
+  stopProcess,
+  waitFor,
+} from './browser.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -29,8 +42,7 @@ const args = parseArgs(process.argv.slice(2))
 const seconds = Number(args.seconds ?? 8)
 const stagger = Number(args.stagger ?? 500)
 const chromeBinary = args.chrome ?? process.env.CHROME ?? findChrome()
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const launch = (idx, dir, extraArgs) => launchChrome(chromeBinary, idx, dir, extraArgs)
 
 function parseArgs(argv) {
   const out = {}
@@ -41,24 +53,6 @@ function parseArgs(argv) {
     i++
   }
   return out
-}
-
-function findChrome() {
-  for (const name of ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser']) {
-    if (spawnSync('sh', ['-c', `command -v ${name}`]).status === 0) return name
-  }
-  throw new Error('no Chrome binary found; pass --chrome or set CHROME')
-}
-
-function freePort() {
-  return new Promise((resolvePort, reject) => {
-    const srv = createServer()
-    srv.on('error', reject)
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address()
-      srv.close(() => resolvePort(port))
-    })
-  })
 }
 
 function freeUdpPort() {
@@ -116,210 +110,12 @@ async function startServer(bin, env) {
   throw new Error(`server did not start:\n${log}`)
 }
 
-class CDP {
-  constructor(ws) {
-    this.ws = ws
-    this.id = 0
-    this.pending = new Map()
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data)
-      const waiter = msg.id && this.pending.get(msg.id)
-      if (!waiter) return
-      this.pending.delete(msg.id)
-      msg.error ? waiter.reject(new Error(JSON.stringify(msg.error))) : waiter.resolve(msg.result)
-    }
-  }
-  send(method, params = {}, sessionId) {
-    const id = ++this.id
-    return new Promise((resolvePromise, reject) => {
-      this.pending.set(id, { resolve: resolvePromise, reject })
-      this.ws.send(JSON.stringify({ id, method, params, sessionId }))
-    })
-  }
-}
-
 function lanAddress() {
   for (const addrs of Object.values(networkInterfaces())) {
     const lan = addrs?.find((a) => a.family === 'IPv4' && !a.internal)
     if (lan) return lan.address
   }
   throw new Error('no non-loopback IPv4 address: Chrome only relays TURN/UDP to a routable host')
-}
-
-async function launchChrome(idx, dir, extraArgs = []) {
-  const port = await freePort()
-  const profile = mkdtempSync(join(dir, `chrome-${idx}-`))
-  const proc = spawn(
-    chromeBinary,
-    [
-      '--headless=new',
-      '--no-sandbox',
-      '--no-first-run',
-      '--disable-gpu',
-      '--use-fake-device-for-media-stream',
-      '--use-fake-ui-for-media-stream',
-      '--autoplay-policy=no-user-gesture-required',
-      `--remote-debugging-port=${port}`,
-      `--user-data-dir=${profile}`,
-      '--window-size=1200,900',
-      ...extraArgs,
-      'about:blank',
-    ],
-    { stdio: ['ignore', 'ignore', 'pipe'] },
-  )
-  let stderr = ''
-  proc.stderr.on('data', (d) => (stderr += d))
-  let version
-  for (let i = 0; i < 100 && !version; i++) {
-    try {
-      version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()
-    } catch {
-      await sleep(200)
-    }
-  }
-  if (!version) {
-    proc.kill('SIGKILL')
-    throw new Error(`chrome ${idx} did not start: ${stderr}`)
-  }
-  const ws = new WebSocket(version.webSocketDebuggerUrl)
-  await new Promise((r, reject) => {
-    ws.onopen = r
-    ws.onerror = reject
-  })
-  const cdp = new CDP(ws)
-  const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' })
-  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
-  return { proc, cdp, sessionId, browser: version.Browser }
-}
-
-// Injected before the app loads: records peer connections and the
-// E2EE worker's stats so the probe can read them from page context.
-const hook = (relayTransport) => `
-(() => {
-  window.__pcs = [];
-  window.__pcStates = [];
-  const relayTransport = ${JSON.stringify(relayTransport)};
-  const OrigPC = window.RTCPeerConnection;
-  window.RTCPeerConnection = function (config, ...rest) {
-    if (relayTransport) {
-      config = {
-        ...config,
-        iceTransportPolicy: 'relay',
-        iceServers: config.iceServers.map((s) => ({
-          ...s,
-          urls: s.urls.filter((u) => u.startsWith('turn:') && u.endsWith('?transport=' + relayTransport)),
-        })),
-      };
-    }
-    const pc = new OrigPC(config, ...rest);
-    window.__pcs.push(pc);
-    const st = { events: [] };
-    const record = (what) => st.events.push(
-      Math.round(performance.now()) + ' ' + what +
-      ' sig=' + pc.signalingState + ' ice=' + pc.iceConnectionState + ' conn=' + pc.connectionState,
-    );
-    pc.addEventListener('connectionstatechange', () => record('conn'));
-    pc.addEventListener('iceconnectionstatechange', () => record('ice'));
-    pc.addEventListener('signalingstatechange', () => record('sig'));
-    pc.addEventListener('icecandidateerror', (e) => record('candidate-error ' + e.url + ' ' + e.errorCode + ' ' + e.errorText));
-    window.__pcStates.push(st);
-    return pc;
-  };
-  window.RTCPeerConnection.prototype = OrigPC.prototype;
-  const OrigWorker = window.Worker;
-  window.Worker = function (...a) {
-    const w = new OrigWorker(...a);
-    w.addEventListener('message', (ev) => { if (ev.data && ev.data.type === 'e2ee-stats') window.__e2ee = ev.data; });
-    return w;
-  };
-  window.Worker.prototype = OrigWorker.prototype;
-  window.__sockets = [];
-  const OrigWS = window.WebSocket;
-  window.WebSocket = function (...a) {
-    const ws = new OrigWS(...a);
-    window.__sockets.push(ws);
-    return ws;
-  };
-  window.WebSocket.prototype = OrigWS.prototype;
-  Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
-  window.__errors = [];
-  window.addEventListener('error', (e) => window.__errors.push(e.message));
-  window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason)));
-})();
-`
-
-const probe = `
-(async () => {
-  const out = { videos: [], audioPackets: 0, videoDecoded: 0, e2ee: window.__e2ee || null, errors: window.__errors, pcs: [] };
-  for (const v of document.querySelectorAll('video')) {
-    out.videos.push({ frames: v.getVideoPlaybackQuality().totalVideoFrames, w: v.videoWidth, h: v.videoHeight, paused: v.paused });
-  }
-  const live = [...window.__pcs.entries()].filter(([, pc]) => pc.signalingState !== 'closed');
-  for (const [i, pc] of live) {
-    const s = {
-      i,
-      sig: pc.signalingState,
-      ice: pc.iceConnectionState,
-      conn: pc.connectionState,
-      senders: pc.getSenders().filter((x) => x.track).length,
-      events: (window.__pcStates[i]?.events ?? []).slice(-8),
-    };
-    for (const r of (await pc.getStats()).values()) {
-      if (r.type === 'inbound-rtp') {
-        s['in_' + r.kind] = r.packetsReceived || 0
-        s['ssrc_' + r.kind] = r.ssrc
-        s['bytes_' + r.kind] = r.bytesReceived || 0
-      }
-      if (r.type === 'outbound-rtp') s['out_' + r.kind] = r.bytesSent || 0
-    }
-    s.recv_kinds = pc.getReceivers().map((x) => x.track?.kind ?? '?').join(',')
-    const stats = await pc.getStats();
-    for (const r of stats.values()) {
-      if (r.type !== 'transport' || !r.selectedCandidatePairId) continue;
-      const local = stats.get(stats.get(r.selectedCandidatePairId)?.localCandidateId);
-      s.path = !local ? '?' : local.relayProtocol ? 'relay/' + local.relayProtocol : local.candidateType;
-    }
-    out.pcs.push(s);
-  }
-  for (const [, pc] of live) {
-    for (const r of (await pc.getStats()).values()) {
-      if (r.type !== 'inbound-rtp') continue;
-      if (r.kind === 'audio') out.audioPackets += r.packetsReceived || 0;
-      if (r.kind === 'video') out.videoDecoded += r.framesDecoded || 0;
-    }
-  }
-  return JSON.stringify(out);
-})()
-`
-
-async function joinRoom(browser, url, relayTransport = null) {
-  const s = browser.sessionId
-  await browser.cdp.send('Page.enable', {}, s)
-  await browser.cdp.send('Runtime.enable', {}, s)
-  await browser.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook(relayTransport) }, s)
-  await browser.cdp.send('Page.navigate', { url }, s)
-  for (let t = 0; t < 80; t++) {
-    const r = await browser.cdp.send(
-      'Runtime.evaluate',
-      {
-        expression: `(() => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Join call'); if (b && !b.disabled) { b.click(); return true; } return false; })()`,
-        returnByValue: true,
-      },
-      s,
-    )
-    if (r.result.value === true) return
-    await sleep(250)
-  }
-  throw new Error('Join call button never became clickable')
-}
-
-async function evalJs(browser, expression) {
-  const r = await browser.cdp.send(
-    'Runtime.evaluate',
-    { expression, returnByValue: true, awaitPromise: true },
-    browser.sessionId,
-  )
-  return r.result.value
 }
 
 async function clickButtonByTitle(browser, label) {
@@ -433,16 +229,6 @@ const clickLocalPin = (label) => `
 })()
 `
 
-async function waitFor(browser, expression, predicate, timeoutMs) {
-  let value
-  for (let t = 0; t < timeoutMs; t += 250) {
-    value = await evalJs(browser, expression)
-    if (predicate(value)) return { ok: true, value }
-    await sleep(250)
-  }
-  return { ok: false, value }
-}
-
 async function checkSimulcast(failures, publisher, viewer) {
   const sent = await waitFor(publisher, sentLayers, (layers) => ['l', 'm', 'h'].every((rid) => layers[rid]?.bytes > 0), 20000)
   console.log(`simulcast sent: ${JSON.stringify(sent.value)}`)
@@ -475,86 +261,10 @@ async function checkPinRoundTrip(failures, label, browser) {
   check(failures, label, unpinned.unpinButtons === 0, `expected no pinned tile after unpinning, found ${unpinned.unpinButtons}`)
 }
 
-async function sample(browser) {
-  const r = await browser.cdp.send(
-    'Runtime.evaluate',
-    { expression: probe, awaitPromise: true, returnByValue: true },
-    browser.sessionId,
-  )
-  return JSON.parse(r.result.value)
-}
-
-function check(failures, label, condition, detail) {
-  if (!condition) failures.push(`${label}: ${detail}`)
-}
-
-async function createRoom(port, name, host = '127.0.0.1') {
-  const res = await fetch(`http://${host}:${port}/api/rooms`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, password: '', maxMembers: 4 }),
-  })
-  const room = await res.json()
-  return {
-    slug: room.slug,
-    url: `http://${host}:${port}/r/${room.slug}#k=${room.roomKey}`,
-    privUrl: `http://${host}:${port}${room.privPath}#k=${room.roomKey}`,
-  }
-}
-
-function stopProcess(proc, signal) {
-  return new Promise((done) => {
-    if (proc.exitCode !== null || proc.signalCode !== null) return done()
-    proc.once('exit', done)
-    proc.kill(signal)
-  })
-}
-
 async function checkStillInRoom(failures, label, browsers) {
   for (const [i, browser] of browsers.entries()) {
     const path = await evalJs(browser, 'location.pathname')
     check(failures, `${label} ${i}`, path.startsWith('/r/'), `left the room for ${path}`)
-  }
-}
-
-async function checkCall(failures, browsers, labels, wantPaths = []) {
-  await sleep(seconds * 1000)
-  const first = await Promise.all(browsers.map(sample))
-  await sleep(2000)
-  const second = await Promise.all(browsers.map(sample))
-
-  for (const [i, a] of first.entries()) {
-    const b = second[i]
-    const label = labels[i]
-    const before = failures.length
-    console.log(
-      `${label}: videos=${a.videos.length} frames=[${a.videos.map((v) => v.frames).join(',')}]→[${b.videos.map((v) => v.frames).join(',')}] ` +
-        `audioPkts=${a.audioPackets}→${b.audioPackets} videoDecoded=${a.videoDecoded}→${b.videoDecoded} ` +
-        `paths=${a.pcs.map((pc) => pc.path).join(',')} e2ee=${JSON.stringify(a.e2ee)}`,
-    )
-    check(failures, label, a.videos.length === 2, `expected 2 video elements (self + one remote), found ${a.videos.length}`)
-    check(failures, label, a.e2ee !== null, 'no E2EE worker stats received')
-    if (a.e2ee) {
-      check(failures, label, a.e2ee.dropSend === 0, `E2EE dropped ${a.e2ee.dropSend} outgoing frames: ${a.e2ee.lastError}`)
-      check(failures, label, a.e2ee.dropRecv === 0, `E2EE dropped ${a.e2ee.dropRecv} incoming frames: ${a.e2ee.lastError}`)
-      check(failures, label, a.e2ee.send > 0, 'E2EE encrypted no outgoing frames')
-      check(failures, label, a.e2ee.recv > 0, 'E2EE decrypted no incoming frames')
-    }
-    check(failures, label, a.audioPackets > 0, 'no remote audio packets received')
-    check(failures, label, b.videoDecoded > a.videoDecoded && a.videoDecoded > 0, `remote video not decoding (${a.videoDecoded}→${b.videoDecoded})`)
-    for (const [j, v] of a.videos.entries()) {
-      check(failures, label, b.videos[j] && b.videos[j].frames > v.frames, `video element ${j} stopped rendering (${v.frames}→${b.videos[j]?.frames})`)
-      check(failures, label, !v.paused, `video element ${j} is paused`)
-    }
-    check(failures, label, a.errors.length === 0, `page errors: ${a.errors.join(' | ')}`)
-    if (wantPaths[i]) {
-      for (const pc of a.pcs) {
-        check(failures, label, pc.path === wantPaths[i], `peer connection ${pc.i} took path ${pc.path}, want ${wantPaths[i]}`)
-      }
-    }
-    if (failures.length > before) {
-      console.error(`${label} peer connections: ${JSON.stringify(a.pcs)}`)
-    }
   }
 }
 
@@ -569,10 +279,10 @@ async function main() {
     let server = await startServer(bin, env)
     procs.push(server.proc)
 
-    const room = await createRoom(port, 'smoke')
+    const room = await createRoom(`http://127.0.0.1:${port}`, 'smoke')
     const { url, privUrl } = room
 
-    const browsers = [await launchChrome(0, dir), await launchChrome(1, dir)]
+    const browsers = [await launch(0, dir), await launch(1, dir)]
     for (const b of browsers) procs.push(b.proc)
     console.log(`smoke: ${browsers[0].browser}, room ${room.slug}`)
 
@@ -583,7 +293,7 @@ async function main() {
     await joinRoom(browsers[1], url)
     await sleep(stagger)
 
-    await checkCall(failures, browsers, ['browser 0', 'browser 1'])
+    await checkCall(failures, browsers, ['browser 0', 'browser 1'], { seconds })
 
     for (const [i, browser] of browsers.entries()) {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
@@ -592,13 +302,13 @@ async function main() {
     await checkSimulcast(failures, browsers[0], browsers[1])
 
     await evalJs(browsers[1], 'window.__sockets.at(-1).close()')
-    await checkCall(failures, browsers, ['dropped signaling 0', 'dropped signaling 1'])
+    await checkCall(failures, browsers, ['dropped signaling 0', 'dropped signaling 1'], { seconds })
     await checkStillInRoom(failures, 'dropped signaling', browsers)
 
     await stopProcess(server.proc, 'SIGTERM')
     server = await startServer(bin, env)
     procs.push(server.proc)
-    await checkCall(failures, browsers, ['server restart 0', 'server restart 1'])
+    await checkCall(failures, browsers, ['server restart 0', 'server restart 1'], { seconds })
     await checkStillInRoom(failures, 'server restart', browsers)
 
     // Recording phase. Round one: the host records, a third browser
@@ -617,7 +327,7 @@ async function main() {
       check(failures, 'recording', await waitForBadge(browsers[0], true), 'recording badge missing on the recorder page')
       check(failures, 'recording', await waitForBadge(browsers[1], true), 'recording badge missing on the guest page')
 
-      const late = await launchChrome(2, dir)
+      const late = await launch(2, dir)
       procs.push(late.proc)
       await joinRoom(late, privUrl)
       check(failures, 'recording', await waitForBadge(late, true), 'late joiner did not see the recording badge')
@@ -659,14 +369,14 @@ async function main() {
     }
 
     const lan = lanAddress()
-    const relayRoom = await createRoom(port, 'smoke-relay', lan)
+    const relayRoom = await createRoom(`http://${lan}:${port}`, 'smoke-relay')
     const secureLan = [`--unsafely-treat-insecure-origin-as-secure=http://${lan}:${port}`]
-    const relayed = [await launchChrome(3, dir, secureLan), await launchChrome(4, dir, secureLan)]
+    const relayed = [await launch(3, dir, secureLan), await launch(4, dir, secureLan)]
     for (const b of relayed) procs.push(b.proc)
     await joinRoom(relayed[0], relayRoom.url, 'udp')
     await sleep(stagger)
     await joinRoom(relayed[1], relayRoom.url, 'tcp')
-    await checkCall(failures, relayed, ['relay over udp', 'relay over tcp'], ['relay/udp', 'relay/tcp'])
+    await checkCall(failures, relayed, ['relay over udp', 'relay over tcp'], { seconds, wantPaths: ['relay/udp', 'relay/tcp'] })
 
     if (failures.length) {
       console.error('\nSMOKE FAILED')
