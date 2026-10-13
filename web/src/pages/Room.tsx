@@ -41,7 +41,13 @@ import {
 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
 import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
-import { RoomClient, type ChatMessage, type MemberInfo, type ModerateAction } from '@/lib/sfu'
+import {
+  JoinError,
+  RoomClient,
+  type ChatMessage,
+  type MemberInfo,
+  type ModerateAction,
+} from '@/lib/sfu'
 import { Button } from '@/components/ui/button'
 import { ChatPanel } from '@/components/ChatPanel'
 import { ControlsBar } from '@/components/ControlsBar'
@@ -79,6 +85,22 @@ const CAMERA_KIND = 'camera'
 const LOCAL_SOURCE = 'local'
 const NO_PIN = 'none'
 const RECOVER_BACKOFF_MS = 5000
+const RECONNECT_TOAST = 'reconnect'
+const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000, ...Array<number>(14).fill(10_000)]
+
+// waitForRetry sleeps for ms, cut short when the browser comes back
+// online so a restored network reconnects at once.
+function waitForRetry(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('online', done)
+      resolve()
+    }
+    const timer = window.setTimeout(done, ms)
+    window.addEventListener('online', done)
+  })
+}
 const DEVICE_POLL_MS = 3000
 
 function supportsE2EE(): boolean {
@@ -166,6 +188,10 @@ export default function Room() {
   const chatOpenRef = useLatest(chatOpen)
   const membersRef = useLatest(members)
   const kickedRef = useRef(false)
+  const endedRef = useRef(false)
+  const reconnectingRef = useRef(false)
+  const reconnectRef = useRef<((lost: RoomClient) => Promise<void>) | null>(null)
+  const [clientGeneration, setClientGeneration] = useState(0)
   const seenDeviceIdsRef = useRef<Set<string>>(new Set())
   const lossGuardRef = useRef<Partial<Record<TrackKind, MediaStreamTrack>>>({})
   const recoverLockRef = useRef(false)
@@ -415,6 +441,7 @@ export default function Room() {
 
   useEffect(() => {
     return () => {
+      endedRef.current = true
       clientRef.current?.leave()
       recorderRef.current?.stop().catch(() => {})
       micPipelineRef.current?.dispose()
@@ -489,15 +516,12 @@ export default function Room() {
     else startRecording()
   }, [startRecording, stopRecording])
 
-  const joinCall = useCallback(async () => {
-    const stream = localStreamRef.current
-    const info = roomInfo
-    const roomKey = roomKeyRef.current
-    if (!stream || stream.getTracks().length === 0 || !info || !roomKey) return
+  const connectClient = useCallback(
+    async (resume: string): Promise<RoomClient> => {
+      const stream = localStreamRef.current
+      const roomKey = roomKeyRef.current
+      if (!stream || !roomKey) throw new Error('Local media or the room key is missing.')
 
-    resumeAudio()
-    setPhase('joining')
-    try {
       const [mediaKey, chatKey] = await Promise.all([
         deriveMediaKeyMaterial(roomKey),
         deriveChatKey(roomKey),
@@ -507,8 +531,9 @@ export default function Room() {
         slug,
         session: sessionRef.current,
         name: displayName.trim() || 'Guest',
-        mediaKey: mediaKey,
+        mediaKey,
         chatKey,
+        resume,
       })
       clientRef.current = client
 
@@ -516,8 +541,15 @@ export default function Room() {
         setMembers(initial)
         setRecorder(recorder || null)
       })
-      client.on('member-joined', (member) => {
-        setMembers((prev) => [...prev.filter((m) => m.id !== member.id), member])
+      client.on('member-joined', ({ member, replaces }) => {
+        setMembers((prev) => [
+          ...prev.filter((m) => m.id !== member.id && m.id !== replaces),
+          member,
+        ])
+        if (replaces) {
+          setTiles((prev) => prev.filter((t) => t.sourceId !== replaces))
+          return
+        }
         toast(`${member.name} joined`)
       })
       client.on('member-left', ({ id }) => {
@@ -560,6 +592,7 @@ export default function Room() {
       })
       client.on('error', ({ code, text }) => {
         toast.error(text)
+        if (code === 'room-closed') endedRef.current = true
         // A rejected announce (not host, or someone else got there
         // first) rolls the local recorder back so the badge and the
         // button match what the room actually accepted.
@@ -568,23 +601,85 @@ export default function Room() {
         }
       })
       client.on('closed', () => {
-        if (kickedRef.current) return
-        void stopRecording().finally(() => {
-          toast.error('The connection was closed.')
-          navigate('/')
-        })
+        if (clientRef.current !== client || kickedRef.current) return
+        if (endedRef.current) {
+          void stopRecording().finally(() => navigate('/'))
+          return
+        }
+        void reconnectRef.current?.(client)
       })
 
-      await client.connect()
-      await client.publish(stream)
+      try {
+        await client.connect()
+        await client.publish(stream)
+        const screen = screenStreamRef.current
+        if (screen?.getVideoTracks().some((track) => track.readyState === 'live')) {
+          await client.addScreen(screen)
+        }
+      } catch (err) {
+        client.leave()
+        if (clientRef.current === client) clientRef.current = null
+        throw err
+      }
+      if (recorderRef.current) client.announceRecording(true)
+      setClientGeneration((generation) => generation + 1)
+      return client
+    },
+    [slug, displayName, navigate, chatOpenRef, membersRef, kickedRef, stopRecording],
+  )
+
+  const reconnect = useCallback(
+    async (lost: RoomClient) => {
+      if (reconnectingRef.current) return
+      reconnectingRef.current = true
+      const resume = lost.resume
+      lost.leave()
+      clientRef.current = null
+      setTiles([])
+      setMembers([])
+      toast.loading('Connection lost, reconnecting…', { id: RECONNECT_TOAST })
+
+      try {
+        for (let attempt = 0; attempt < RECONNECT_DELAYS_MS.length; attempt++) {
+          await waitForRetry(RECONNECT_DELAYS_MS[attempt])
+          if (endedRef.current) return
+          try {
+            await connectClient(resume)
+            toast.success('Reconnected', { id: RECONNECT_TOAST })
+            return
+          } catch (err) {
+            if (err instanceof JoinError && err.final) break
+          }
+        }
+        if (endedRef.current) return
+        toast.error('The connection was lost.', { id: RECONNECT_TOAST })
+        endedRef.current = true
+        await stopRecording()
+        navigate('/')
+      } finally {
+        reconnectingRef.current = false
+      }
+    },
+    [connectClient, stopRecording, navigate],
+  )
+  useEffect(() => {
+    reconnectRef.current = reconnect
+  }, [reconnect])
+
+  const joinCall = useCallback(async () => {
+    const stream = localStreamRef.current
+    if (!stream || stream.getTracks().length === 0 || !roomInfo || !roomKeyRef.current) return
+
+    resumeAudio()
+    setPhase('joining')
+    try {
+      await connectClient('')
       setPhase('live')
     } catch (err) {
-      clientRef.current?.leave()
-      clientRef.current = null
       setFatalError(err instanceof Error ? err.message : 'Could not join the room.')
       setPhase('error')
     }
-  }, [slug, displayName, roomInfo, navigate, chatOpenRef, membersRef, kickedRef, stopRecording])
+  }, [roomInfo, connectClient])
 
   const toggleTrack = useCallback(
     (kind: TrackKind) => {
@@ -626,7 +721,7 @@ export default function Room() {
       setScreenStream(display)
       updateControls({ sharing: true })
       display.getVideoTracks()[0]?.addEventListener('ended', () => {
-        void client.removeScreen()
+        void clientRef.current?.removeScreen()
         setScreenStream(null)
         updateControls({ sharing: false })
       })
@@ -654,6 +749,7 @@ export default function Room() {
       }),
       client.on('kicked', () => {
         kickedRef.current = true
+        endedRef.current = true
         toast('You were removed from the call')
         navigate('/')
       }),
@@ -662,7 +758,7 @@ export default function Room() {
     return () => {
       for (const unsubscribe of unsubscribers) unsubscribe()
     }
-  }, [phase, toggleTrack, toggleShare, navigate, controlsRef, kickedRef])
+  }, [phase, clientGeneration, toggleTrack, toggleShare, navigate, controlsRef, kickedRef])
 
   const switchDevice = useCallback(
     async (
@@ -989,6 +1085,7 @@ export default function Room() {
   }
 
   const leave = useCallback(async () => {
+    endedRef.current = true
     await stopRecording()
     clientRef.current?.leave()
     navigate('/')

@@ -136,7 +136,7 @@ func (h *Handler) admit(ctx context.Context, conn *websocket.Conn, host string) 
 
 	out := make(chan sfu.Message, outQueueDepth)
 
-	member, err := h.Hub.JoinRoom(joinRequest(room, priv, first.Name, host), func(msg sfu.Message) {
+	member, err := h.Hub.JoinRoom(joinRequest(room, priv, &first, host), func(msg sfu.Message) {
 		select {
 		case out <- msg:
 		case <-done:
@@ -155,13 +155,14 @@ func (h *Handler) admit(ctx context.Context, conn *websocket.Conn, host string) 
 	return member, out, done, teardown
 }
 
-func joinRequest(room *store.Room, priv bool, memberName, host string) sfu.JoinRequest {
+func joinRequest(room *store.Room, priv bool, first *sfu.Message, host string) sfu.JoinRequest {
 	return sfu.JoinRequest{
 		Slug: room.Slug, RoomName: room.Name,
-		MemberName: sanitizeName(memberName),
+		MemberName: sanitizeName(first.Name),
 		MaxMembers: room.MaxMembers,
 		Priv:       priv,
 		Host:       host,
+		Resume:     first.Resume,
 	}
 }
 

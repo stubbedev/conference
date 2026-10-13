@@ -22,6 +22,8 @@ const (
 	frameInterval = 33 * time.Millisecond
 	frameBytes    = 1200
 	testHost      = "127.0.0.1"
+	testRoomName  = "Integration"
+	msgRecording  = "recording"
 	testTURNPort  = 3478
 )
 
@@ -53,6 +55,20 @@ type testPeer struct {
 func newTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, name string, priv bool) *testPeer {
 	t.Helper()
 
+	return joinTestPeer(t, hub, engine, sfu.JoinRequest{
+		Slug:       testSlug,
+		RoomName:   testRoomName,
+		MemberName: name,
+		MaxMembers: 8,
+		Priv:       priv,
+		Host:       testHost,
+		Resume:     "",
+	})
+}
+
+func joinTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, req sfu.JoinRequest) *testPeer {
+	t.Helper()
+
 	peer := &testPeer{
 		member:  nil,
 		engine:  engine,
@@ -65,16 +81,9 @@ func newTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, name string, pr
 
 	var err error
 
-	peer.member, err = hub.JoinRoom(sfu.JoinRequest{
-		Slug:       testSlug,
-		RoomName:   "Integration",
-		MemberName: name,
-		MaxMembers: 8,
-		Priv:       priv,
-		Host:       testHost,
-	}, func(msg sfu.Message) { peer.raw <- msg })
+	peer.member, err = hub.JoinRoom(req, func(msg sfu.Message) { peer.raw <- msg })
 	if err != nil {
-		t.Fatalf("%s join: %v", name, err)
+		t.Fatalf("%s join: %v", req.MemberName, err)
 	}
 
 	go peer.pump()
@@ -628,7 +637,7 @@ func TestModeration(t *testing.T) {
 func expectRecording(t *testing.T, peer *testPeer, fromID string, announced bool) {
 	t.Helper()
 
-	msg := peer.next(t, "recording")
+	msg := peer.next(t, msgRecording)
 
 	if msg.From != fromID || msg.On != announced {
 		t.Fatalf("%s expected recording on=%v from %q, got on=%v from %q", peer.member.Name, announced, fromID, msg.On, msg.From)
@@ -708,7 +717,7 @@ func TestRecordingLifecycle(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	for _, msg := range guest.drain() {
-		if msg.Type == "recording" {
+		if msg.Type == msgRecording {
 			t.Fatalf("re-announce produced a duplicate recording event: %+v", msg)
 		}
 	}
@@ -718,7 +727,7 @@ func TestRecordingLifecycle(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	for _, msg := range host.drain() {
-		if msg.Type == "recording" {
+		if msg.Type == msgRecording {
 			t.Fatalf("release by a non-recorder produced a recording event: %+v", msg)
 		}
 	}
@@ -995,5 +1004,117 @@ func TestRecordingSurvivesOtherLeaves(t *testing.T) {
 	late := newTestPeer(t, hub, engine, "late", false)
 	if welcome := late.next(t, "welcome"); welcome.Recorder != host.member.ID {
 		t.Fatalf("late joiner told recorder %q, want %s", welcome.Recorder, host.member.ID)
+	}
+}
+
+// TestResumeReplacesStaleMember rejoins with the token from the first
+// welcome, as a client does after its connection dropped: the stale
+// member is replaced in place (the room never counts both, the others
+// learn which member was replaced) and an active recording carries
+// over instead of being cleared.
+func TestResumeReplacesStaleMember(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := newTestHub(t, engine)
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	token := host.next(t, "welcome").Resume
+	if token == "" {
+		t.Fatal("welcome carried no resume token")
+	}
+
+	host.member.Handle(sfu.Message{Type: "record", On: true})
+	expectRecording(t, guest, host.member.ID, true)
+
+	rejoined := joinTestPeer(t, hub, engine, sfu.JoinRequest{
+		Slug: testSlug, RoomName: testRoomName, MemberName: "host",
+		MaxMembers: 8, Priv: true, Host: testHost, Resume: token,
+	})
+
+	if live := hub.LiveCount(testSlug); live != 2 {
+		t.Fatalf("%d live members right after the rejoin, want 2", live)
+	}
+
+	expectReplaced(t, guest, rejoined, host.member.ID)
+	expectResumedWelcome(t, rejoined, token)
+
+	if hub.MemberLive(host.member.ID) {
+		t.Fatal("the stale member is still live")
+	}
+}
+
+// TestResumeIgnoresUnknownTokens checks that a join with a token no
+// member holds is an ordinary join and replaces nobody.
+func TestResumeIgnoresUnknownTokens(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := newTestHub(t, engine)
+
+	first := newTestPeer(t, hub, engine, "first", false)
+
+	joinTestPeer(t, hub, engine, sfu.JoinRequest{
+		Slug: testSlug, RoomName: testRoomName, MemberName: "second",
+		MaxMembers: 8, Priv: false, Host: testHost, Resume: "not-a-token",
+	})
+
+	if joined := first.next(t, "member-joined"); joined.Replaces != "" {
+		t.Fatalf("an unknown token replaced %s", joined.Replaces)
+	}
+
+	if live := hub.LiveCount(testSlug); live != 2 {
+		t.Fatalf("%d live members, want 2", live)
+	}
+}
+
+// expectReplaced asserts that viewer saw rejoined replace staleID: one
+// member-joined naming the stale member, then its member-left, and no
+// change to the recording state in between.
+func expectReplaced(t *testing.T, viewer, rejoined *testPeer, staleID string) {
+	t.Helper()
+
+	joined := viewer.next(t, "member-joined")
+	if joined.ID != rejoined.member.ID || joined.Replaces != staleID {
+		t.Fatalf("member-joined %s replacing %q, want %s replacing %s", joined.ID, joined.Replaces, rejoined.member.ID, staleID)
+	}
+
+	if left := viewer.next(t, "member-left"); left.ID != staleID {
+		t.Fatalf("member-left for %s, want the stale %s", left.ID, staleID)
+	}
+
+	for _, msg := range viewer.drain() {
+		if msg.Type == msgRecording {
+			t.Fatalf("the rejoin changed the recording state: %+v", msg)
+		}
+	}
+}
+
+// expectResumedWelcome asserts the rejoined member took over the
+// recording and got a fresh resume token.
+func expectResumedWelcome(t *testing.T, rejoined *testPeer, oldToken string) {
+	t.Helper()
+
+	welcome := rejoined.next(t, "welcome")
+	if welcome.Recorder != rejoined.member.ID {
+		t.Fatalf("rejoined welcome names recorder %q, want %s", welcome.Recorder, rejoined.member.ID)
+	}
+
+	if welcome.Resume == "" || welcome.Resume == oldToken {
+		t.Fatalf("rejoined welcome resume token %q, want a fresh one", welcome.Resume)
 	}
 }

@@ -82,14 +82,18 @@ function buildServer(dir) {
   return bin
 }
 
-async function startServer(bin, dir, port) {
-  const env = {
+async function serverEnv(dir, port) {
+  return {
     ...process.env,
     PORT: String(port),
     ICE_UDP_PORT: String(await freeUdpPort()),
     TURN_PORT: String(await freePort()),
     DB_PATH: join(dir, 'smoke.db'),
   }
+}
+
+async function startServer(bin, env) {
+  const port = env.PORT
   const proc = spawn(bin, [], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -227,6 +231,15 @@ const hook = (relayTransport) => `
     return w;
   };
   window.Worker.prototype = OrigWorker.prototype;
+  window.__sockets = [];
+  const OrigWS = window.WebSocket;
+  window.WebSocket = function (...a) {
+    const ws = new OrigWS(...a);
+    window.__sockets.push(ws);
+    return ws;
+  };
+  window.WebSocket.prototype = OrigWS.prototype;
+  Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
   window.__errors = [];
   window.addEventListener('error', (e) => window.__errors.push(e.message));
   window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason)));
@@ -239,7 +252,8 @@ const probe = `
   for (const v of document.querySelectorAll('video')) {
     out.videos.push({ frames: v.getVideoPlaybackQuality().totalVideoFrames, w: v.videoWidth, h: v.videoHeight, paused: v.paused });
   }
-  for (const [i, pc] of window.__pcs.entries()) {
+  const live = [...window.__pcs.entries()].filter(([, pc]) => pc.signalingState !== 'closed');
+  for (const [i, pc] of live) {
     const s = {
       i,
       sig: pc.signalingState,
@@ -265,7 +279,7 @@ const probe = `
     }
     out.pcs.push(s);
   }
-  for (const pc of window.__pcs) {
+  for (const [, pc] of live) {
     for (const r of (await pc.getStats()).values()) {
       if (r.type !== 'inbound-rtp') continue;
       if (r.kind === 'audio') out.audioPackets += r.packetsReceived || 0;
@@ -427,6 +441,21 @@ async function createRoom(port, name, host = '127.0.0.1') {
   }
 }
 
+function stopProcess(proc, signal) {
+  return new Promise((done) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) return done()
+    proc.once('exit', done)
+    proc.kill(signal)
+  })
+}
+
+async function checkStillInRoom(failures, label, browsers) {
+  for (const [i, browser] of browsers.entries()) {
+    const path = await evalJs(browser, 'location.pathname')
+    check(failures, `${label} ${i}`, path.startsWith('/r/'), `left the room for ${path}`)
+  }
+}
+
 async function checkCall(failures, browsers, labels, wantPaths = []) {
   await sleep(seconds * 1000)
   const first = await Promise.all(browsers.map(sample))
@@ -475,7 +504,8 @@ async function main() {
   try {
     const bin = args.server ? resolve(args.server) : buildServer(dir)
     const port = await freePort()
-    const server = await startServer(bin, dir, port)
+    const env = await serverEnv(dir, port)
+    let server = await startServer(bin, env)
     procs.push(server.proc)
 
     const room = await createRoom(port, 'smoke')
@@ -497,6 +527,16 @@ async function main() {
     for (const [i, browser] of browsers.entries()) {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
     }
+
+    await evalJs(browsers[1], 'window.__sockets.at(-1).close()')
+    await checkCall(failures, browsers, ['dropped signaling 0', 'dropped signaling 1'])
+    await checkStillInRoom(failures, 'dropped signaling', browsers)
+
+    await stopProcess(server.proc, 'SIGTERM')
+    server = await startServer(bin, env)
+    procs.push(server.proc)
+    await checkCall(failures, browsers, ['server restart 0', 'server restart 1'])
+    await checkStillInRoom(failures, 'server restart', browsers)
 
     // Recording phase. Round one: the host records, a third browser
     // joins late (the badge must be replayed in its welcome), then the
@@ -577,16 +617,7 @@ async function main() {
     // Wait for the children to be gone before removing their profiles:
     // Chrome keeps writing to its user-data-dir for a moment after
     // SIGKILL is delivered, and a racing rm fails with ENOTEMPTY.
-    await Promise.all(
-      procs.map(
-        (p) =>
-          new Promise((done) => {
-            if (p.exitCode !== null || p.signalCode !== null) return done()
-            p.once('exit', done)
-            p.kill('SIGKILL')
-          }),
-      ),
-    )
+    await Promise.all(procs.map((p) => stopProcess(p, 'SIGKILL')))
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
 }

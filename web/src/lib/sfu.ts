@@ -39,6 +39,24 @@ export interface RoomClientOptions {
   name: string
   mediaKey: Uint8Array<ArrayBuffer>
   chatKey: CryptoKey
+  /** Token from an earlier welcome; '' for a first join. */
+  resume: string
+}
+
+/** Join codes after which retrying cannot succeed. */
+const FINAL_JOIN_CODES = new Set(['room-not-found', 'unauthorized'])
+
+export class JoinError extends Error {
+  readonly code: string
+
+  constructor(code: string, message: string) {
+    super(message)
+    this.code = code
+  }
+
+  get final(): boolean {
+    return FINAL_JOIN_CODES.has(this.code)
+  }
 }
 
 interface WireMessage {
@@ -69,11 +87,13 @@ interface WireMessage {
   on?: boolean
   recorder?: string
   iceServers?: RTCIceServer[]
+  resume?: string
+  replaces?: string
 }
 
 interface Events {
   welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string }
-  'member-joined': MemberInfo
+  'member-joined': { member: MemberInfo; replaces: string }
   'member-left': { id: string }
   'member-state': { id: string; mic: boolean; cam: boolean; sharing: boolean }
   track: RemoteTrack
@@ -131,6 +151,8 @@ export class RoomClient {
   private transformed = new WeakSet<object>()
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
+  private resumeToken = ''
+  private closing = false
   private handlers = new Map<string, Set<AnyHandler>>()
   private localMic: MediaStreamTrack | null = null
   private localCam: MediaStreamTrack | null = null
@@ -184,10 +206,16 @@ export class RoomClient {
       const ws = new WebSocket(`${scheme}://${location.host}/ws`)
       this.ws = ws
 
-      const timeout = setTimeout(() => reject(new Error('Join timed out.')), 15_000)
+      const timeout = setTimeout(() => reject(new JoinError('timeout', 'Join timed out.')), 15_000)
 
       ws.onopen = () => {
-        this.send({ type: 'join', room: this.opts.slug, session: this.opts.session, name: this.opts.name })
+        this.send({
+          type: 'join',
+          room: this.opts.slug,
+          session: this.opts.session,
+          name: this.opts.name,
+          resume: this.opts.resume || undefined,
+        })
       }
       ws.onmessage = (ev) => {
         let msg: WireMessage
@@ -199,10 +227,11 @@ export class RoomClient {
         if (msg.type === 'welcome') {
           clearTimeout(timeout)
           if (!msg.iceServers?.length) {
-            reject(new Error('The server sent no ICE servers.'))
+            reject(new JoinError('protocol', 'The server sent no ICE servers.'))
             return
           }
           this.iceServers = msg.iceServers
+          this.resumeToken = msg.resume ?? ''
           if (msg.self) this.selfId = msg.self.id
           for (const member of msg.members ?? []) this.members.set(member.id, member)
           this.emit('welcome', {
@@ -215,7 +244,7 @@ export class RoomClient {
         }
         if (msg.type === 'error') {
           clearTimeout(timeout)
-          reject(new Error(msg.text ?? 'The room rejected the join.'))
+          reject(new JoinError(msg.code ?? '', msg.text ?? 'The room rejected the join.'))
           this.emit('error', { code: msg.code ?? '', text: msg.text ?? '' })
           return
         }
@@ -223,10 +252,12 @@ export class RoomClient {
       }
       ws.onerror = () => {
         clearTimeout(timeout)
-        reject(new Error('Signaling connection failed.'))
+        reject(new JoinError('network', 'Signaling connection failed.'))
       }
       ws.onclose = () => {
-        this.emit('closed', {})
+        clearTimeout(timeout)
+        reject(new JoinError('network', 'The signaling connection closed.'))
+        if (!this.closing) this.emit('closed', {})
       }
     })
   }
@@ -240,6 +271,11 @@ export class RoomClient {
 
   get memberId(): string {
     return this.selfId
+  }
+
+  /** Rejoin token for replacing this membership after a dropped connection. */
+  get resume(): string {
+    return this.resumeToken
   }
 
   memberName(id: string): string {
@@ -353,6 +389,7 @@ export class RoomClient {
   }
 
   leave(): void {
+    this.closing = true
     this.ws?.close()
     this.up?.close()
     for (const pc of this.downs.values()) pc.close()
@@ -383,6 +420,12 @@ export class RoomClient {
   private newPC(pcID: string): RTCPeerConnection {
     if (!this.iceServers) throw new Error(`Peer connection ${pcID} opened before the welcome.`)
     const pc = new RTCPeerConnection({ iceServers: this.iceServers })
+    // A failed peer connection does not recover on its own (the
+    // network changed, the path died); dropping signaling hands the
+    // whole session to the caller's reconnect, the one recovery path.
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' && !this.closing) this.ws?.close()
+    }
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) return
       this.send({ type: 'ice', pc: pcID, candidate: ev.candidate.toJSON() })
@@ -453,18 +496,17 @@ export class RoomClient {
             cam: false,
             sharing: false,
           }
+          const replaces = msg.replaces ?? ''
+          if (replaces) this.dropMember(replaces)
           this.members.set(member.id, member)
-          this.emit('member-joined', member)
+          this.emit('member-joined', { member, replaces })
         }
         return
       }
       case 'member-left':
-        if (msg.id) {
-          this.members.delete(msg.id)
-          this.downs.get(msg.id)?.close()
-          this.downs.delete(msg.id)
-          this.emit('member-left', { id: msg.id })
-        }
+        // A member replaced by its own rejoin was already dropped when
+        // the replacement arrived; its late departure is not news.
+        if (msg.id && this.dropMember(msg.id)) this.emit('member-left', { id: msg.id })
         return
       case 'member-state':
         if (msg.id) {
@@ -501,6 +543,14 @@ export class RoomClient {
       default:
         return
     }
+  }
+
+  /** Forgets a member and closes its downstream; reports whether it was known. */
+  private dropMember(id: string): boolean {
+    const known = this.members.delete(id)
+    this.downs.get(id)?.close()
+    this.downs.delete(id)
+    return known
   }
 
   private async handleDownOffer(sourceId: string, msg: WireMessage): Promise<void> {

@@ -1,6 +1,8 @@
 package sfu
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log"
@@ -99,6 +101,11 @@ type JoinRequest struct {
 	// Host is the hostname the member reached signaling on; its TURN
 	// URLs point there.
 	Host string
+
+	// Resume is the token from an earlier welcome. A member still in
+	// the room under that token is a stale connection of the same
+	// client and is replaced by the new one.
+	Resume string
 }
 
 // Message is the single JSON shape exchanged over the signaling
@@ -110,6 +117,13 @@ type Message struct {
 	Room    string `json:"room,omitempty"`
 	Session string `json:"session,omitempty"`
 	Name    string `json:"name,omitempty"`
+
+	// join (the token to resume with) and welcome (the token to resume
+	// this membership later)
+	Resume string `json:"resume,omitempty"`
+
+	// member-joined: the stale member this one replaces
+	Replaces string `json:"replaces,omitempty"`
 
 	// member events
 	ID    string `json:"id,omitempty"`
@@ -311,65 +325,123 @@ func (r *Room) member(id string) *Member {
 
 func newMember(room *Room, short uint32, req JoinRequest, send func(Message)) *Member {
 	return &Member{
-		ID:    uuid.NewString(),
-		Short: short,
-		Name:  req.MemberName,
-		room:  room,
-		priv:  req.Priv,
-		send:  send,
-		tasks: make(chan func(), taskQueueDepth),
-		done:  make(chan struct{}),
-		once:  sync.Once{},
-		mu:    sync.RWMutex{},
-		up:    nil,
-		downs: map[string]*DownPeer{},
-		state: State{Mic: false, Cam: false, Sharing: false},
+		ID:     uuid.NewString(),
+		Short:  short,
+		Name:   req.MemberName,
+		room:   room,
+		priv:   req.Priv,
+		send:   send,
+		resume: rand.Text(),
+		tasks:  make(chan func(), taskQueueDepth),
+		done:   make(chan struct{}),
+		once:   sync.Once{},
+		mu:     sync.RWMutex{},
+		up:     nil,
+		downs:  map[string]*DownPeer{},
+		state:  State{Mic: false, Cam: false, Sharing: false},
 	}
 }
 
-func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
+// takeResumable removes and returns the member holding token, the
+// stale connection of a client that is rejoining. Called with r.mu held.
+func (r *Room) takeResumable(token string) *Member {
+	if token == "" {
+		return nil
+	}
+
+	for id, member := range r.members {
+		if subtle.ConstantTimeCompare([]byte(member.resume), []byte(token)) == 1 {
+			delete(r.members, id)
+
+			return member
+		}
+	}
+
+	return nil
+}
+
+// admission is the room state a join captured under the room lock.
+type admission struct {
+	member       *Member
+	stale        *Member
+	others       []MemberInfo
+	recorder     string
+	startedEmpty bool
+}
+
+// admit adds a new member, replacing the stale member that holds the
+// request's resume token (a rejoining client) and handing it any
+// recording that member was announcing.
+func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	stale := r.takeResumable(req.Resume)
 
 	if r.limit > 0 && len(r.members) >= r.limit {
-		r.mu.Unlock()
+		if stale != nil {
+			r.members[stale.ID] = stale
+		}
 
-		return nil, ErrRoomFull
+		return admission{}, ErrRoomFull
 	}
 
 	r.nextShort++
 
 	member := newMember(r, r.nextShort, req, send)
 
-	var others []MemberInfo
+	if stale != nil && r.recorder == stale.ID {
+		r.recorder = member.ID
+	}
 
-	recorder := r.recorder
-
+	others := make([]MemberInfo, 0, len(r.members))
 	for _, other := range r.members {
 		others = append(others, other.Info())
 	}
 
 	r.members[member.ID] = member
-	startedEmpty := len(r.members) == 1
-	r.mu.Unlock()
+
+	return admission{
+		member: member, stale: stale, others: others,
+		recorder: r.recorder, startedEmpty: len(r.members) == 1,
+	}, nil
+}
+
+func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
+	adm, err := r.admit(req, send)
+	if err != nil {
+		return nil, err
+	}
+
+	member := adm.member
 
 	go member.run()
+
+	replaces := ""
+	if adm.stale != nil {
+		replaces = adm.stale.ID
+	}
 
 	self := member.Info()
 
 	member.send(Message{
-		Type: "welcome", Self: &self, RoomInfo: r.info(), Members: others, Recorder: recorder,
-		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID),
+		Type: "welcome", Self: &self, RoomInfo: r.info(), Members: adm.others, Recorder: adm.recorder,
+		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
 	})
 	r.broadcastExcept(member.ID, Message{
-		Type: "member-joined", ID: member.ID, Short: member.Short, Name: member.Name,
+		Type: "member-joined", ID: member.ID, Short: member.Short, Name: member.Name, Replaces: replaces,
 	})
 
-	if startedEmpty {
+	if adm.stale != nil {
+		adm.stale.Leave()
+	}
+
+	if adm.startedEmpty {
 		r.startRembTicker()
 	}
 
 	// Subscribe to every existing publisher.
-	for _, other := range others {
+	for _, other := range adm.others {
 		sourceID := other.ID
 
 		member.enqueue(func() { member.ensureDownPeer(sourceID) })
@@ -586,9 +658,10 @@ type Member struct {
 	Short uint32
 	Name  string
 
-	room *Room
-	priv bool
-	send func(Message)
+	room   *Room
+	priv   bool
+	send   func(Message)
+	resume string
 
 	tasks chan func()
 	done  chan struct{}
