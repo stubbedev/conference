@@ -5,7 +5,8 @@
       "args": [
         "-y",
         "@playwright/mcp@latest",
-        "--extension"
+        "--browser",
+        "chrome"
       ]
     }
   }
