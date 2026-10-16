@@ -105,7 +105,9 @@ export const hook = (relayTransport) => `
   const relayTransport = ${JSON.stringify(relayTransport)};
   const OrigPC = window.RTCPeerConnection;
   window.RTCPeerConnection = function (config, ...rest) {
-    if (relayTransport) {
+    if (relayTransport === 'none') {
+      config = { ...config, iceTransportPolicy: 'relay', iceServers: [] };
+    } else if (relayTransport) {
       config = {
         ...config,
         iceTransportPolicy: 'relay',

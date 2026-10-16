@@ -268,6 +268,33 @@ async function checkStillInRoom(failures, label, browsers) {
   }
 }
 
+const ownName = `(() => {
+  const local = [...document.querySelectorAll('.group')].find((g) => g.querySelector('video') && !g.querySelector('audio'));
+  return local?.innerText.match(/^(.*) \\(you\\)$/m)?.[1] ?? '';
+})()`
+
+const tileTexts = `[...document.querySelectorAll('.group')].filter((g) => g.querySelector('video')).map((g) => g.innerText.replace(/\\s+/g, ' ').trim())`
+
+// A member whose media never reaches the SFU (its peer connections get
+// no ICE candidates at all) must still appear in the grid of everyone
+// else, marked as connecting, instead of only in the people count.
+async function checkStalledJoiner(failures, host, stalled, url) {
+  await joinRoom(host, url)
+  await sleep(stagger)
+  await joinRoom(stalled, url, 'none')
+  const name = await waitFor(stalled, ownName, (n) => n !== '', 10000)
+  check(failures, 'stalled joiner', name.ok, 'the stalled browser never rendered its own tile')
+  if (!name.ok) return
+  const seen = await waitFor(
+    host,
+    tileTexts,
+    (texts) => texts.some((t) => t.includes(name.value) && t.includes('Connecting')),
+    10000,
+  )
+  console.log(`stalled joiner: host tiles ${JSON.stringify(seen.value)}`)
+  check(failures, 'stalled joiner', seen.ok, `no connecting tile for ${name.value} in the host grid: ${JSON.stringify(seen.value)}`)
+}
+
 async function main() {
   const dir = mkdtempSync(join(tmpdir(), 'conference-smoke-'))
   const procs = []
@@ -367,6 +394,11 @@ async function main() {
         console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes` : 'MISSING'}`)
       }
     }
+
+    const stalledRoom = await createRoom(`http://127.0.0.1:${port}`, 'smoke-stalled')
+    const stalledPair = [await launch(5, dir), await launch(6, dir)]
+    for (const b of stalledPair) procs.push(b.proc)
+    await checkStalledJoiner(failures, stalledPair[0], stalledPair[1], stalledRoom.url)
 
     const lan = lanAddress()
     const relayRoom = await createRoom(`http://${lan}:${port}`, 'smoke-relay')

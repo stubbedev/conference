@@ -19,6 +19,8 @@ interface VideoTileProps {
   muted?: boolean
   mirrored?: boolean
   sharing?: boolean
+  /** Remote member whose media has not arrived: shown, but not playable yet. */
+  connecting?: boolean
   micOff?: boolean
   camOff?: boolean
   sinkId?: string
@@ -77,6 +79,7 @@ export const VideoTile = memo(function VideoTile({
   muted,
   mirrored,
   sharing,
+  connecting,
   micOff,
   camOff,
   sinkId,
@@ -180,7 +183,7 @@ export const VideoTile = memo(function VideoTile({
       .slice(0, 2)
       .toUpperCase() || '?'
 
-  const hideVideo = Boolean(camOff && !sharing)
+  const hideVideo = Boolean((camOff || connecting) && !sharing)
   const speakingNow = speaking && !micOff && !sharing
 
   useEffect(() => {
@@ -235,7 +238,11 @@ export const VideoTile = memo(function VideoTile({
               >
                 {initials}
               </div>
-              {!compact && <span className="text-xs text-muted-foreground">Camera is off</span>}
+              {!compact && (
+                <span className="text-xs text-muted-foreground">
+                  {connecting ? 'Connecting…' : 'Camera is off'}
+                </span>
+              )}
             </div>
           </div>
         )}

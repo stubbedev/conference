@@ -1162,11 +1162,25 @@ export default function Room() {
     for (const tile of tiles) {
       if (tile.kind === SCREEN_KIND) list.push(tile)
     }
+    // Every member gets a camera tile from the moment they join, not
+    // from the moment their media arrives: a member whose upstream has
+    // not connected (yet, or ever) would otherwise be missing from the
+    // grid entirely, listed in the people panel but neither visible
+    // nor audible, with nothing on screen saying why.
+    const cameras = new Map<string, Tile>()
     for (const tile of tiles) {
-      if (tile.kind !== SCREEN_KIND) list.push(tile)
+      if (tile.kind !== SCREEN_KIND) cameras.set(tile.sourceId, tile)
     }
+    for (const member of members) {
+      const key = `${member.id}:${CAMERA_KIND}`
+      list.push(
+        cameras.get(member.id) ?? { key, sourceId: member.id, kind: CAMERA_KIND, stream: null },
+      )
+      cameras.delete(member.id)
+    }
+    list.push(...cameras.values())
     return list
-  }, [screenStream, localStream, tiles])
+  }, [screenStream, localStream, tiles, members])
 
   const pinnedKey =
     userPin === NO_PIN
@@ -1255,6 +1269,7 @@ export default function Room() {
         micOff={!isScreen ? !(member?.mic ?? true) : false}
         camOff={!isScreen ? !(member?.cam ?? true) : false}
         sharing={isScreen}
+        connecting={!isLocal && !tile.stream}
         sinkId={playsAudio ? devicePrefs.speaker : undefined}
         volume={playsAudio ? devicePrefs.volume : undefined}
         pinned={pinnedKey === tile.key}

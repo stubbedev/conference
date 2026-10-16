@@ -222,7 +222,8 @@ asserts that both receive the other's audio and video through the E2EE
 transform with zero dropped frames and exactly one tile per participant.
 It then pins tiles, checks simulcast layer switching, drops a browser's
 signaling and restarts the server mid-call (both must reconnect),
-records, and finally forces a call through the TURN relay over UDP and
+records, checks that a joiner whose media never connects still gets a
+tile in everyone's grid, and finally forces a call through the TURN relay over UDP and
 TCP. It needs Chrome on `PATH` (or `CHROME=/path/to/chrome`) and a
 non-loopback IPv4 address, and is the gate that catches what type checks
 and unit tests cannot: a pipeline that connects fine and transmits
