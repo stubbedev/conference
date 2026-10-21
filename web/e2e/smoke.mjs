@@ -23,6 +23,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  callJs,
   check,
   checkCall,
   createRoom,
@@ -118,12 +119,16 @@ function lanAddress() {
   throw new Error('no non-loopback IPv4 address: Chrome only relays TURN/UDP to a routable host')
 }
 
+function clickButtonByLabel(label) {
+  const button = [...document.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label)
+  if (!button) return false
+  button.click()
+  return true
+}
+
 async function clickButtonByTitle(browser, label) {
   for (let t = 0; t < 20; t++) {
-    const clicked = await evalJs(
-      browser,
-      `(() => { const b = [...document.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === ${JSON.stringify(label)}); if (b) { b.click(); return true; } return false; })()`,
-    )
+    const clicked = await callJs(browser, clickButtonByLabel, label)
     if (clicked) return true
     await sleep(250)
   }
@@ -174,15 +179,13 @@ const tileMedia = `
 })()
 `
 
-const clickRemotePin = (label) => `
-(() => {
-  const remote = document.querySelector('audio')?.closest('.group');
-  const button = remote && [...remote.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(label)});
-  if (!button) return false;
-  button.click();
-  return true;
-})()
-`
+function clickRemotePin(label) {
+  const remote = document.querySelector('audio')?.closest('.group')
+  const button = remote && [...remote.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label)
+  if (!button) return false
+  button.click()
+  return true
+}
 
 async function checkRemoteTilePlays(failures, label, browser, phase) {
   const before = await evalJs(browser, tileMedia)
@@ -219,15 +222,13 @@ const remoteVideoWidth = `
 })()
 `
 
-const clickLocalPin = (label) => `
-(() => {
-  const local = [...document.querySelectorAll('.group')].find((g) => g.querySelector('video') && !g.querySelector('audio'));
-  const button = local && [...local.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === ${JSON.stringify(label)});
-  if (!button) return false;
-  button.click();
-  return true;
-})()
-`
+function clickLocalPin(label) {
+  const local = [...document.querySelectorAll('.group')].find((g) => g.querySelector('video') && !g.querySelector('audio'))
+  const button = local && [...local.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label)
+  if (!button) return false
+  button.click()
+  return true
+}
 
 async function checkSimulcast(failures, publisher, viewer) {
   const sent = await waitFor(publisher, sentLayers, (layers) => ['l', 'm', 'h'].every((rid) => layers[rid]?.bytes > 0), 20000)
@@ -241,7 +242,7 @@ async function checkSimulcast(failures, publisher, viewer) {
   ]
   for (const step of steps) {
     if (step.action) {
-      check(failures, 'simulcast', await evalJs(viewer, clickLocalPin(step.action)), `no "${step.action}" button on the viewer's own tile`)
+      check(failures, 'simulcast', await callJs(viewer, clickLocalPin, step.action), `no "${step.action}" button on the viewer's own tile`)
     }
     const got = await waitFor(viewer, remoteVideoWidth, step.want, 20000)
     console.log(`simulcast ${step.name}: remote video ${got.value}px wide`)
@@ -250,12 +251,12 @@ async function checkSimulcast(failures, publisher, viewer) {
 }
 
 async function checkPinRoundTrip(failures, label, browser) {
-  check(failures, label, await evalJs(browser, clickRemotePin('Pin to main view')), 'no pin button on the remote tile')
+  check(failures, label, await callJs(browser, clickRemotePin, 'Pin to main view'), 'no pin button on the remote tile')
   await sleep(500)
   const pinned = await checkRemoteTilePlays(failures, label, browser, 'pinned')
   check(failures, label, pinned.unpinButtons === 1, `expected the remote tile to be pinned, found ${pinned.unpinButtons} pinned tiles`)
 
-  check(failures, label, await evalJs(browser, clickRemotePin('Unpin')), 'no unpin button on the pinned remote tile')
+  check(failures, label, await callJs(browser, clickRemotePin, 'Unpin'), 'no unpin button on the pinned remote tile')
   await sleep(500)
   const unpinned = await checkRemoteTilePlays(failures, label, browser, 'unpinned')
   check(failures, label, unpinned.unpinButtons === 0, `expected no pinned tile after unpinning, found ${unpinned.unpinButtons}`)

@@ -226,6 +226,24 @@ export async function evalJs(browser, expression) {
   return r.result.value
 }
 
+export async function callJs(browser, fn, ...args) {
+  const global = await browser.cdp.send('Runtime.evaluate', { expression: 'globalThis' }, browser.sessionId)
+  const r = await browser.cdp.send(
+    'Runtime.callFunctionOn',
+    {
+      functionDeclaration: fn.toString(),
+      objectId: global.result.objectId,
+      arguments: args.map((value) => ({ value })),
+      returnByValue: true,
+      awaitPromise: true,
+    },
+    browser.sessionId,
+  )
+  await browser.cdp.send('Runtime.releaseObject', { objectId: global.result.objectId }, browser.sessionId)
+  if (r.exceptionDetails) throw new Error(`${fn.name} threw: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`)
+  return r.result.value
+}
+
 export async function waitFor(browser, expression, predicate, timeoutMs) {
   let value
   for (let t = 0; t < timeoutMs; t += 250) {
