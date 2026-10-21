@@ -36,7 +36,7 @@ fmt:
 # TURN on 15000/13478 for the same reason, and a scratch SQLite in /tmp.
 # vite proxies /api and /ws to
 # it. The toolchain (go, air, just, node) comes from the flake dev shell
-# — see flake.nix.
+# — see nix/shell.nix.
 dev:
     #!/usr/bin/env bash
     set -euo pipefail
