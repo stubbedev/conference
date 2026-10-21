@@ -33,7 +33,7 @@ export async function savedRoomPassword(slug: string): Promise<CryptoKey | null>
     })
     return value instanceof CryptoKey ? value : null
   } catch (err) {
-    console.warn(`roompass: reading the saved password of room ${slug}`, err)
+    console.warn('roompass: reading the saved password of room', slug, err)
     return null
   }
 }
@@ -43,7 +43,7 @@ export async function rememberRoomPassword(slug: string, password: CryptoKey): P
   try {
     await write((store) => store.put(password, slug))
   } catch (err) {
-    console.warn(`roompass: saving the password of room ${slug}`, err)
+    console.warn('roompass: saving the password of room', slug, err)
   }
 }
 
@@ -51,7 +51,7 @@ export async function forgetRoomPassword(slug: string): Promise<void> {
   try {
     await write((store) => store.delete(slug))
   } catch (err) {
-    console.warn(`roompass: forgetting the password of room ${slug}`, err)
+    console.warn('roompass: forgetting the password of room', slug, err)
   }
 }
 
