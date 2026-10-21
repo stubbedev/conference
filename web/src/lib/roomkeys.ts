@@ -34,14 +34,15 @@ export function randomRoomKey(): Bytes {
   return crypto.getRandomValues(new Uint8Array(32))
 }
 
+export function importPassword(password: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey('raw', textEncoder.encode(password), 'PBKDF2', false, ['deriveBits', 'deriveKey'])
+}
+
 // deriveProof computes the password proof the server compares.
-export async function deriveProof(password: string, authSaltB64: string): Promise<string> {
-  const material = await crypto.subtle.importKey('raw', textEncoder.encode(password), 'PBKDF2', false, [
-    'deriveBits',
-  ])
+export async function deriveProof(password: CryptoKey, authSaltB64: string): Promise<string> {
   const bits = await crypto.subtle.deriveBits(
     { name: 'PBKDF2', hash: 'SHA-256', salt: fromB64(authSaltB64), iterations: PBKDF2_ITERATIONS },
-    material,
+    password,
     256,
   )
   return toB64(new Uint8Array(bits))
@@ -49,13 +50,10 @@ export async function deriveProof(password: string, authSaltB64: string): Promis
 
 // openKeyblob decrypts the sealed room key with the password. The nonce
 // is the first 12 bytes of the blob, matching the server's SealKeyblob.
-export async function openKeyblob(keyblobB64: string, keySaltB64: string, password: string): Promise<Bytes> {
-  const material = await crypto.subtle.importKey('raw', textEncoder.encode(password), 'PBKDF2', false, [
-    'deriveKey',
-  ])
+export async function openKeyblob(keyblobB64: string, keySaltB64: string, password: CryptoKey): Promise<Bytes> {
   const kek = await crypto.subtle.deriveKey(
     { name: 'PBKDF2', hash: 'SHA-256', salt: fromB64(keySaltB64), iterations: PBKDF2_ITERATIONS },
-    material,
+    password,
     { name: 'AES-GCM', length: 256 },
     false,
     ['decrypt'],

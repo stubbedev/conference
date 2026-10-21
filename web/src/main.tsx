@@ -4,7 +4,10 @@ import { BrowserRouter } from 'react-router-dom'
 
 import App from './App'
 import { Toaster } from '@/components/ui/sonner'
+import { purgePlaintextRoomPasswords } from '@/lib/roompass'
 import './index.css'
+
+purgePlaintextRoomPasswords()
 
 // No StrictMode: double-invoked effects would connect media twice.
 createRoot(document.getElementById('root')!).render(

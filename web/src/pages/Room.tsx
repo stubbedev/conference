@@ -36,6 +36,7 @@ import {
   deriveMediaKeyMaterial,
   deriveProof,
   fromB64,
+  importPassword,
   openKeyblob,
   toB64,
 } from '@/lib/roomkeys'
@@ -397,7 +398,7 @@ export default function Room() {
           session = res.session
           if (res.key) keyB64 = res.key
         } else {
-          const pass = password ?? savedRoomPassword(slug)
+          const pass = password ? await importPassword(password) : await savedRoomPassword(slug)
           if (!pass) {
             setGateError('')
             setPhase('gate')
@@ -405,13 +406,11 @@ export default function Room() {
           }
           if (!info.authSalt) throw new Error('This room is missing its password salt.')
           const proof = await deriveProof(pass, info.authSalt)
-          const res = await api.auth(slug, { proof }).catch((err: unknown) => {
-            // A remembered password that no longer works falls back to
-            // the prompt instead of failing the join.
-            if (!password) forgetRoomPassword(slug)
+          const res = await api.auth(slug, { proof }).catch(async (err: unknown) => {
+            if (!password) await forgetRoomPassword(slug)
             throw err
           })
-          if (password) rememberRoomPassword(slug, password)
+          if (password) await rememberRoomPassword(slug, pass)
           session = res.session
           if (res.key) keyB64 = res.key
           else if (res.keyblob && res.keySalt) {

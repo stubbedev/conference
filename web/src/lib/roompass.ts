@@ -1,29 +1,67 @@
-// Room passwords remembered per device so rejoining never prompts again.
-// localStorage scope equals the #k= URL fragment's: it unlocks the room
-// on this device only.
+const DB_NAME = 'conference'
+const STORE = 'roompass'
+const RETIRED_PLAINTEXT_PREFIX = 'conference:roompw:'
 
-const PREFIX = 'conference:roompw:'
+let opened: Promise<IDBDatabase> | null = null
 
-export function savedRoomPassword(slug: string): string {
+function database(): Promise<IDBDatabase> {
+  opened ??= new Promise((resolve, reject) => {
+    const open = indexedDB.open(DB_NAME, 1)
+    open.onupgradeneeded = () => open.result.createObjectStore(STORE)
+    open.onsuccess = () => resolve(open.result)
+    open.onerror = () => reject(open.error)
+  })
+  return opened
+}
+
+async function write(op: (store: IDBObjectStore) => void): Promise<void> {
+  const tx = (await database()).transaction(STORE, 'readwrite')
+  op(tx.objectStore(STORE))
+  await new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error)
+  })
+}
+
+export async function savedRoomPassword(slug: string): Promise<CryptoKey | null> {
   try {
-    return localStorage.getItem(PREFIX + slug) ?? ''
-  } catch {
-    return ''
+    const get = (await database()).transaction(STORE).objectStore(STORE).get(slug)
+    const value = await new Promise<unknown>((resolve, reject) => {
+      get.onsuccess = () => resolve(get.result)
+      get.onerror = () => reject(get.error)
+    })
+    return value instanceof CryptoKey ? value : null
+  } catch (err) {
+    console.warn(`roompass: reading the saved password of room ${slug}`, err)
+    return null
   }
 }
 
-export function rememberRoomPassword(slug: string, password: string): void {
+export async function rememberRoomPassword(slug: string, password: CryptoKey): Promise<void> {
+  if (password.extractable) throw new Error('roompass: refusing to store an extractable password key')
   try {
-    localStorage.setItem(PREFIX + slug, password)
-  } catch {
-    // Best effort: private browsing may refuse storage.
+    await write((store) => store.put(password, slug))
+  } catch (err) {
+    console.warn(`roompass: saving the password of room ${slug}`, err)
   }
 }
 
-export function forgetRoomPassword(slug: string): void {
+export async function forgetRoomPassword(slug: string): Promise<void> {
   try {
-    localStorage.removeItem(PREFIX + slug)
-  } catch {
-    // Ignore storage failures.
+    await write((store) => store.delete(slug))
+  } catch (err) {
+    console.warn(`roompass: forgetting the password of room ${slug}`, err)
+  }
+}
+
+export function purgePlaintextRoomPasswords(): void {
+  try {
+    const retired = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(
+      (key): key is string => key !== null && key.startsWith(RETIRED_PLAINTEXT_PREFIX),
+    )
+    for (const key of retired) localStorage.removeItem(key)
+  } catch (err) {
+    console.warn('roompass: purging plaintext room passwords', err)
   }
 }
