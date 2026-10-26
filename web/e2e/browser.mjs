@@ -50,8 +50,41 @@ class CDP {
   }
 }
 
+const CHROME_START_TIMEOUT_MS = 90_000
+
+function devToolsEndpoint(proc, idx) {
+  return new Promise((resolveEndpoint, reject) => {
+    let stderr = ''
+    const settle = () => {
+      clearTimeout(timer)
+      proc.off('error', onError)
+      proc.off('exit', onExit)
+      proc.stderr.off('data', onData)
+      proc.stderr.resume()
+    }
+    const fail = (reason) => {
+      settle()
+      proc.kill('SIGKILL')
+      reject(new Error(`chrome ${idx} did not start: ${reason}\n${stderr}`))
+    }
+    const onError = (err) => fail(err.message)
+    const onExit = (code, signal) => fail(`exited with ${signal ?? `code ${code}`}`)
+    const onData = (chunk) => {
+      stderr += chunk
+      const match = /^DevTools listening on (ws:\/\/\S+)$/m.exec(stderr)
+      if (!match) return
+      settle()
+      resolveEndpoint(match[1])
+    }
+    const timer = setTimeout(() => fail(`no DevTools endpoint within ${CHROME_START_TIMEOUT_MS} ms`), CHROME_START_TIMEOUT_MS)
+    proc.on('error', onError)
+    proc.on('exit', onExit)
+    proc.stderr.setEncoding('utf8')
+    proc.stderr.on('data', onData)
+  })
+}
+
 export async function launchChrome(chrome, idx, dir, extraArgs = []) {
-  const port = await freePort()
   const profile = mkdtempSync(join(dir, `chrome-${idx}-`))
   const proc = spawn(
     chrome,
@@ -63,7 +96,7 @@ export async function launchChrome(chrome, idx, dir, extraArgs = []) {
       '--use-fake-device-for-media-stream',
       '--use-fake-ui-for-media-stream',
       '--autoplay-policy=no-user-gesture-required',
-      `--remote-debugging-port=${port}`,
+      '--remote-debugging-port=0',
       `--user-data-dir=${profile}`,
       '--window-size=1200,900',
       ...extraArgs,
@@ -71,29 +104,16 @@ export async function launchChrome(chrome, idx, dir, extraArgs = []) {
     ],
     { stdio: ['ignore', 'ignore', 'pipe'] },
   )
-  let stderr = ''
-  proc.stderr.on('data', (d) => (stderr += d))
-  let version
-  for (let i = 0; i < 100 && !version; i++) {
-    try {
-      version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()
-    } catch {
-      await sleep(200)
-    }
-  }
-  if (!version) {
-    proc.kill('SIGKILL')
-    throw new Error(`chrome ${idx} did not start: ${stderr}`)
-  }
-  const ws = new WebSocket(version.webSocketDebuggerUrl)
+  const ws = new WebSocket(await devToolsEndpoint(proc, idx))
   await new Promise((r, reject) => {
     ws.onopen = r
     ws.onerror = reject
   })
   const cdp = new CDP(ws)
+  const { product } = await cdp.send('Browser.getVersion')
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' })
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
-  return { proc, cdp, sessionId, browser: version.Browser }
+  return { proc, cdp, sessionId, browser: product }
 }
 
 // Injected before the app loads: records peer connections and the
