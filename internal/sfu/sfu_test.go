@@ -324,6 +324,28 @@ func publishAudioOnly(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStati
 }
 
 // addVideoTrack renegotiates the publisher's upstream with a video track.
+// addAudioTrack publishes a second Opus track on a live upstream, the
+// way a translated voice joins the call.
+func addAudioTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSample {
+	t.Helper()
+
+	peerConn := publisher.localPC()
+	if peerConn == nil {
+		t.Fatal("publisher has no upstream connection")
+	}
+
+	audio := newSampleTrack(t, webrtc.MimeTypeOpus, "late-audio")
+
+	_, err := peerConn.AddTrack(audio)
+	if err != nil {
+		t.Fatalf("add audio track: %v", err)
+	}
+
+	negotiateUp(t, publisher, peerConn)
+
+	return audio
+}
+
 func addVideoTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSample {
 	t.Helper()
 
@@ -529,6 +551,63 @@ func TestMediaLoopback(t *testing.T) {
 // registering one by one on slow machines. The later downstream offer
 // must still reach the viewer; CI failed exactly here while the suite
 // stayed green on fast machines.
+// TestLateAudioTrack checks that an audio track added after the first
+// negotiation reaches viewers as audio even when a renegotiation
+// registers it from the SDP before its first packet, codec still unknown.
+func TestLateAudioTrack(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := newTestHub(t, engine)
+
+	publisher := newTestPeer(t, hub, engine, "alice", false)
+	audioTrack := publishAudioOnly(t, publisher)
+
+	go pumpMedia(audioTrack)
+
+	viewer := newTestPeer(t, hub, engine, "bob", false)
+
+	kinds := make(chan *webrtc.TrackRemote, 4)
+
+	_, _, peerConn := subscribeLoop(t, viewer, engine, nil, kinds,
+		func(_, gotAudio *webrtc.TrackRemote) bool {
+			return gotAudio != nil
+		},
+		"audio track",
+	)
+
+	lateTrack := addAudioTrack(t, publisher)
+
+	// A second negotiation before the track's first packet, as when the
+	// next translation track is added, registers it from the SDP.
+	negotiateUp(t, publisher, publisher.localPC())
+
+	go pumpMedia(lateTrack)
+
+	_, late, _ := subscribeLoop(t, viewer, engine, peerConn, kinds,
+		func(_, gotAudio *webrtc.TrackRemote) bool {
+			return gotAudio != nil
+		},
+		"late audio track",
+	)
+
+	err = late.SetReadDeadline(time.Now().Add(readTimeout))
+	if err != nil {
+		t.Fatalf("read deadline: %v", err)
+	}
+
+	_, _, err = late.ReadRTP()
+	if err != nil {
+		t.Fatalf("no RTP on late audio track: %v", err)
+	}
+}
+
 func TestLateVideoTrack(t *testing.T) {
 	t.Parallel()
 
