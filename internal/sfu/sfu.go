@@ -1158,7 +1158,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		}
 
 		local := newForwardTrack(
-			track.first.Codec().RTPCodecCapability, track.first.ID(), track.first.StreamID())
+			track.codec, track.first.ID(), track.first.StreamID())
 
 		sendOnly := webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionSendonly,
@@ -1341,9 +1341,13 @@ type UpTrack struct {
 	kind string
 	pc   *webrtc.PeerConnection
 
-	// first is the first layer to arrive; its codec and stream IDs,
-	// shared by all layers, describe the track to viewers.
+	// first is the first layer to arrive; its stream IDs, shared by all
+	// layers, describe the track to viewers.
 	first *webrtc.TrackRemote
+
+	// codec is the track's payload format, known even before the first
+	// packet (see trackCodec).
+	codec webrtc.RTPCodecCapability
 
 	simulcast bool // published as rid-named encodings
 	vp8       bool // the payload format the layer switch understands
@@ -1856,6 +1860,8 @@ func (up *UpPeer) trackFor(mid string, receiver *webrtc.RTPReceiver, track *webr
 		return existing, false
 	}
 
+	codec := trackCodec(receiver, track)
+
 	kind := labels[mid]
 	if kind == "" {
 		if track.Kind() == webrtc.RTPCodecTypeAudio {
@@ -1870,8 +1876,9 @@ func (up *UpPeer) trackFor(mid string, receiver *webrtc.RTPReceiver, track *webr
 		kind:      kind,
 		pc:        up.pc,
 		first:     track,
+		codec:     codec,
 		simulcast: track.RID() != "",
-		vp8:       strings.EqualFold(track.Codec().MimeType, webrtc.MimeTypeVP8),
+		vp8:       strings.EqualFold(codec.MimeType, webrtc.MimeTypeVP8),
 		extURIs:   extensionURIs(receiver),
 		mu:        sync.RWMutex{},
 		layers:    [layerCount]*upLayer{},
@@ -1892,6 +1899,25 @@ func (up *UpPeer) midOf(receiver *webrtc.RTPReceiver) string {
 	}
 
 	return ""
+}
+
+// trackCodec is the payload format of an upstream track. A track only
+// learns its codec from its first packet, but one registered by
+// syncTracks has none yet; the media section's negotiated codecs, the
+// preferred one first, stand in, so a late audio track is not offered to
+// viewers as video.
+func trackCodec(receiver *webrtc.RTPReceiver, track *webrtc.TrackRemote) webrtc.RTPCodecCapability {
+	if codec := track.Codec(); codec.MimeType != "" {
+		return codec.RTPCodecCapability
+	}
+
+	for _, codec := range receiver.GetParameters().Codecs {
+		if codec.MimeType != "" {
+			return codec.RTPCodecCapability
+		}
+	}
+
+	return webrtc.RTPCodecCapability{}
 }
 
 // syncTracks registers any recvonly transceivers whose track is already
