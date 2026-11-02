@@ -90,3 +90,48 @@ func TestMediaConfigRejects(t *testing.T) {
 		})
 	}
 }
+
+const exampleOrigin = "https://meet.example.com"
+
+func TestBaseURL(t *testing.T) {
+	for raw, want := range map[string]string{
+		"":                      "",
+		exampleOrigin:           exampleOrigin,
+		exampleOrigin + "/":     exampleOrigin,
+		"http://localhost:8080": "http://localhost:8080",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("BASE_URL", raw)
+
+			cfg, err := config.FromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if cfg.BaseURL != want {
+				t.Fatalf("got %q, want %q", cfg.BaseURL, want)
+			}
+		})
+	}
+}
+
+func TestBaseURLRejects(t *testing.T) {
+	for _, raw := range []string{
+		"meet.example.com",
+		"ftp://meet.example.com",
+		"https://",
+		"https://meet.example.com/prefix",
+		"https://meet.example.com/?a=b",
+		"https://meet.example.com/#k",
+		"https://user@meet.example.com",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("BASE_URL", raw)
+
+			_, err := config.FromEnv()
+			if err == nil {
+				t.Fatalf("accepted %q", raw)
+			}
+		})
+	}
+}

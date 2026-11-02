@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -31,7 +32,7 @@ const (
 // Config is the complete server configuration.
 type Config struct {
 	HTTPAddr string // listen address for HTTP/WebSocket
-	BaseURL  string // public origin, e.g. https://meet.example.com (optional)
+	BaseURL  string // public origin, e.g. https://meet.example.com (optional; always scheme://host when set)
 
 	DBPath string // SQLite database path
 
@@ -129,6 +130,7 @@ func splitList(v string) []string {
 var (
 	errPortRange = errors.New("config: port out of range 1-65535")
 	errPortClash = errors.New("config: ports must differ")
+	errBaseURL   = errors.New("config: BASE_URL must be an http(s) origin such as https://meet.example.com, with no path, query or fragment")
 )
 
 var errJoinOnlyNeedsKey = errors.New("config: JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
@@ -184,7 +186,12 @@ func applyHTTPConfig(cfg *Config) error {
 	}
 
 	cfg.HTTPAddr = net.JoinHostPort(env("BIND", ""), port)
-	cfg.BaseURL = strings.TrimRight(env("BASE_URL", ""), "/")
+
+	cfg.BaseURL, err = parseOrigin(env("BASE_URL", ""))
+	if err != nil {
+		return err
+	}
+
 	cfg.APIKeys = splitList(env("API_KEYS", ""))
 	cfg.JoinOnly = envBool("JOIN_ONLY")
 
@@ -195,6 +202,28 @@ func applyHTTPConfig(cfg *Config) error {
 	cfg.AllowedOrigins = splitList(env("ALLOWED_ORIGINS", ""))
 
 	return nil
+}
+
+// parseOrigin validates raw as an http(s) origin and returns it as
+// scheme://host. An empty raw means "not configured".
+func parseOrigin(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q: %w", errBaseURL, raw, err)
+	}
+
+	validScheme := parsed.Scheme == "http" || parsed.Scheme == "https"
+	bare := strings.TrimSuffix(parsed.Path, "/") == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.User == nil
+
+	if !validScheme || parsed.Host == "" || !bare {
+		return "", fmt.Errorf("%w: got %q", errBaseURL, raw)
+	}
+
+	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
 // applyMediaConfig fills the WebRTC settings.

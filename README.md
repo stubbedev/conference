@@ -52,13 +52,14 @@
 You need a server with a public IP, a domain name, and Docker.
 
 ```bash
-cp .env.example .env        # fill in BASE_URL, TURN_TLS_HOST, ACME_EMAIL, API_KEYS, EXTERNAL_IPS
+cp .env.example .env        # fill in DOMAIN, TURN_TLS_HOST, ACME_EMAIL, API_KEYS, EXTERNAL_IPS
 docker compose up -d
 ```
 
-That's it. Traefik fetches TLS certificates and routes `BASE_URL` to the
-app and `TURN_TLS_HOST` (a second DNS name pointing at the same server)
-to the relay. Make sure these ports are open:
+That's it. Traefik fetches TLS certificates and routes `DOMAIN` to the
+app (which then runs with `BASE_URL=https://$DOMAIN`) and
+`TURN_TLS_HOST` (a second DNS name pointing at the same server) to the
+relay. Make sure these ports are open:
 
 | Port         | Used for                       |
 | ------------ | ------------------------------ |
@@ -72,7 +73,7 @@ Prefer running it without Docker?
 
 ```bash
 go build ./cmd/server
-BASE_URL=meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
+BASE_URL=https://meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
 ```
 
 ### Settings
@@ -83,7 +84,7 @@ All settings are environment variables.
 | ------------------- | --------------- | ----------------------------------------------------------------------------------------- |
 | `PORT`              | `8080`          | HTTP listen port                                                                          |
 | `BIND`              | all interfaces  | Listen host                                                                               |
-| `BASE_URL`          | —               | Public address, used in the links rooms hand out                                          |
+| `BASE_URL`          | —               | Public origin such as `https://meet.example.com`, used in room links and link previews; the server refuses to start if it has a path, query or no `http(s)` scheme |
 | `DB_PATH`           | `conference.db` | SQLite database path                                                                      |
 | `API_KEYS`          | empty           | Comma-separated keys needed to create, list and delete rooms; empty means anyone may create |
 | `JOIN_ONLY`         | `false`         | Hide room creation on the home page so people can only join; requires `API_KEYS`          |
