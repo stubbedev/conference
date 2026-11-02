@@ -11,6 +11,7 @@
         air # Backend hot reload behind `just dev`
         just # Task runner
         nodejs # web/ toolchain (vite 8)
+        inkscape # `just icons` renders web/brand into web/public
 
         delve # Go debugger
         git

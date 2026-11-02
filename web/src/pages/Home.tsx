@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { ChevronDown, MessageCircleHeart } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { api, type CreatedRoom as CreatedRoomInfo, type ServerConfig } from '@/lib/api'
 import { CreatedRoom } from '@/components/CreatedRoom'
+import { Logo } from '@/components/Logo'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { Button } from '@/components/ui/button'
 import {
@@ -74,7 +75,7 @@ export default function Home() {
       <div className="absolute top-4 right-4">
         <ThemeToggle />
       </div>
-      <MessageCircleHeart className="mx-auto mb-8 block size-10 text-foreground" aria-hidden />
+      <Logo className="mx-auto mb-6 size-24" />
 
       <div className="grid gap-4">
         {config && !config.joinOnly && (

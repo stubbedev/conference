@@ -1,0 +1,16 @@
+{
+  "name": "conference",
+  "tagline": "Private video meetings you host yourself.",
+  "description": "Self-hosted video meetings with end-to-end encrypted media and chat. Create a room, share the link, talk.",
+  "highlights": "End-to-end encrypted · one link to join · open source",
+  "ink": "#262626",
+  "inkDark": "#fafafa",
+  "paper": "#fafafa",
+  "images": {
+    "logo": "/logo.svg",
+    "favicon": "/favicon.svg",
+    "touchIcon": "/apple-touch-icon.png",
+    "card": "/og-image.png"
+  },
+  "card": { "width": 1200, "height": 630 }
+}

@@ -61,6 +61,11 @@ dev:
 e2e:
     node web/e2e/smoke.mjs
 
+# Regenerate the logo, favicon, touch icon and link-preview card in
+# web/public from web/brand (needs Inkscape, in the dev shell).
+icons:
+    node web/brand/brand.mjs
+
 # Run the server on :8080 serving the built UI (run `just web` first).
 run:
     DB_PATH=/tmp/conference-dev.db go run ./cmd/server

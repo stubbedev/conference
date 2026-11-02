@@ -69,6 +69,7 @@ linters:
             - github.com/pion/turn/v5
             - github.com/coder/websocket
             - github.com/google/uuid
+            - golang.org/x/net/html
             - modernc.org/sqlite
     exhaustruct_v5:
       # Zero-value struct literals are idiomatic for libraries whose

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -86,7 +87,10 @@ func run() error {
 
 	go reapLoop(database, hub, cfg.RoomTTL)
 
-	mux := buildMux(database, hub, cfg)
+	mux, err := buildMux(database, hub, cfg)
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -101,7 +105,7 @@ func run() error {
 }
 
 // buildMux assembles the API, signaling, and embedded UI routes.
-func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config) *http.ServeMux {
+func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
 	apiServer := api.New(database, hub, cfg)
@@ -112,9 +116,15 @@ func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config) *http.Ser
 		Store:          database,
 		AllowedOrigins: cfg.AllowedOrigins,
 	})
-	mux.Handle("/", spaHandler())
 
-	return mux
+	spa, err := spaHandler(cfg.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("web ui: %w", err)
+	}
+
+	mux.Handle("/", spa)
+
+	return mux, nil
 }
 
 // serveUntilShutdown runs the HTTP server until an interrupt or a
@@ -209,37 +219,43 @@ func reapOnce(database *store.Store, hub *sfu.Hub, ttl time.Duration) {
 
 // spaHandler serves the embedded frontend with an index.html fallback
 // for client-side routes, immutable caching for hashed assets, and
-// no-cache for the app shell.
-func spaHandler() http.Handler {
+// no-cache for the app shell, whose preview-image URLs are made
+// absolute against origin.
+func spaHandler(origin string) (http.Handler, error) {
 	dist, err := fs.Sub(web.Dist, "dist")
 	if err != nil {
-		log.Fatalf("embed: %v", err)
+		return nil, fmt.Errorf("embed: %w", err)
+	}
+
+	rawIndex, err := fs.ReadFile(dist, indexPage)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", indexPage, err)
+	}
+
+	index, err := absolutePreviewURLs(rawIndex, origin)
+	if err != nil {
+		return nil, err
 	}
 
 	files := http.FileServerFS(dist)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = indexPage
-		}
 
 		_, err := fs.Stat(dist, path)
-		if err != nil {
-			r.URL.Path = "/" // unknown path: serve the app shell
+		if path == "" || path == indexPage || err != nil {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeContent(w, r, indexPage, time.Time{}, bytes.NewReader(index))
 
-			path = indexPage
+			return
 		}
 
-		switch {
-		case path == indexPage:
-			w.Header().Set("Cache-Control", "no-cache")
-		case strings.HasPrefix(path, assetsDir):
+		if strings.HasPrefix(path, assetsDir) {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
 
 		files.ServeHTTP(w, r)
-	})
+	}), nil
 }
 
 func logRequests(next http.Handler) http.Handler {
