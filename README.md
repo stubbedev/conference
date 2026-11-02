@@ -144,6 +144,9 @@ the moderator link in a message only you can see.
    display_information:
      name: conference
    features:
+     bot_user:
+       display_name: conference
+       always_online: false
      slash_commands:
        - command: /meet
          url: https://meet.example.com/api/slack/meet
@@ -154,6 +157,8 @@ the moderator link in a message only you can see.
      scopes:
        bot:
          - commands
+   settings:
+     socket_mode_enabled: false
    ```
 
 2. **Install to Workspace**, then copy **Signing Secret** from *Basic
