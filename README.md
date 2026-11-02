@@ -97,6 +97,7 @@ All settings are environment variables.
 | `TURN_TLS_HOST`     | —               | Hostname whose port 443 forwards to the relay over TLS                                    |
 | `MAX_PUBLISH_KBPS`  | `2500`          | Upload bandwidth cap per participant                                                      |
 | `MAX_ROOM_MEMBERS`  | `16`            | Default maximum people per room                                                           |
+| `TRUSTED_PROXIES`   | —               | Comma-separated IPs or CIDRs of reverse proxies whose `X-Forwarded-For` names the real client, so rate limits apply per visitor instead of per proxy |
 | `ALLOWED_ORIGINS`   | same origin     | Extra origins allowed to connect to the signaling WebSocket                               |
 | `SLACK_SIGNING_SECRET` | —            | Enables the [`/meet` Slack command](#start-meetings-from-slack); requires `BASE_URL`      |
 
@@ -120,6 +121,11 @@ All settings are environment variables.
   All domains share one database, so links work on any of them. List
   the extra domains in `PUBLIC_ORIGINS` so each one's API links and
   link previews stay on that domain.
+
+Creating rooms without a key is limited to 10 in a row per visitor,
+then one a minute; key holders are never limited. Behind a reverse
+proxy, set `TRUSTED_PROXIES` to its address so each visitor is counted
+separately (the bundled compose file already does).
 
 Old rooms are cleaned up automatically after `ROOM_TTL_DAYS`, together
 with their sessions. A room in use is never deleted.

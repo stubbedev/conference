@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -24,16 +25,18 @@ import (
 
 // Rate-limit, size, and validation tuning.
 const (
-	authLimiterCapacity = 10
-	authLimiterRefill   = 0.2
-	hoursPerDay         = 24
-	maxCreateBodyBytes  = 32 << 10
-	maxAuthBodyBytes    = 8 << 10
-	limiterMaxEntries   = 4096
-	slugRetries         = 5
-	maxRoomNameLen      = 80
-	maxPasswordLen      = 128
-	maxRoomMembersCap   = 256
+	authLimiterCapacity   = 10
+	authLimiterRefill     = 0.2
+	createLimiterCapacity = 10
+	createLimiterRefill   = 1.0 / 60
+	hoursPerDay           = 24
+	maxCreateBodyBytes    = 32 << 10
+	maxAuthBodyBytes      = 8 << 10
+	limiterMaxEntries     = 4096
+	slugRetries           = 5
+	maxRoomNameLen        = 80
+	maxPasswordLen        = 128
+	maxRoomMembersCap     = 256
 )
 
 // Server holds the API dependencies.
@@ -45,17 +48,19 @@ type Server struct {
 	// SlackClient posts the Slack slash command's follow-up messages.
 	SlackClient *http.Client
 
-	authLimiter *limiter
+	authLimiter   *limiter
+	createLimiter *limiter
 }
 
 // New creates an API server around the shared store, hub, and config.
 func New(storage *store.Store, hub *sfu.Hub, cfg *config.Config) *Server {
 	return &Server{
-		Store:       storage,
-		Hub:         hub,
-		Cfg:         cfg,
-		SlackClient: &http.Client{Timeout: slackFollowUpTimeout},
-		authLimiter: newLimiter(authLimiterCapacity, authLimiterRefill),
+		Store:         storage,
+		Hub:           hub,
+		Cfg:           cfg,
+		SlackClient:   &http.Client{Timeout: slackFollowUpTimeout},
+		authLimiter:   newLimiter(authLimiterCapacity, authLimiterRefill),
+		createLimiter: newLimiter(createLimiterCapacity, createLimiterRefill),
 	}
 }
 
@@ -117,10 +122,19 @@ type createRoomResponse struct {
 
 // createRoom makes a new room. Rooms are immutable afterwards; this is
 // the only moment the room key and privileged token are ever revealed.
-// Hosts listed in OpenCreateHosts are exempt from the key check.
+// Hosts listed in OpenCreateHosts are exempt from the key check, and
+// creation without a valid key is rate limited per client.
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
-	if !s.checkAPIKey(r) && !s.openCreate(r) {
+	keyed := s.presentsValidKey(r)
+
+	if !keyed && len(s.Cfg.APIKeys) > 0 && !s.openCreate(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Room creation requires a valid API key.")
+
+		return
+	}
+
+	if !keyed && !s.createLimiter.allow(s.clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "rate-limited", "Too many rooms created; try again later.")
 
 		return
 	}
@@ -329,7 +343,7 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request) {
 
 // authWithToken grants a privileged session for a valid link token.
 func (s *Server) authWithToken(w http.ResponseWriter, r *http.Request, room *store.Room, token string) {
-	if !s.authLimiter.allow(clientIP(r)) {
+	if !s.authLimiter.allow(s.clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "rate-limited", "Too many attempts; try again later.")
 
 		return
@@ -389,7 +403,7 @@ func (s *Server) authWithPassword(w http.ResponseWriter, r *http.Request, room *
 		return
 	}
 
-	if !s.authLimiter.allow(clientIP(r)) {
+	if !s.authLimiter.allow(s.clientIP(r)) {
 		writeError(w, http.StatusTooManyRequests, "rate-limited", "Too many attempts; try again later.")
 
 		return
@@ -507,10 +521,12 @@ func (s *Server) room(w http.ResponseWriter, r *http.Request) (*store.Room, bool
 // checkAPIKey validates the operator key when configured. With no keys
 // configured, creation is open (single-operator self-hosting).
 func (s *Server) checkAPIKey(r *http.Request) bool {
-	if len(s.Cfg.APIKeys) == 0 {
-		return true
-	}
+	return len(s.Cfg.APIKeys) == 0 || s.presentsValidKey(r)
+}
 
+// presentsValidKey reports whether the request carries one of the
+// configured operator keys; always false when none are configured.
+func (s *Server) presentsValidKey(r *http.Request) bool {
 	key := r.Header.Get("Authorization")
 
 	key = strings.TrimPrefix(key, "Bearer ")
@@ -544,13 +560,36 @@ func (s *Server) openCreate(r *http.Request) bool {
 	return slices.Contains(s.Cfg.OpenCreateHosts, requestHost(r))
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP identifies the client for rate limiting: the TCP peer, or,
+// when the peer is a trusted proxy, the rightmost X-Forwarded-For hop
+// that is not itself a trusted proxy. Hops left of that are written by
+// the client and never trusted.
+func (s *Server) clientIP(r *http.Request) string {
+	peer, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 
-	return host
+	client := peer.Addr().Unmap()
+
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+
+	for i := len(hops) - 1; i >= 0 && s.trustedProxy(client); i-- {
+		hop, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+		if err != nil {
+			break
+		}
+
+		client = hop.Unmap()
+	}
+
+	return client.String()
+}
+
+func (s *Server) trustedProxy(addr netip.Addr) bool {
+	return slices.ContainsFunc(s.Cfg.TrustedProxies, func(prefix netip.Prefix) bool {
+		return prefix.Contains(addr)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -614,7 +653,7 @@ func (l *limiter) allow(key string) bool {
 
 	entry, ok := l.buckets[key]
 	if !ok {
-		l.buckets[key] = &bucket{tokens: l.capacity, last: time.Now()}
+		l.buckets[key] = &bucket{tokens: l.capacity - 1, last: time.Now()}
 
 		return true
 	}

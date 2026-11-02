@@ -68,6 +68,11 @@ type Config struct {
 	// Ceiling for the REMB estimate the SFU feeds back to publishers.
 	MaxPublishKbps int
 
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For
+	// header names the real client. Empty trusts no header: the client
+	// is the TCP peer.
+	TrustedProxies []netip.Prefix
+
 	// AllowedOrigins overrides the same-origin WebSocket check when
 	// non-empty. Empty means the Origin header must match the Host.
 	AllowedOrigins []string
@@ -164,6 +169,7 @@ func FromEnv() (*Config, error) {
 		ExternalIPs:        nil,
 		Relay:              relay.Config{Port: defaultTURNPort, TLSHost: ""},
 		MaxPublishKbps:     defaultMaxPublishKbps,
+		TrustedProxies:     nil,
 		AllowedOrigins:     nil,
 		SessionTTL:         defaultSessionDays * hoursPerDay * time.Hour,
 		MaxRoomMembers:     defaultMaxRoomMembers,
@@ -235,6 +241,15 @@ func applyHTTPConfig(cfg *Config) error {
 
 	cfg.AllowedOrigins = splitList(env("ALLOWED_ORIGINS", ""))
 
+	for _, raw := range splitList(env("TRUSTED_PROXIES", "")) {
+		proxy, err := parsePrefix(raw)
+		if err != nil {
+			return fmt.Errorf("TRUSTED_PROXIES: %w", err)
+		}
+
+		cfg.TrustedProxies = append(cfg.TrustedProxies, proxy)
+	}
+
 	return nil
 }
 
@@ -258,6 +273,27 @@ func parseOrigin(raw string) (string, error) {
 	}
 
 	return parsed.Scheme + "://" + strings.ToLower(parsed.Host), nil
+}
+
+// parsePrefix accepts a CIDR prefix or a single address.
+func parsePrefix(raw string) (netip.Prefix, error) {
+	if strings.Contains(raw, "/") {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("parse %q: %w", raw, err)
+		}
+
+		return prefix.Masked(), nil
+	}
+
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("parse %q: %w", raw, err)
+	}
+
+	addr = addr.Unmap()
+
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }
 
 // OriginFor returns the configured origin whose host matches the

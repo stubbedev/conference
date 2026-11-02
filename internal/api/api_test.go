@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,7 @@ const (
 	openHost     = "stubbe.dev"
 	joinOnlyHost = "mariabugge.com"
 	operatorKey  = "s3cret"
+	forwardedFor = "X-Forwarded-For"
 )
 
 func testConfig() *config.Config {
@@ -38,6 +41,7 @@ func testConfig() *config.Config {
 		ExternalIPs:        nil,
 		Relay:              relay.Config{Port: 3478, TLSHost: ""},
 		MaxPublishKbps:     0,
+		TrustedProxies:     nil,
 		AllowedOrigins:     nil,
 		SessionTTL:         365 * 24 * time.Hour,
 		MaxRoomMembers:     0,
@@ -219,5 +223,88 @@ func TestCreateRoomLinksFollowRequestOrigin(t *testing.T) {
 		if err != nil || !strings.HasPrefix(created.ShortURL, want) {
 			t.Errorf("host %s: got %q (%v), want prefix %q", host, created.ShortURL, err, want)
 		}
+	}
+}
+
+func createFrom(handler http.Handler, remote string, headers map[string]string) int {
+	req := httptest.NewRequestWithContext(
+		context.Background(), http.MethodPost, "/api/rooms", bytes.NewReader([]byte(`{"name":"Test"}`)),
+	)
+	req.Host = openHost
+	req.RemoteAddr = remote
+
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	return rec.Code
+}
+
+func TestCreateRoomRateLimitsAnonymousClients(t *testing.T) {
+	t.Parallel()
+
+	handler := newTestServer(t)
+
+	for i := range 10 {
+		code := createFrom(handler, "203.0.113.7:4000", nil)
+		if code != http.StatusCreated {
+			t.Fatalf("creation %d: got %d", i, code)
+		}
+	}
+
+	if code := createFrom(handler, "203.0.113.7:4000", nil); code != http.StatusTooManyRequests {
+		t.Fatalf("11th anonymous creation: got %d, want %d", code, http.StatusTooManyRequests)
+	}
+
+	if code := createFrom(handler, "203.0.113.8:4000", nil); code != http.StatusCreated {
+		t.Fatalf("another client: got %d, want %d", code, http.StatusCreated)
+	}
+
+	keyed := map[string]string{"Authorization": "Bearer " + operatorKey}
+	if code := createFrom(handler, "203.0.113.7:4000", keyed); code != http.StatusCreated {
+		t.Fatalf("operator key: got %d, want %d", code, http.StatusCreated)
+	}
+}
+
+func TestCreateRoomRateLimitSeesThroughTrustedProxy(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16")}
+
+	handler := routes(newTestAPI(t, cfg))
+	proxy := "172.18.0.4:51000"
+
+	for i := range 10 {
+		forwarded := map[string]string{forwardedFor: "198.51.100." + strconv.Itoa(i)}
+		if code := createFrom(handler, proxy, forwarded); code != http.StatusCreated {
+			t.Fatalf("client %d behind the proxy: got %d", i, code)
+		}
+	}
+
+	spoofer := "198.51.100.200"
+
+	for i := range 10 {
+		forwarded := map[string]string{forwardedFor: "10.9.9." + strconv.Itoa(i) + ", " + spoofer}
+		if code := createFrom(handler, proxy, forwarded); code != http.StatusCreated {
+			t.Fatalf("spoofer attempt %d: got %d", i, code)
+		}
+	}
+
+	forwarded := map[string]string{forwardedFor: "10.9.9.99, " + spoofer}
+	if code := createFrom(handler, proxy, forwarded); code != http.StatusTooManyRequests {
+		t.Fatalf("spoofed leftmost hop escaped the limit: got %d", code)
+	}
+
+	untrusted := map[string]string{forwardedFor: "198.51.100.77"}
+	for range 10 {
+		createFrom(handler, "203.0.113.50:4000", untrusted)
+	}
+
+	if code := createFrom(handler, "203.0.113.50:4000", untrusted); code != http.StatusTooManyRequests {
+		t.Fatalf("untrusted peer escaped the limit via X-Forwarded-For: got %d", code)
 	}
 }

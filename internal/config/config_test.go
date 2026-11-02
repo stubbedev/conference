@@ -205,3 +205,29 @@ func TestPublicOriginsRejects(t *testing.T) {
 		t.Fatal("accepted a schemeless public origin")
 	}
 }
+
+func TestTrustedProxies(t *testing.T) {
+	t.Setenv("TRUSTED_PROXIES", "172.18.0.0/16, 10.0.0.7, ::ffff:192.0.2.1, 172.18.5.9/16")
+
+	cfg, err := config.FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []netip.Prefix{
+		netip.MustParsePrefix("172.18.0.0/16"),
+		netip.MustParsePrefix("10.0.0.7/32"),
+		netip.MustParsePrefix("192.0.2.1/32"),
+		netip.MustParsePrefix("172.18.0.0/16"),
+	}
+	if !slices.Equal(cfg.TrustedProxies, want) {
+		t.Fatalf("got %v, want %v", cfg.TrustedProxies, want)
+	}
+
+	t.Setenv("TRUSTED_PROXIES", "traefik")
+
+	_, err = config.FromEnv()
+	if err == nil {
+		t.Fatal("accepted a hostname as a trusted proxy")
+	}
+}

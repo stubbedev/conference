@@ -32,6 +32,7 @@ func testConfig(base string, others ...string) *config.Config {
 		ExternalIPs:        nil,
 		Relay:              relay.Config{Port: 0, TLSHost: ""},
 		MaxPublishKbps:     0,
+		TrustedProxies:     nil,
 		AllowedOrigins:     nil,
 		SessionTTL:         0,
 		MaxRoomMembers:     0,
