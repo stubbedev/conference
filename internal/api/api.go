@@ -42,6 +42,9 @@ type Server struct {
 	Hub   *sfu.Hub
 	Cfg   *config.Config
 
+	// SlackClient posts the Slack slash command's follow-up messages.
+	SlackClient *http.Client
+
 	authLimiter *limiter
 }
 
@@ -51,6 +54,7 @@ func New(storage *store.Store, hub *sfu.Hub, cfg *config.Config) *Server {
 		Store:       storage,
 		Hub:         hub,
 		Cfg:         cfg,
+		SlackClient: &http.Client{Timeout: slackFollowUpTimeout},
 		authLimiter: newLimiter(authLimiterCapacity, authLimiterRefill),
 	}
 }
@@ -66,6 +70,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/rooms/{slug}", s.roomInfo)
 	mux.HandleFunc("DELETE /api/rooms/{slug}", s.deleteRoom)
 	mux.HandleFunc("POST /api/rooms/{slug}/auth", s.auth)
+
+	if s.Cfg.SlackSigningSecret != "" {
+		mux.HandleFunc("POST /api/slack/meet", s.slackMeet)
+	}
 }
 
 type configResponse struct {
@@ -118,24 +126,36 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	created, err := s.newRoom(r.Context(), req)
+	if err != nil {
+		log.Printf("api: create room: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal", "Could not create the room.")
+
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, created)
+}
+
+// newRoom persists a room for req under a fresh slug and returns the
+// one-time response carrying its key and privileged links.
+func (s *Server) newRoom(ctx context.Context, req createRoomRequest) (createRoomResponse, error) {
 	key := roomcrypt.NewKey()
 	privToken := roomcrypt.NewToken()
 
 	room, err := buildRoom(req, key, privToken)
 	if err != nil {
-		log.Printf("api: key sealing: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal", "Key sealing failed.")
-
-		return
+		return createRoomResponse{}, err
 	}
 
-	if !s.allocateSlug(r.Context(), &room, w) {
-		return
+	err = s.insertWithFreshSlug(ctx, &room)
+	if err != nil {
+		return createRoomResponse{}, err
 	}
 
 	roomKey := roomcrypt.B64(key)
 
-	writeJSON(w, http.StatusCreated, createRoomResponse{
+	return createRoomResponse{
 		Slug:       room.Slug,
 		Name:       room.Name,
 		RoomKey:    roomKey,
@@ -146,7 +166,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		ShortURL:   joinURL(s.Cfg.BaseURL, "/r/"+room.Slug),
 		BaseURL:    s.Cfg.BaseURL,
 		MaxMembers: room.MaxMembers,
-	})
+	}, nil
 }
 
 // parseCreateRoom decodes and validates the creation request body.
@@ -212,10 +232,9 @@ func buildRoom(req createRoomRequest, key []byte, privToken string) (store.Room,
 	return room, nil
 }
 
-// allocateSlug tries to insert the room under a fresh slug, retrying on
-// the (unlikely) collision. It writes the error response and returns
-// false when every attempt fails.
-func (s *Server) allocateSlug(ctx context.Context, room *store.Room, w http.ResponseWriter) bool {
+// insertWithFreshSlug inserts room under a fresh slug, retrying on the
+// (unlikely) collision.
+func (s *Server) insertWithFreshSlug(ctx context.Context, room *store.Room) error {
 	var err error
 
 	for range slugRetries {
@@ -223,14 +242,11 @@ func (s *Server) allocateSlug(ctx context.Context, room *store.Room, w http.Resp
 
 		err = s.Store.CreateRoom(ctx, *room)
 		if err == nil {
-			return true
+			return nil
 		}
 	}
 
-	log.Printf("api: allocate slug: %v", err)
-	writeError(w, http.StatusInternalServerError, "internal", "Could not allocate a room slug.")
-
-	return false
+	return fmt.Errorf("allocate slug after %d attempts: %w", slugRetries, err)
 }
 
 type roomInfoResponse struct {

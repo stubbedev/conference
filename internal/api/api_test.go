@@ -23,7 +23,27 @@ const (
 	operatorKey  = "s3cret"
 )
 
-func newTestServer(t *testing.T) http.Handler {
+func testConfig() *config.Config {
+	return &config.Config{
+		HTTPAddr:           "",
+		BaseURL:            "",
+		DBPath:             "",
+		APIKeys:            []string{operatorKey},
+		JoinOnly:           true,
+		SlackSigningSecret: "",
+		OpenCreateHosts:    []string{openHost},
+		ICEUDPPort:         0,
+		ExternalIPs:        nil,
+		Relay:              relay.Config{Port: 3478, TLSHost: ""},
+		MaxPublishKbps:     0,
+		AllowedOrigins:     nil,
+		SessionTTL:         365 * 24 * time.Hour,
+		MaxRoomMembers:     0,
+		RoomTTL:            0,
+	}
+}
+
+func newTestAPI(t *testing.T, cfg *config.Config) *api.Server {
 	t.Helper()
 
 	storage, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -40,23 +60,6 @@ func newTestServer(t *testing.T) http.Handler {
 
 	t.Cleanup(closeEngine)
 
-	cfg := &config.Config{
-		HTTPAddr:        "",
-		BaseURL:         "",
-		DBPath:          "",
-		APIKeys:         []string{operatorKey},
-		JoinOnly:        true,
-		OpenCreateHosts: []string{openHost},
-		ICEUDPPort:      0,
-		ExternalIPs:     nil,
-		Relay:           relay.Config{Port: 3478, TLSHost: ""},
-		MaxPublishKbps:  0,
-		AllowedOrigins:  nil,
-		SessionTTL:      365 * 24 * time.Hour,
-		MaxRoomMembers:  0,
-		RoomTTL:         0,
-	}
-
 	creds, err := relay.NewCredentials(cfg.Relay)
 	if err != nil {
 		t.Fatal(err)
@@ -69,12 +72,20 @@ func newTestServer(t *testing.T) http.Handler {
 		MaxPublishKbps: 0,
 	})
 
-	server := api.New(storage, hub, cfg)
+	return api.New(storage, hub, cfg)
+}
 
+func routes(server *api.Server) http.Handler {
 	mux := http.NewServeMux()
 	server.Routes(mux)
 
 	return mux
+}
+
+func newTestServer(t *testing.T) http.Handler {
+	t.Helper()
+
+	return routes(newTestAPI(t, testConfig()))
 }
 
 func do(t *testing.T, handler http.Handler, method, target, host string) *httptest.ResponseRecorder {

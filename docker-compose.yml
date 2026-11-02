@@ -37,6 +37,7 @@ services:
       ROOM_TTL_DAYS: ${ROOM_TTL_DAYS:-365}
       EXTERNAL_IPS: ${EXTERNAL_IPS}
       TURN_TLS_HOST: ${TURN_TLS_HOST}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
     volumes:
       - data:/data
     ports:

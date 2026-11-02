@@ -135,3 +135,23 @@ func TestBaseURLRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestSlackRequiresBaseURL(t *testing.T) {
+	t.Setenv("SLACK_SIGNING_SECRET", "shh")
+
+	_, err := config.FromEnv()
+	if err == nil {
+		t.Fatal("accepted SLACK_SIGNING_SECRET without BASE_URL")
+	}
+
+	t.Setenv("BASE_URL", exampleOrigin)
+
+	cfg, err := config.FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.SlackSigningSecret != "shh" {
+		t.Fatalf("got secret %q", cfg.SlackSigningSecret)
+	}
+}

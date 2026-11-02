@@ -97,6 +97,7 @@ All settings are environment variables.
 | `MAX_PUBLISH_KBPS`  | `2500`          | Upload bandwidth cap per participant                                                      |
 | `MAX_ROOM_MEMBERS`  | `16`            | Default maximum people per room                                                           |
 | `ALLOWED_ORIGINS`   | same origin     | Extra origins allowed to connect to the signaling WebSocket                               |
+| `SLACK_SIGNING_SECRET` | —            | Enables the [`/meet` Slack command](#start-meetings-from-slack); requires `BASE_URL`      |
 
 ### Who can create rooms?
 
@@ -119,6 +120,44 @@ All settings are environment variables.
 
 Old rooms are cleaned up automatically after `ROOM_TTL_DAYS`, together
 with their sessions. A room in use is never deleted.
+
+### Start meetings from Slack
+
+Type `/meet` (or `/meet Design review`) in any Slack channel and the
+server creates a room and posts its link to the channel. You also get
+the moderator link in a message only you can see.
+
+1. At [api.slack.com/apps](https://api.slack.com/apps), choose **Create
+   New App → From a manifest**, pick your workspace and paste this,
+   with your own address in `url`:
+
+   ```yaml
+   display_information:
+     name: conference
+   features:
+     slash_commands:
+       - command: /meet
+         url: https://meet.example.com/api/slack/meet
+         description: Start a meeting and post its link
+         usage_hint: "[meeting name]"
+         should_escape: false
+   oauth_config:
+     scopes:
+       bot:
+         - commands
+   ```
+
+2. **Install to Workspace**, then copy **Signing Secret** from *Basic
+   Information* into the server's `SLACK_SIGNING_SECRET` and restart it.
+   `BASE_URL` must be set too, since Slack needs full links.
+
+The server checks Slack's signature on every request and ignores
+anything older than five minutes.
+
+> [!NOTE]
+> Rooms made from Slack have no password, so the server holds their key
+> (see [How privacy works](#how-privacy-works)). The moderator link
+> reaches you through Slack, so Slack can see it too.
 
 ## How privacy works
 

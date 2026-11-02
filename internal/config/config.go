@@ -46,6 +46,11 @@ type Config struct {
 	// without a key creation would stay open to everyone anyway.
 	JoinOnly bool
 
+	// SlackSigningSecret enables the Slack slash command endpoint and
+	// authenticates its requests. Empty disables it; set, it requires
+	// BaseURL, since Slack messages need absolute links.
+	SlackSigningSecret string
+
 	// OpenCreateHosts lists hostnames where room creation stays open
 	// (no API key, create form visible) even though APIKeys/JoinOnly
 	// restrict the other domains served by the same process.
@@ -133,25 +138,29 @@ var (
 	errBaseURL   = errors.New("config: BASE_URL must be an http(s) origin such as https://meet.example.com, with no path, query or fragment")
 )
 
-var errJoinOnlyNeedsKey = errors.New("config: JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
+var (
+	errJoinOnlyNeedsKey  = errors.New("config: JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
+	errSlackNeedsBaseURL = errors.New("config: SLACK_SIGNING_SECRET requires BASE_URL; Slack messages need absolute room links")
+)
 
 // FromEnv builds a Config from the process environment.
 func FromEnv() (*Config, error) {
 	cfg := &Config{
-		HTTPAddr:        "",
-		BaseURL:         "",
-		DBPath:          env("DB_PATH", defaultDBPath),
-		APIKeys:         nil,
-		JoinOnly:        false,
-		OpenCreateHosts: nil,
-		ICEUDPPort:      defaultICEUDPPort,
-		ExternalIPs:     nil,
-		Relay:           relay.Config{Port: defaultTURNPort, TLSHost: ""},
-		MaxPublishKbps:  defaultMaxPublishKbps,
-		AllowedOrigins:  nil,
-		SessionTTL:      defaultSessionDays * hoursPerDay * time.Hour,
-		MaxRoomMembers:  defaultMaxRoomMembers,
-		RoomTTL:         0,
+		HTTPAddr:           "",
+		BaseURL:            "",
+		DBPath:             env("DB_PATH", defaultDBPath),
+		APIKeys:            nil,
+		JoinOnly:           false,
+		SlackSigningSecret: "",
+		OpenCreateHosts:    nil,
+		ICEUDPPort:         defaultICEUDPPort,
+		ExternalIPs:        nil,
+		Relay:              relay.Config{Port: defaultTURNPort, TLSHost: ""},
+		MaxPublishKbps:     defaultMaxPublishKbps,
+		AllowedOrigins:     nil,
+		SessionTTL:         defaultSessionDays * hoursPerDay * time.Hour,
+		MaxRoomMembers:     defaultMaxRoomMembers,
+		RoomTTL:            0,
 	}
 
 	err := applyHTTPConfig(cfg)
@@ -171,6 +180,10 @@ func FromEnv() (*Config, error) {
 
 	if cfg.JoinOnly && len(cfg.APIKeys) == 0 {
 		return nil, errJoinOnlyNeedsKey
+	}
+
+	if cfg.SlackSigningSecret != "" && cfg.BaseURL == "" {
+		return nil, errSlackNeedsBaseURL
 	}
 
 	return cfg, nil
@@ -194,6 +207,7 @@ func applyHTTPConfig(cfg *Config) error {
 
 	cfg.APIKeys = splitList(env("API_KEYS", ""))
 	cfg.JoinOnly = envBool("JOIN_ONLY")
+	cfg.SlackSigningSecret = env("SLACK_SIGNING_SECRET", "")
 
 	for _, host := range splitList(env("OPEN_CREATE_HOSTS", "")) {
 		cfg.OpenCreateHosts = append(cfg.OpenCreateHosts, strings.ToLower(host))
