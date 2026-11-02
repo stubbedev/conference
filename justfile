@@ -7,7 +7,7 @@ default:
 
 # vet + test + lint + web build + go build + browser smoke test (what
 # ci.yml runs).
-check: vet test lint web build e2e
+check: vet test lint brand web build e2e
 
 vet:
     go vet ./...
@@ -65,6 +65,10 @@ e2e:
 # web/public from web/brand (needs Inkscape, in the dev shell).
 icons:
     node web/brand/brand.mjs
+
+# Fail when web/public's brand assets no longer match web/brand.
+brand:
+    node web/brand/brand.mjs --check
 
 # Run the server on :8080 serving the built UI (run `just web` first).
 run:

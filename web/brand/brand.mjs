@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import site from './site.json' with { type: 'json' }
@@ -113,13 +113,70 @@ function rasterize(svg, target, width, workDir) {
   renameSync(staging, target)
 }
 
-writeAtomic(publicPath(site.images.logo), themedMark(marks.logo))
-writeAtomic(publicPath(site.images.favicon), themedMark(marks.favicon))
+const touchIconSize = 180
 
-const workDir = mkdtempSync(path.join(tmpdir(), 'conference-brand-'))
-try {
-  rasterize(touchIcon(180), publicPath(site.images.touchIcon), 180, workDir)
-  rasterize(card(site.card), publicPath(site.images.card), site.card.width, workDir)
-} finally {
-  rmSync(workDir, { recursive: true, force: true })
+const vectors = [
+  { url: site.images.logo, svg: themedMark(marks.logo) },
+  { url: site.images.favicon, svg: themedMark(marks.favicon) },
+]
+
+const rasters = [
+  { url: site.images.touchIcon, svg: touchIcon(touchIconSize), width: touchIconSize, height: touchIconSize },
+  { url: site.images.card, svg: card(site.card), width: site.card.width, height: site.card.height },
+]
+
+const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+function pngSize(file) {
+  const bytes = readFileSync(file)
+  if (!bytes.subarray(0, pngSignature.length).equals(pngSignature)) {
+    throw new Error(`${file} is not a PNG`)
+  }
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
+}
+
+function staleOutputs() {
+  const stale = []
+  for (const { url, svg } of vectors) {
+    let current = ''
+    try {
+      current = readFileSync(publicPath(url), 'utf8')
+    } catch (err) {
+      stale.push(`${url}: ${err.message}`)
+      continue
+    }
+    if (current !== svg) stale.push(`${url}: differs from what web/brand generates`)
+  }
+  for (const { url, width, height } of rasters) {
+    try {
+      const size = pngSize(publicPath(url))
+      if (size.width !== width || size.height !== height) {
+        stale.push(`${url}: ${size.width}x${size.height}, want ${width}x${height}`)
+      }
+    } catch (err) {
+      stale.push(`${url}: ${err.message}`)
+    }
+  }
+  return stale
+}
+
+function generate() {
+  for (const { url, svg } of vectors) writeAtomic(publicPath(url), svg)
+
+  const workDir = mkdtempSync(path.join(tmpdir(), 'conference-brand-'))
+  try {
+    for (const { url, svg, width } of rasters) rasterize(svg, publicPath(url), width, workDir)
+  } finally {
+    rmSync(workDir, { recursive: true, force: true })
+  }
+}
+
+if (process.argv.includes('--check')) {
+  const stale = staleOutputs()
+  if (stale.length > 0) {
+    console.error(`brand assets in web/public are out of date; run \`just icons\`:\n  ${stale.join('\n  ')}`)
+    process.exit(1)
+  }
+} else {
+  generate()
 }
