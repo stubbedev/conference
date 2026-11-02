@@ -133,14 +133,14 @@ func splitList(v string) []string {
 }
 
 var (
-	errPortRange = errors.New("config: port out of range 1-65535")
-	errPortClash = errors.New("config: ports must differ")
-	errBaseURL   = errors.New("config: BASE_URL must be an http(s) origin such as https://meet.example.com, with no path, query or fragment")
+	errPortRange = errors.New("port out of range 1-65535")
+	errPortClash = errors.New("ports must differ")
+	errBaseURL   = errors.New("BASE_URL must be an http(s) origin such as https://meet.example.com, with no path, query or fragment")
 )
 
 var (
-	errJoinOnlyNeedsKey  = errors.New("config: JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
-	errSlackNeedsBaseURL = errors.New("config: SLACK_SIGNING_SECRET requires BASE_URL; Slack messages need absolute room links")
+	errJoinOnlyNeedsKey  = errors.New("JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
+	errSlackNeedsBaseURL = errors.New("SLACK_SIGNING_SECRET requires BASE_URL; Slack messages need absolute room links")
 )
 
 // FromEnv builds a Config from the process environment.
