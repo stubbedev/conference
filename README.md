@@ -1,108 +1,186 @@
-# conference
+<p align="center">
+  <img src="docs/logo.svg" width="96" height="96" alt="">
+</p>
 
-Self-hosted video meetings with a Google-Meets-style flow: create a room,
-share the short link, talk. One Go binary serves the WebRTC SFU, signaling,
-the REST API and the web UI — and it only ever relays ciphertext, because
-media and chat are encrypted end-to-end in the browser.
+<h1 align="center">conference</h1>
 
-## Features
+<p align="center">
+  Private video meetings you host yourself.<br>
+  Create a room, share the link, talk. Nobody in between can see or hear you, not even the server.
+</p>
 
-- **End-to-end encrypted media and chat.** Every room has a 256-bit key.
-  Video and audio frames are encrypted with a WebRTC Encoded Transform
-  (AES-CTR) and chat messages with AES-GCM, both derived from the room key
-  inside your browser. The server never holds media keys for password rooms
-  and relays ciphertext it cannot read.
-- **Meet-style room flow.** Create a room, copy the short link
-  (`/r/abc-def-ghi`), share it. Optionally set a password: the short link
-  then asks for it, while a **privileged link** (token + key carried in the
-  URL fragment, which browsers never send to the server) opens the room
-  without one.
-- **API-first rooms.** Rooms are created over REST and are immutable once
-  created — even the operator can only delete them, not edit them.
-- **Screen sharing**, mic/camera controls with per-member state,
-  end-to-end-encrypted chat.
-- **Local-first recording** (host-initiated). The host composites the
-  call — every tile plus one mixed audio track — inside their own
-  browser and downloads a video file on stop. The layout mirrors what
-  the recorder sees: a pinned tile fills the frame with everyone else
-  in a strip, and screen shares are pinned automatically. The server
-  only announces that a recording is running (the badge everyone
-  sees); the media itself never leaves the recorder, keeping the
-  promise intact. Long calls stream to the origin-private file system,
-  so memory stays flat, and the container follows the browser (WebM on
-  Chrome/Firefox, MP4 on Safari).
-- **Galène-style SFU.** One upstream peer connection per publisher, one
-  downstream connection per subscriber, trickle ICE, keyframe requests,
-  NACK/receiver-report interceptors and a REMB bandwidth ceiling — all on a
-  single UDP port.
-- **Built-in TURN relay.** Members whose network blocks UDP to the SFU
-  connect through TURN over UDP, TCP or TLS on 443, served by the same
-  binary: no coturn, no third-party STUN. Credentials are minted per
-  member in the signaling welcome and stop working when the member
-  leaves, and the relay only forwards to the SFU itself, so it cannot be
-  abused as an open proxy.
-- **One binary.** SQLite storage (pure Go, no CGO), the web UI embedded.
+---
 
-## Quick start
+## What you get
+
+- 🔒 **Private by design.** Video, audio and chat are encrypted in your
+  browser before they leave it. The server only passes along scrambled
+  data it cannot read.
+- 🔗 **One link to join.** Rooms get a short, readable link like
+  `/r/abc-def-ghi`. No accounts, no apps, no installs: it runs in the
+  browser.
+- 🔑 **Optional room password.** Lock a room with a password, or hand
+  the host a special link that skips the password and adds moderator
+  controls.
+- 🖥️ **Screen sharing and chat**, with mute and camera controls for
+  every participant.
+- 🎥 **Recording that stays with you.** The host can record the meeting
+  in their own browser and download the video afterwards. The recording
+  never touches the server, and everyone sees a badge while it runs.
+- 🌐 **Works on tricky networks.** A built-in relay gets people through
+  firewalls and corporate networks, including over port 443.
+- 📦 **One small program.** A single binary (or Docker image) with its
+  own database. No extra services to run.
+
+## How to use it
+
+1. **Create a room** on the home page (or through the [API](#http-api)).
+   Give it a name and, if you like, a password.
+2. **Share the link.** Send the short link to everyone who should join.
+   Keep the *privileged link* for yourself: it opens the room without
+   the password and lets you mute, stop cameras or remove people.
+3. **Join.** People open the link, pick their camera and microphone, type
+   the password if the room has one, and they are in.
+
+> [!TIP]
+> The room key travels in the part of the link after `#`, which browsers
+> never send to any server. Share the privileged link carefully: anyone
+> who has it is a moderator.
+
+## Run your own server
+
+You need a server with a public IP, a domain name, and Docker.
 
 ```bash
-cp .env.example .env        # set BASE_URL, TURN_TLS_HOST, ACME_EMAIL, API_KEYS, EXTERNAL_IPS
+cp .env.example .env        # fill in BASE_URL, TURN_TLS_HOST, ACME_EMAIL, API_KEYS, EXTERNAL_IPS
 docker compose up -d
 ```
 
-Traefik terminates TLS and routes `BASE_URL` to the server, and
-`TURN_TLS_HOST` (a second DNS name for the same host) to the TURN relay.
-UDP port 5000 carries the WebRTC ICE mux and 3478/udp+tcp the TURN relay;
-all three must stay reachable. Rooms live in SQLite under the `data`
-volume.
+That's it. Traefik fetches TLS certificates and routes `BASE_URL` to the
+app and `TURN_TLS_HOST` (a second DNS name pointing at the same server)
+to the relay. Make sure these ports are open:
 
-Or run it bare:
+| Port         | Used for                       |
+| ------------ | ------------------------------ |
+| 443/tcp      | the website and relay over TLS |
+| 5000/udp     | video and audio                |
+| 3478/udp+tcp | the network relay (TURN)       |
+
+Rooms are stored in SQLite under the `data` volume.
+
+Prefer running it without Docker?
 
 ```bash
 go build ./cmd/server
 BASE_URL=meet.example.com API_KEYS=s3cret EXTERNAL_IPS=203.0.113.10 ./conference
 ```
 
-## Configuration (environment)
+### Settings
 
-| Variable           | Default                  | Meaning                                          |
-| ------------------ | ------------------------ | ------------------------------------------------ |
-| `PORT`             | `8080`                   | HTTP listen port                                 |
-| `BIND`             | all interfaces           | Listen host                                      |
-| `BASE_URL`         | —                        | Public origin, used in created links             |
-| `DB_PATH`          | `conference.db`          | SQLite database path                             |
-| `API_KEYS`         | empty                    | Comma-separated bearer keys for room creation/deletion; empty = anyone may create |
-| `JOIN_ONLY`        | `false`                  | Hide room creation on the landing page (join-only); requires `API_KEYS` |
-| `OPEN_CREATE_HOSTS` | —                        | Hostnames where anyone may create rooms (no key, create form shown) despite `API_KEYS`/`JOIN_ONLY` |
-| `ROOM_TTL_DAYS`    | `365`                    | Rooms older than this many days are deleted hourly; live rooms are skipped; `0` keeps rooms forever |
-| `ICE_UDP_PORT`     | `5000`                   | Single UDP port for all WebRTC traffic           |
-| `EXTERNAL_IPS`     | —                        | Comma-separated public IPs advertised for ICE (NAT) |
-| `TURN_PORT`        | `3478`                   | UDP and TCP port of the built-in TURN relay      |
-| `TURN_TLS_HOST`    | —                        | Hostname whose port 443 terminates TLS and forwards to `TURN_PORT`/tcp; adds a `turns:` URL |
-| `MAX_PUBLISH_KBPS` | `2500`                   | REMB ceiling per publisher                       |
-| `MAX_ROOM_MEMBERS` | `16`                     | Default room member limit                        |
-| `ALLOWED_ORIGINS`  | same-origin              | Extra origins allowed on the signaling WebSocket |
+All settings are environment variables.
+
+| Variable            | Default         | What it does                                                                              |
+| ------------------- | --------------- | ----------------------------------------------------------------------------------------- |
+| `PORT`              | `8080`          | HTTP listen port                                                                          |
+| `BIND`              | all interfaces  | Listen host                                                                               |
+| `BASE_URL`          | —               | Public address, used in the links rooms hand out                                          |
+| `DB_PATH`           | `conference.db` | SQLite database path                                                                      |
+| `API_KEYS`          | empty           | Comma-separated keys needed to create, list and delete rooms; empty means anyone may create |
+| `JOIN_ONLY`         | `false`         | Hide room creation on the home page so people can only join; requires `API_KEYS`          |
+| `OPEN_CREATE_HOSTS` | —               | Hostnames where anyone may create rooms despite `API_KEYS`/`JOIN_ONLY`                    |
+| `ROOM_TTL_DAYS`     | `365`           | Delete rooms older than this (checked hourly, live rooms are skipped); `0` keeps them forever |
+| `ICE_UDP_PORT`      | `5000`          | The single UDP port for all video and audio                                               |
+| `EXTERNAL_IPS`      | —               | Comma-separated public IPs to advertise when behind NAT                                   |
+| `TURN_PORT`         | `3478`          | UDP and TCP port of the built-in relay                                                    |
+| `TURN_TLS_HOST`     | —               | Hostname whose port 443 forwards to the relay over TLS                                    |
+| `MAX_PUBLISH_KBPS`  | `2500`          | Upload bandwidth cap per participant                                                      |
+| `MAX_ROOM_MEMBERS`  | `16`            | Default maximum people per room                                                           |
+| `ALLOWED_ORIGINS`   | same origin     | Extra origins allowed to connect to the signaling WebSocket                               |
+
+### Who can create rooms?
+
+- **Anyone** (default): leave `API_KEYS` empty.
+- **Only people or tools with a key:** set `API_KEYS`. The home page asks
+  for the key when creating a room.
+- **Nobody from the website, rooms come only from your automations:** set
+  `API_KEYS` **and** `JOIN_ONLY=true`. The home page then only offers
+  joining. The server refuses to start with `JOIN_ONLY` but no
+  `API_KEYS`, since creation would be open anyway.
+- **Mixed, per domain:** when one server answers several domains,
+  `OPEN_CREATE_HOSTS` lets anyone create rooms on the listed hosts while
+  the rest stay locked:
+
+  ```bash
+  API_KEYS=s3cret JOIN_ONLY=true OPEN_CREATE_HOSTS=stubbe.dev ./conference
+  ```
+
+  All domains share one database, so links work on any of them.
+
+Old rooms are cleaned up automatically after `ROOM_TTL_DAYS`, together
+with their sessions. A room in use is never deleted.
+
+## How privacy works
+
+- Every room has its own 256-bit key. Your browser uses it to encrypt
+  each video and audio frame (AES-CTR, in a WebRTC Encoded Transform) and
+  each chat message (AES-GCM) before sending it.
+- **Password rooms:** the server never learns the key. It stores only a
+  PBKDF2 proof of the password and the room key locked (AES-GCM) with
+  that password. Your browser checks the password and unlocks the key
+  itself.
+- **Rooms without a password:** the server hands the key to whoever
+  joins. Traffic is still protected from anyone on the network, but not
+  from whoever runs the server. Use a password if that matters to you.
+- **Privileged links** carry the key after the `#`, which browsers never
+  send to a server.
+- Joining is authorized separately from the media key, through a session
+  issued by `/auth`.
+
+<details>
+<summary>Technical details</summary>
+
+- The frame key is derived from the room key with HKDF. Each frame
+  carries its own counter block, so receivers never depend on local
+  timing.
+- Only the codec header the RTP layer and hardware decoders must read
+  stays in the clear: the 10-byte VP8 keyframe header (frame tag, start
+  code, dimensions), the 3-byte VP8 delta frame tag, and the 1-byte Opus
+  TOC. Video is pinned to VP8, because H.264 and AV1 packetizers parse
+  the payload and cannot carry ciphertext.
+- The encryption worker is TypeScript compiled against the WebWorker
+  typings (`web/tsconfig.worker.json`), so calling an encoded-frame API a
+  browser does not have fails the build instead of silently dropping
+  every frame.
+- The relay (TURN) mints credentials per member in the signaling welcome
+  and revokes them when the member leaves. It only forwards to the SFU
+  itself, so it cannot be abused as an open proxy.
+- Recording composites every tile plus one mixed audio track in the
+  host's browser and mirrors the host's layout (pinned tile large, others
+  in a strip, screen shares pinned automatically). Long calls stream to
+  the origin-private file system so memory stays flat. The container
+  follows the browser: WebM on Chrome and Firefox, MP4 on Safari.
+
+</details>
 
 ## HTTP API
 
-Everything lives under `/api` on the same origin. Creation, listing and
-deletion require a bearer key when `API_KEYS` is set.
+Everything lives under `/api` on the same address. Creating, listing and
+deleting rooms requires a key when `API_KEYS` is set.
 
-### Creating rooms from automations
+### Create a room from a script
 
 ```bash
-# One-time: mint an operator key and put it in the server's API_KEYS.
+# Once: make a key and add it to the server's API_KEYS.
 openssl rand -base64 32
 
-# Create a password-protected, named room.
+# Create a named, password-protected room.
 curl -X POST https://meet.example.com/api/rooms \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name":"Standup","password":"hunter2","maxMembers":12}'
 ```
 
-The response carries everything needed to hand out links (rooms are
-immutable; this is the only time the key and token are revealed):
+The response has everything you need to hand out links:
 
 ```json
 {
@@ -119,128 +197,99 @@ immutable; this is the only time the key and token are revealed):
 }
 ```
 
-- **Public link**: `shortUrl` — or `${baseUrl}${shortPath}` when
-  `BASE_URL` is unset, prefixed with your own origin. Share freely; a
-  password room asks for the password in the browser.
-- **Privileged link**: `privUrl` — or `${baseUrl}${privPath}#k=${roomKey}`.
-  Opens without the password and carries moderator rights — mute, stop
-  camera or screen share, kick. Keep it to the host.
-- `roomKey` and `privToken` are shown exactly once. Store both to rebuild
-  the privileged link later; the server cannot re-mint them.
+- **Public link:** `shortUrl`, or `${baseUrl}${shortPath}` when
+  `BASE_URL` is unset (prefixed with your own address). Share it freely;
+  a password room asks for the password in the browser.
+- **Privileged link:** `privUrl`, or `${baseUrl}${privPath}#k=${roomKey}`.
+  Opens without the password and gives moderator rights: mute, stop
+  camera or screen share, remove people. Keep it to the host.
 
-An hourly janitor deletes rooms older than `ROOM_TTL_DAYS` (a year by
-default, matching the session lifetime) along with their sessions,
-skipping any room with a live call. Set `ROOM_TTL_DAYS=0` to keep rooms
-forever; rooms can always be deleted explicitly with
-`DELETE /api/rooms/{slug}`.
+> [!IMPORTANT]
+> `roomKey` and `privToken` are shown **only once**. Rooms can't be
+> changed after creation, and the server can't recreate these values.
+> Store both if you need to rebuild the privileged link later.
 
-### Auth tokens
+### Keys and sessions
 
-- **API keys** are static operator secrets you mint yourself
-  (`openssl rand -base64 32`) and list in `API_KEYS`. Send them as
-  `Authorization: Bearer <key>` or `X-Api-Key`. They gate only room
-  creation, listing and deletion.
-- **Privileged link tokens** (`privToken`) are minted by room creation
-  and stored only as a hash. The browser exchanges one for a moderator
-  session automatically when someone opens a privileged link.
-- **Join sessions** are minted by `POST /api/rooms/{slug}/auth` — send
-  `{"token": …}` (privileged link), an empty body (open room; returns
-  the room key) or `{"proof": base64url(PBKDF2-SHA256(password,
-  authSalt), 210000 iterations)}` (password room; returns the room key
-  sealed with AES-GCM under the password). Sessions are opaque,
-  room-scoped and long-lived (a year by default); automations normally
-  never need them, since the links above carry everything.
-
-### Public, join-only deployments
-
-Set `API_KEYS` **and** `JOIN_ONLY=true`: the landing page then offers
-joining only, and rooms exist solely through the API above. (The server
-refuses to start with `JOIN_ONLY` but no `API_KEYS`, which would leave
-creation open anyway.)
-
-### Mixed policies on one server
-
-When one server answers several domains, `OPEN_CREATE_HOSTS` exempts
-individual hosts from `API_KEYS`/`JOIN_ONLY`:
-
-```bash
-API_KEYS=s3cret JOIN_ONLY=true OPEN_CREATE_HOSTS=stubbe.dev ./conference
-```
-
-Visitors on `stubbe.dev` get the create form and need no key, while every
-other host the server answers stays join-only with keyed creation. The
-hosts share one room database, so links work on any of the domains.
+- **API keys** are secrets you make yourself and list in `API_KEYS`.
+  Send one as `Authorization: Bearer <key>` or `X-Api-Key`. They are
+  only needed to create, list and delete rooms.
+- **Privileged link tokens** (`privToken`) are created with the room and
+  stored only as a hash. The browser trades one for a moderator session
+  when someone opens a privileged link.
+- **Join sessions** come from `POST /api/rooms/{slug}/auth`. Send
+  `{"token": …}` for a privileged link, an empty body for an open room
+  (returns the room key), or `{"proof": base64url(PBKDF2-SHA256(password,
+  authSalt), 210000 iterations)}` for a password room (returns the room
+  key sealed with AES-GCM under the password). Sessions are tied to one
+  room and last a year by default. Automations normally never need them,
+  since the links carry everything.
 
 ### Other endpoints
 
-- `GET /api/config` — whether creation needs a key, whether the landing
-  page is join-only.
-- `GET /api/rooms/{slug}` — public room info; password rooms include
-  the salts the browser needs to compute a proof.
-- `GET /api/rooms` / `DELETE /api/rooms/{slug}` — operator endpoints (API key).
+| Endpoint                   | Purpose                                                           |
+| -------------------------- | ----------------------------------------------------------------- |
+| `GET /api/config`          | Whether creating needs a key, and whether the home page is join-only |
+| `GET /api/rooms/{slug}`    | Public room info; password rooms include the salts the browser needs |
+| `GET /api/rooms`           | List rooms (API key)                                              |
+| `DELETE /api/rooms/{slug}` | Delete a room (API key)                                           |
 
-## How the end-to-end encryption works
+## Under the hood
 
-- Joining is authorized by a session from `/auth`; media keys are separate.
-- **Password rooms** are server-blind: the server stores only a PBKDF2
-  proof of the password and the room key sealed (AES-GCM) under that
-  password. The browser computes the proof, unseals the key locally.
-- **Open rooms** have no password, so the server hands the room key to
-  joiners; the media is still protected against network eavesdroppers, but
-  not against the server operator.
-- **Privileged links** carry the key in the URL fragment (`#k=…`), which
-  browsers never transmit.
-- Frames are encrypted with AES-CTR in an Encoded Transform worker (key
-  derived via HKDF from the room key); chat with AES-GCM. Each frame carries
-  its own counter block, so the receiver never depends on local timing.
-- Only the codec header the RTP layer and hardware decoders must read stays
-  in the clear: the 10-byte VP8 keyframe header (frame tag, start code,
-  dimensions), the 3-byte VP8 delta frame tag, the 1-byte Opus TOC. Video
-  is pinned to VP8, because H.264 and AV1 packetizers parse the payload
-  and cannot carry ciphertext.
-- The worker is TypeScript compiled against the WebWorker typings
-  (`web/tsconfig.worker.json`), so calling an encoded-frame API a browser
-  does not have fails the build instead of silently dropping every frame.
+One Go binary serves the website, the REST API, signaling and a
+Galène-style SFU (selective forwarding unit):
+
+- One upstream connection per publisher and one downstream connection per
+  viewer, trickle ICE, keyframe requests, NACK and receiver-report
+  interceptors, and a REMB bandwidth ceiling, all on a single UDP port.
+- Simulcast cameras, with each viewer getting the layer that fits.
+- A built-in TURN relay over UDP, TCP and TLS on 443. No coturn and no
+  third-party STUN.
+- SQLite storage in pure Go (no CGO), with the web UI embedded.
 
 ## Development
 
 ```bash
 just check    # vet + test + lint + web build + go build + browser smoke (what CI runs)
-just e2e      # the browser smoke test alone
+just e2e      # only the browser smoke test
 just run      # local server with a scratch database
 just release-preview
 ```
 
-The Go code must stay clean under `golangci-lint` with every linter enabled
-(`default: all`) and under `gopls`. `go test ./...` includes a full WebRTC
-media loopback test through the hub and a check that forwarded RTP header
-extensions are renumbered to the viewer's extmap.
+The Go code must stay clean under `golangci-lint` with every linter
+enabled (`default: all`) and under `gopls`. `go test ./...` includes a
+full WebRTC media loopback test through the hub, and a check that
+forwarded RTP header extensions are renumbered to each viewer's extmap.
 
 `just e2e` (`web/e2e/smoke.mjs`) starts a server built with the race
-detector, points headless Chromes with fake cameras at one room and
-asserts that both receive the other's audio and video through the E2EE
-transform with zero dropped frames and exactly one tile per participant.
-It then pins tiles, checks simulcast layer switching, drops a browser's
-signaling and restarts the server mid-call (both must reconnect),
-records, and finally forces a call through the TURN relay over UDP and
-TCP. It needs Chrome on `PATH` (or `CHROME=/path/to/chrome`) and a
-non-loopback IPv4 address, and is the gate that catches what type checks
-and unit tests cannot: a pipeline that connects fine and transmits
-nothing.
+detector and points headless Chromes with fake cameras at one room. It
+checks that both browsers receive each other's audio and video through
+the encryption transform with zero dropped frames and exactly one tile
+per participant. Then it pins tiles, checks simulcast layer switching,
+drops a browser's signaling and restarts the server mid-call (both must
+reconnect), records, and forces a call through the TURN relay over UDP
+and TCP. It needs Chrome on `PATH` (or `CHROME=/path/to/chrome`) and a
+non-loopback IPv4 address. It is the gate that catches what type checks
+and unit tests can't: a call that connects fine and transmits nothing.
 
-## Monitoring production
+### Monitoring a deployment
 
 `.github/workflows/monitor.yml` places real calls against a deployment
 every 15 minutes (`web/e2e/monitor.mjs`): direct, through TURN over UDP
 and TCP, and over TLS on 443 when `TURN_TLS_HOST` is set. Each run
 creates its rooms with an operator key and deletes them afterwards. A
-failed run is the alert: GitHub notifies about failed scheduled
-workflows. To enable it, add a dedicated key to the server's `API_KEYS`,
-then set the repository variable `MONITOR_URL` (e.g.
-`https://meet.example.com`) and the secret `MONITOR_API_KEY`. Without
-`MONITOR_URL` the workflow does nothing. GitHub pauses scheduled
-workflows in repositories without activity for 60 days.
+failed run is the alert, since GitHub notifies about failed scheduled
+workflows.
+
+To turn it on:
+
+1. Add a dedicated key to the server's `API_KEYS`.
+2. Set the repository variable `MONITOR_URL` (e.g. `https://meet.example.com`).
+3. Set the repository secret `MONITOR_API_KEY`.
+
+Without `MONITOR_URL` the workflow does nothing. GitHub pauses scheduled
+workflows in repositories with no activity for 60 days.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
