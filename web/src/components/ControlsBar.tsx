@@ -66,28 +66,30 @@ export const ControlsBar = memo(function ControlsBar({
   onToggleFullscreen,
   children,
 }: ControlsBarProps) {
-  const [visible, setVisible] = useState(true)
+  const [revealed, setRevealed] = useState(true)
+  const visible = !fullscreen || revealed
   const hideTimer = useRef<number | undefined>(undefined)
 
-  const show = useCallback(() => {
-    setVisible(true)
+  const armHide = useCallback(() => {
     window.clearTimeout(hideTimer.current)
-    hideTimer.current = window.setTimeout(() => setVisible(false), AUTO_HIDE_MS)
+    hideTimer.current = window.setTimeout(() => setRevealed(false), AUTO_HIDE_MS)
   }, [])
 
+  const show = useCallback(() => {
+    setRevealed(true)
+    armHide()
+  }, [armHide])
+
   useEffect(() => {
-    if (!fullscreen) {
-      window.clearTimeout(hideTimer.current)
-      setVisible(true)
-      return
-    }
-    show()
+    if (!fullscreen) return
+    armHide()
     window.addEventListener('pointermove', show)
     return () => {
       window.clearTimeout(hideTimer.current)
       window.removeEventListener('pointermove', show)
+      setRevealed(true)
     }
-  }, [fullscreen, show])
+  }, [fullscreen, armHide, show])
 
   return (
     <footer

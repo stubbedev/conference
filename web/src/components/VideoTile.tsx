@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { MicOff, MonitorUp, Pin, PinOff, VideoOff, VolumeX } from 'lucide-react'
 
 import { useLatest } from '@/hooks/latest'
+import { useTileDebug } from '@/hooks/tileDebug'
 import { Hint } from '@/components/Hint'
 import {
   aspectRatioChanged,
@@ -13,6 +14,7 @@ import {
 import { cn } from '@/lib/utils'
 
 interface VideoTileProps {
+  tileKey: string
   stream: MediaStream | null
   name: string
   /** Local tile: no audio sink is rendered (video is always element-muted). */
@@ -24,26 +26,9 @@ interface VideoTileProps {
   sinkId?: string
   volume?: number
   pinned?: boolean
-  onTogglePin?: () => void
+  onTogglePin?: (tileKey: string) => void
   compact?: boolean
-  onAspectRatio?: (ratio: number) => void
-}
-
-// Debug overlays show per-tile playback diagnostics: rendered and
-// dropped frame counters plus element state. When a tile freezes these
-// numbers say which side failed — counters still climbing means frames
-// decode but the picture stopped compositing; counters frozen means
-// frames stopped arriving or decrypting.
-//
-// Enabled by "debug=1" anywhere in the URL (the room key lives in the
-// #fragment, so a trailing ?debug=1 typed after it never reaches
-// location.search), or toggled at runtime by tapping the room name
-// five times.
-let tileDebugOn = typeof location !== 'undefined' && /debug=1/.test(location.href)
-
-export function toggleTileDebug(): void {
-  tileDebugOn = !tileDebugOn
-  window.dispatchEvent(new CustomEvent('tile-debug'))
+  onAspectRatio?: (tileKey: string, ratio: number) => void
 }
 
 // Mobile browsers suspend decoding in ways that leave elements paused
@@ -72,6 +57,7 @@ function watchVisibility(element: HTMLMediaElement, start: () => void): () => vo
 // a dedicated <audio> element that retries on the next user gesture if
 // the initial play is refused.
 export const VideoTile = memo(function VideoTile({
+  tileKey,
   stream,
   name,
   muted,
@@ -92,7 +78,7 @@ export const VideoTile = memo(function VideoTile({
   const onAspectRatioRef = useLatest(onAspectRatio)
   const [audioBlocked, setAudioBlocked] = useState(false)
   const [debugStats, setDebugStats] = useState('')
-  const [debugOn, setDebugOn] = useState(tileDebugOn)
+  const debugOn = useTileDebug()
   const speaking = useIsSpeaking(stream)
   const { video: videoStream, audio: audioStream } = useSplitStreams(stream)
 
@@ -109,7 +95,7 @@ export const VideoTile = memo(function VideoTile({
         video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 0
       if (aspectRatioChanged(ratioRef.current, ratio)) {
         ratioRef.current = ratio
-        onAspectRatioRef.current?.(ratio)
+        onAspectRatioRef.current?.(tileKey, ratio)
       }
     }
     const onLoadedMetadata = () => {
@@ -134,7 +120,7 @@ export const VideoTile = memo(function VideoTile({
       // camera track keeps consuming frames on some mobile browsers.
       video.srcObject = null
     }
-  }, [videoStream, onAspectRatioRef])
+  }, [videoStream, onAspectRatioRef, tileKey])
 
   useEffect(() => {
     if (muted) return
@@ -182,12 +168,6 @@ export const VideoTile = memo(function VideoTile({
 
   const hideVideo = Boolean(camOff && !sharing)
   const speakingNow = speaking && !micOff && !sharing
-
-  useEffect(() => {
-    const sync = () => setDebugOn(tileDebugOn)
-    window.addEventListener('tile-debug', sync)
-    return () => window.removeEventListener('tile-debug', sync)
-  }, [])
 
   useEffect(() => {
     if (!debugOn) return
@@ -269,7 +249,7 @@ export const VideoTile = memo(function VideoTile({
         <Hint label={pinned ? 'Unpin' : 'Pin to main view'} side="left">
           <button
             type="button"
-            onClick={onTogglePin}
+            onClick={() => onTogglePin(tileKey)}
             aria-label={pinned ? 'Unpin' : 'Pin to main view'}
             className={cn(
               'absolute top-2 right-2 grid size-7 cursor-pointer place-items-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-opacity hover:bg-black/80',

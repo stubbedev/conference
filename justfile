@@ -7,7 +7,7 @@ default:
 
 # vet + test + lint + web build + go build + browser smoke test (what
 # ci.yml runs).
-check: vet test lint brand web build e2e
+check: vet test lint brand web web-lint build e2e
 
 vet:
     go vet ./...
@@ -21,6 +21,10 @@ lint:
 # Build the web UI into web/dist/app; the server binary embeds it.
 web:
     cd web && npm ci && npm run build
+
+# oxlint over the web UI; any warning fails.
+web-lint:
+    cd web && npm run lint
 
 build:
     CGO_ENABLED=0 go build -o /dev/null ./cmd/server

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 export interface DeviceGroups {
   mics: MediaDeviceInfo[]
@@ -179,29 +179,34 @@ function sameDeviceGroups(a: DeviceGroups, b: DeviceGroups): boolean {
   )
 }
 
+async function readDeviceGroups(): Promise<DeviceGroups | null> {
+  if (!navigator.mediaDevices?.enumerateDevices) return null
+  try {
+    const all = await navigator.mediaDevices.enumerateDevices()
+    return {
+      mics: dedupeDevices(all.filter((d) => d.kind === 'audioinput' && d.deviceId !== '')),
+      cams: dedupeCameras(dedupeDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId !== ''))),
+      speakers: dedupeDevices(all.filter((d) => d.kind === 'audiooutput' && d.deviceId !== '')),
+    }
+  } catch {
+    return null
+  }
+}
+
 export function useMediaDevices(): { devices: DeviceGroups; refresh: () => Promise<void> } {
   const [groups, setGroups] = useState<DeviceGroups>({ mics: [], cams: [], speakers: [] })
 
-  const refresh = useCallback(async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) return
-    try {
-      const all = await navigator.mediaDevices.enumerateDevices()
-      const next: DeviceGroups = {
-        mics: dedupeDevices(all.filter((d) => d.kind === 'audioinput' && d.deviceId !== '')),
-        cams: dedupeCameras(dedupeDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId !== ''))),
-        speakers: dedupeDevices(all.filter((d) => d.kind === 'audiooutput' && d.deviceId !== '')),
-      }
-      setGroups((prev) => (sameDeviceGroups(prev, next) ? prev : next))
-    } catch {
-      return
-    }
+  const apply = useCallback((next: DeviceGroups | null) => {
+    if (next) setGroups((prev) => (sameDeviceGroups(prev, next) ? prev : next))
   }, [])
 
+  const refresh = useCallback(() => readDeviceGroups().then(apply), [apply])
+
   useEffect(() => {
-    void refresh()
+    void readDeviceGroups().then(apply)
     navigator.mediaDevices?.addEventListener?.('devicechange', refresh)
     return () => navigator.mediaDevices?.removeEventListener?.('devicechange', refresh)
-  }, [refresh])
+  }, [apply, refresh])
 
   return { devices: groups, refresh }
 }
@@ -220,36 +225,46 @@ export function useSplitStreams(stream: MediaStream | null): {
   video: MediaStream | null
   audio: MediaStream | null
 } {
-  const [split, setSplit] = useState<{ video: MediaStream | null; audio: MediaStream | null }>({
-    video: null,
-    audio: null,
-  })
+  const initial = useMemo(() => splitViews(stream), [stream])
+  const [updated, setUpdated] = useState<SplitViews | null>(null)
 
   useEffect(() => {
-    if (!stream) {
-      setSplit({ video: null, audio: null })
-      return
-    }
-
-    const view = (kind: 'video' | 'audio') =>
-      new MediaStream(kind === 'video' ? stream.getVideoTracks() : stream.getAudioTracks())
+    if (!stream) return
 
     const sync = (event: MediaStreamTrackEvent) => {
       const kind = event.track.kind === 'video' ? 'video' : 'audio'
-      setSplit((prev) => ({ ...prev, [kind]: view(kind) }))
+      setUpdated((prev) => ({
+        ...(prev?.source === stream ? prev : initial),
+        [kind]: trackView(stream, kind),
+      }))
     }
 
     stream.addEventListener('addtrack', sync)
     stream.addEventListener('removetrack', sync)
-    setSplit({ video: view('video'), audio: view('audio') })
 
     return () => {
       stream.removeEventListener('addtrack', sync)
       stream.removeEventListener('removetrack', sync)
     }
-  }, [stream])
+  }, [stream, initial])
 
-  return split
+  const current = updated?.source === stream ? updated : initial
+  return { video: current.video, audio: current.audio }
+}
+
+interface SplitViews {
+  source: MediaStream | null
+  video: MediaStream | null
+  audio: MediaStream | null
+}
+
+function trackView(stream: MediaStream, kind: 'video' | 'audio'): MediaStream {
+  return new MediaStream(kind === 'video' ? stream.getVideoTracks() : stream.getAudioTracks())
+}
+
+function splitViews(stream: MediaStream | null): SplitViews {
+  if (!stream) return { source: null, video: null, audio: null }
+  return { source: stream, video: trackView(stream, 'video'), audio: trackView(stream, 'audio') }
 }
 
 export function trackConstraints(
@@ -564,18 +579,15 @@ export function createMicPipeline(rawTrack: MediaStreamTrack, gain: number): Mic
 }
 
 export function useIsSpeaking(stream: MediaStream | null): boolean {
-  const [speaking, setSpeaking] = useState(false)
+  const [speaking, setSpeaking] = useState<{ source: MediaStream | null; active: boolean }>({
+    source: null,
+    active: false,
+  })
 
   useEffect(() => {
-    if (!stream) {
-      setSpeaking(false)
-      return
-    }
+    if (!stream) return
     const ctx = audioContext()
-    if (!ctx) {
-      setSpeaking(false)
-      return
-    }
+    if (!ctx) return
 
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 1024
@@ -608,20 +620,19 @@ export function useIsSpeaking(stream: MediaStream | null): boolean {
       const next = level > 0.08
       if (next !== current) {
         current = next
-        setSpeaking(next)
+        setSpeaking({ source: stream, active: next })
       }
       frame = requestAnimationFrame(tick)
     }
-    tick()
+    frame = requestAnimationFrame(tick)
 
     return () => {
       cancelAnimationFrame(frame)
       stream.removeEventListener('addtrack', bind)
       source?.disconnect()
       analyser.disconnect()
-      setSpeaking(false)
     }
   }, [stream])
 
-  return speaking
+  return speaking.source === stream && speaking.active
 }

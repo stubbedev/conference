@@ -57,7 +57,14 @@ export function Prejoin({
                   <Loader2 className="size-6 animate-spin text-muted-foreground" />
                 </div>
               )}
-              <VideoTile stream={stream} name={name || 'You'} muted mirrored onAspectRatio={setRatio} />
+              <VideoTile
+                tileKey="prejoin"
+                stream={stream}
+                name={name || 'You'}
+                muted
+                mirrored
+                onAspectRatio={(_tileKey, ratio) => setRatio(ratio)}
+              />
             </div>
           )}
         </div>

@@ -60,7 +60,8 @@ import { PeoplePanel } from '@/components/PeoplePanel'
 import { SidePanel, type SidePanelTab } from '@/components/SidePanel'
 import { Prejoin } from '@/components/Prejoin'
 import { ThemeToggle } from '@/components/ThemeToggle'
-import { toggleTileDebug, VideoTile } from '@/components/VideoTile'
+import { VideoTile } from '@/components/VideoTile'
+import { toggleTileDebug } from '@/hooks/tileDebug'
 
 interface Controls {
   mic: boolean
@@ -73,12 +74,6 @@ interface Tile {
   sourceId: string
   kind: string
   stream: MediaStream | null
-}
-
-interface TileHandlers {
-  canPin: boolean
-  onTogglePin: () => void
-  onAspectRatio: (ratio: number) => void
 }
 
 type Phase = 'checking' | 'gate' | 'prejoin' | 'joining' | 'live' | 'error'
@@ -452,6 +447,7 @@ export default function Room() {
   )
 
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- bootstrap awaits the room lookup before its first state update
     void bootstrap()
   }, [bootstrap])
 
@@ -1220,33 +1216,17 @@ export default function Room() {
     [pinnedKeyRef],
   )
 
-  const tileHandlersRef = useRef(new Map<string, TileHandlers>())
-  const tileHandlers = useCallback(
-    (key: string, canPin: boolean): TileHandlers => {
-      const cached = tileHandlersRef.current.get(key)
-      if (cached && cached.canPin === canPin) return cached
-      const entry: TileHandlers = {
-        canPin,
-        onTogglePin: () => togglePin(key),
-        onAspectRatio: (ratio: number) => handleTileRatio(key, ratio),
-      }
-      tileHandlersRef.current.set(key, entry)
-      return entry
-    },
-    [togglePin, handleTileRatio],
-  )
-
   const renderTile = (tile: Tile, compact = false) => {
     const isLocal = tile.sourceId === LOCAL_SOURCE
     const isScreen = tile.kind === SCREEN_KIND
     const member = isLocal ? selfMember : members.find((m) => m.id === tile.sourceId)
-    const handlers = tileHandlers(tile.key, allTiles.length > 1)
     // Only a remote camera tile plays audio; local and screen tiles get
     // no sink or volume so a volume drag does not re-render them.
     const playsAudio = !isLocal && !isScreen
     return (
       <VideoTile
         key={tile.key}
+        tileKey={tile.key}
         stream={tile.stream}
         name={tileLabel(tile, displayName, members)}
         muted={isLocal}
@@ -1257,9 +1237,9 @@ export default function Room() {
         sinkId={playsAudio ? devicePrefs.speaker : undefined}
         volume={playsAudio ? devicePrefs.volume : undefined}
         pinned={pinnedKey === tile.key}
-        onTogglePin={handlers.canPin ? handlers.onTogglePin : undefined}
+        onTogglePin={allTiles.length > 1 ? togglePin : undefined}
         compact={compact}
-        onAspectRatio={compact ? undefined : handlers.onAspectRatio}
+        onAspectRatio={compact ? undefined : handleTileRatio}
       />
     )
   }
