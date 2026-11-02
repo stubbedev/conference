@@ -1,6 +1,6 @@
 /web/node_modules/
 /web/dist/*
-!/web/dist/index.html
+!/web/dist/.gitkeep
 *.db
 *.db-shm
 *.db-wal

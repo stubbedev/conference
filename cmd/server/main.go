@@ -117,7 +117,7 @@ func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config) (*http.Se
 		AllowedOrigins: cfg.AllowedOrigins,
 	})
 
-	dist, err := fs.Sub(web.Dist, "dist")
+	dist, err := fs.Sub(web.Dist, "dist/app")
 	if err != nil {
 		return nil, fmt.Errorf("embed: %w", err)
 	}

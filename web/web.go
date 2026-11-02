@@ -1,4 +1,4 @@
-// Package web embeds the built frontend (web/dist) into the binary.
+// Package web embeds the built frontend (web/dist/app) into the binary.
 package web
 
 import "embed"

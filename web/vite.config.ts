@@ -39,6 +39,9 @@ const siteHead = (): Plugin => ({
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(), siteHead()],
+  build: {
+    outDir: 'dist/app',
+  },
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, './src'),
