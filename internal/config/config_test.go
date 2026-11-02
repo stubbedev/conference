@@ -91,14 +91,18 @@ func TestMediaConfigRejects(t *testing.T) {
 	}
 }
 
-const exampleOrigin = "https://meet.example.com"
+const (
+	exampleOrigin = "https://meet.example.com"
+	otherOrigin   = "https://meet.example.org"
+	localOrigin   = "http://localhost:8080"
+)
 
 func TestBaseURL(t *testing.T) {
 	for raw, want := range map[string]string{
-		"":                      "",
-		exampleOrigin:           exampleOrigin,
-		exampleOrigin + "/":     exampleOrigin,
-		"http://localhost:8080": "http://localhost:8080",
+		"":                  "",
+		exampleOrigin:       exampleOrigin,
+		exampleOrigin + "/": exampleOrigin,
+		localOrigin:         localOrigin,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			t.Setenv("BASE_URL", raw)
@@ -153,5 +157,51 @@ func TestSlackRequiresBaseURL(t *testing.T) {
 
 	if cfg.SlackSigningSecret != "shh" {
 		t.Fatalf("got secret %q", cfg.SlackSigningSecret)
+	}
+}
+
+func TestPublicOrigins(t *testing.T) {
+	t.Setenv("BASE_URL", exampleOrigin)
+	t.Setenv("PUBLIC_ORIGINS", " https://Meet.Example.org/ , http://localhost:8080")
+
+	cfg, err := config.FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for host, want := range map[string]string{
+		"meet.example.org":   otherOrigin,
+		"MEET.EXAMPLE.ORG":   otherOrigin,
+		"localhost:8080":     localOrigin,
+		"localhost":          exampleOrigin,
+		"attacker.example":   exampleOrigin,
+		"meet.example.org.x": exampleOrigin,
+	} {
+		got := cfg.OriginFor(host)
+		if got != want {
+			t.Errorf("OriginFor(%q) = %q, want %q", host, got, want)
+		}
+	}
+
+	want := []string{exampleOrigin, otherOrigin, localOrigin}
+	if !slices.Equal(cfg.Origins(), want) {
+		t.Fatalf("Origins() = %v, want %v", cfg.Origins(), want)
+	}
+}
+
+func TestPublicOriginsRejects(t *testing.T) {
+	t.Setenv("PUBLIC_ORIGINS", otherOrigin)
+
+	_, err := config.FromEnv()
+	if err == nil {
+		t.Fatal("accepted PUBLIC_ORIGINS without BASE_URL")
+	}
+
+	t.Setenv("BASE_URL", exampleOrigin)
+	t.Setenv("PUBLIC_ORIGINS", "meet.example.org")
+
+	_, err = config.FromEnv()
+	if err == nil {
+		t.Fatal("accepted a schemeless public origin")
 	}
 }

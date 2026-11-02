@@ -89,7 +89,7 @@ func (s *Server) slackMeet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := s.newRoom(r.Context(), createRoomRequest{Name: cmd.roomName, Password: "", MaxMembers: 0})
+	created, err := s.newRoom(r.Context(), createRoomRequest{Name: cmd.roomName, Password: "", MaxMembers: 0}, s.Cfg.BaseURL)
 	if err != nil {
 		log.Printf("api: slack: create room: %v", err)
 		writeJSON(w, http.StatusOK, ephemeral("Could not create the meeting. Please try again."))

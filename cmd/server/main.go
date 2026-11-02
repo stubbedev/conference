@@ -117,12 +117,17 @@ func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config) (*http.Se
 		AllowedOrigins: cfg.AllowedOrigins,
 	})
 
-	spa, err := spaHandler(cfg.BaseURL)
+	dist, err := fs.Sub(web.Dist, "dist")
+	if err != nil {
+		return nil, fmt.Errorf("embed: %w", err)
+	}
+
+	frontend, err := newWebUI(cfg, dist)
 	if err != nil {
 		return nil, fmt.Errorf("web ui: %w", err)
 	}
 
-	mux.Handle("/", spa)
+	frontend.routes(mux)
 
 	return mux, nil
 }
@@ -217,45 +222,67 @@ func reapOnce(database *store.Store, hub *sfu.Hub, ttl time.Duration) {
 	}
 }
 
-// spaHandler serves the embedded frontend with an index.html fallback
-// for client-side routes, immutable caching for hashed assets, and
-// no-cache for the app shell, whose preview-image URLs are made
-// absolute against origin.
-func spaHandler(origin string) (http.Handler, error) {
-	dist, err := fs.Sub(web.Dist, "dist")
-	if err != nil {
-		return nil, fmt.Errorf("embed: %w", err)
-	}
+// webUI serves the embedded frontend: the app page for client-side
+// routes, with preview URLs on the request's origin, and the built
+// files with immutable caching for hashed assets.
+type webUI struct {
+	cfg   *config.Config
+	dist  fs.FS
+	files http.Handler
+	pages map[string][]byte
+}
 
+func newWebUI(cfg *config.Config, dist fs.FS) (*webUI, error) {
 	rawIndex, err := fs.ReadFile(dist, indexPage)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", indexPage, err)
+		return nil, fmt.Errorf("read %s (build the web UI first): %w", indexPage, err)
 	}
 
-	index, err := absolutePreviewURLs(rawIndex, origin)
-	if err != nil {
-		return nil, err
+	pages := map[string][]byte{}
+
+	for _, origin := range append(cfg.Origins(), cfg.BaseURL) {
+		pages[origin], err = absolutePreviewURLs(rawIndex, origin)
+		if err != nil {
+			return nil, fmt.Errorf("index for %q: %w", origin, err)
+		}
 	}
 
-	files := http.FileServerFS(dist)
+	return &webUI{cfg: cfg, dist: dist, files: http.FileServerFS(dist), pages: pages}, nil
+}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
+func (ui *webUI) routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /{$}", ui.serveApp)
+	mux.HandleFunc("GET /r/{slug}", ui.serveApp)
+	mux.HandleFunc("/", ui.serveFile)
+}
 
-		_, err := fs.Stat(dist, path)
-		if path == "" || path == indexPage || err != nil {
-			w.Header().Set("Cache-Control", "no-cache")
-			http.ServeContent(w, r, indexPage, time.Time{}, bytes.NewReader(index))
+func (ui *webUI) serveApp(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeContent(w, r, indexPage, time.Time{}, bytes.NewReader(ui.pages[ui.cfg.OriginFor(r.Host)]))
+}
 
-			return
-		}
+func (ui *webUI) serveFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 
-		if strings.HasPrefix(path, assetsDir) {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		}
+		return
+	}
 
-		files.ServeHTTP(w, r)
-	}), nil
+	path := strings.TrimPrefix(r.URL.Path, "/")
+
+	info, err := fs.Stat(ui.dist, path)
+	if err != nil || info.IsDir() {
+		http.NotFound(w, r)
+
+		return
+	}
+
+	if strings.HasPrefix(path, assetsDir) {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	}
+
+	ui.files.ServeHTTP(w, r)
 }
 
 func logRequests(next http.Handler) http.Handler {

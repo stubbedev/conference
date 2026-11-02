@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ func testConfig() *config.Config {
 	return &config.Config{
 		HTTPAddr:           "",
 		BaseURL:            "",
+		PublicOrigins:      nil,
 		DBPath:             "",
 		APIKeys:            []string{operatorKey},
 		JoinOnly:           true,
@@ -183,5 +185,39 @@ func TestGetConfigPerHost(t *testing.T) {
 	if !restricted.CreateAuthRequired || !restricted.JoinOnly {
 		t.Fatalf("join-only host: got createAuthRequired=%v joinOnly=%v, want true/true",
 			restricted.CreateAuthRequired, restricted.JoinOnly)
+	}
+}
+
+func TestCreateRoomLinksFollowRequestOrigin(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.BaseURL = "https://meet.example.com"
+	cfg.PublicOrigins = []string{"https://" + openHost}
+
+	handler := routes(newTestAPI(t, cfg))
+
+	for host, want := range map[string]string{
+		openHost:                  "https://" + openHost + "/r/",
+		"forged.example":          "https://meet.example.com/r/",
+		strings.ToUpper(openHost): "https://" + openHost + "/r/",
+	} {
+		req := httptest.NewRequestWithContext(
+			context.Background(), http.MethodPost, "/api/rooms", bytes.NewReader([]byte(`{"name":"Test"}`)),
+		)
+		req.Host = host
+		req.Header.Set("Authorization", "Bearer "+operatorKey)
+
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		var created struct {
+			ShortURL string `json:"shortUrl"`
+		}
+
+		err := json.Unmarshal(rec.Body.Bytes(), &created)
+		if err != nil || !strings.HasPrefix(created.ShortURL, want) {
+			t.Errorf("host %s: got %q (%v), want prefix %q", host, created.ShortURL, err, want)
+		}
 	}
 }

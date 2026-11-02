@@ -85,6 +85,7 @@ All settings are environment variables.
 | `PORT`              | `8080`          | HTTP listen port                                                                          |
 | `BIND`              | all interfaces  | Listen host                                                                               |
 | `BASE_URL`          | —               | Public origin such as `https://meet.example.com`, used in room links and link previews; the server refuses to start if it has a path, query or no `http(s)` scheme |
+| `PUBLIC_ORIGINS`    | —               | Comma-separated further origins the same server answers on (e.g. `https://meet.example.org`); requests on one of them get links and preview images on that origin instead of `BASE_URL` |
 | `DB_PATH`           | `conference.db` | SQLite database path                                                                      |
 | `API_KEYS`          | empty           | Comma-separated keys needed to create, list and delete rooms; empty means anyone may create |
 | `JOIN_ONLY`         | `false`         | Hide room creation on the home page so people can only join; requires `API_KEYS`          |
@@ -116,7 +117,9 @@ All settings are environment variables.
   API_KEYS=s3cret JOIN_ONLY=true OPEN_CREATE_HOSTS=stubbe.dev ./conference
   ```
 
-  All domains share one database, so links work on any of them.
+  All domains share one database, so links work on any of them. List
+  the extra domains in `PUBLIC_ORIGINS` so each one's API links and
+  link previews stay on that domain.
 
 Old rooms are cleaned up automatically after `ROOM_TTL_DAYS`, together
 with their sessions. A room in use is never deleted.

@@ -74,6 +74,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	if s.Cfg.SlackSigningSecret != "" {
 		mux.HandleFunc("POST /api/slack/meet", s.slackMeet)
 	}
+
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusNotFound, "not-found", "No such API endpoint.")
+	})
 }
 
 type configResponse struct {
@@ -126,7 +130,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := s.newRoom(r.Context(), req)
+	created, err := s.newRoom(r.Context(), req, s.Cfg.OriginFor(r.Host))
 	if err != nil {
 		log.Printf("api: create room: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal", "Could not create the room.")
@@ -138,8 +142,8 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 // newRoom persists a room for req under a fresh slug and returns the
-// one-time response carrying its key and privileged links.
-func (s *Server) newRoom(ctx context.Context, req createRoomRequest) (createRoomResponse, error) {
+// one-time response carrying its key and its links on origin.
+func (s *Server) newRoom(ctx context.Context, req createRoomRequest, origin string) (createRoomResponse, error) {
 	key := roomcrypt.NewKey()
 	privToken := roomcrypt.NewToken()
 
@@ -161,10 +165,10 @@ func (s *Server) newRoom(ctx context.Context, req createRoomRequest) (createRoom
 		RoomKey:    roomKey,
 		PrivToken:  privToken,
 		PrivPath:   "/r/" + room.Slug + "?p=" + privToken,
-		PrivURL:    joinURL(s.Cfg.BaseURL, "/r/"+room.Slug+"?p="+privToken+"#k="+roomKey),
+		PrivURL:    joinURL(origin, "/r/"+room.Slug+"?p="+privToken+"#k="+roomKey),
 		ShortPath:  "/r/" + room.Slug,
-		ShortURL:   joinURL(s.Cfg.BaseURL, "/r/"+room.Slug),
-		BaseURL:    s.Cfg.BaseURL,
+		ShortURL:   joinURL(origin, "/r/"+room.Slug),
+		BaseURL:    origin,
 		MaxMembers: room.MaxMembers,
 	}, nil
 }

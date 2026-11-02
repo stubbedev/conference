@@ -34,6 +34,11 @@ type Config struct {
 	HTTPAddr string // listen address for HTTP/WebSocket
 	BaseURL  string // public origin, e.g. https://meet.example.com (optional; always scheme://host when set)
 
+	// PublicOrigins are further scheme://host origins the same server
+	// answers on. Requests arriving on one of them get links and preview
+	// URLs on that origin instead of BaseURL.
+	PublicOrigins []string
+
 	DBPath string // SQLite database path
 
 	// APIKeys authenticate room creation/deletion. When empty, room
@@ -135,11 +140,12 @@ func splitList(v string) []string {
 var (
 	errPortRange = errors.New("port out of range 1-65535")
 	errPortClash = errors.New("ports must differ")
-	errBaseURL   = errors.New("BASE_URL must be an http(s) origin such as https://meet.example.com, with no path, query or fragment")
+	errOrigin    = errors.New("must be an http(s) origin such as https://meet.example.com, with no path, query or fragment")
 )
 
 var (
 	errJoinOnlyNeedsKey  = errors.New("JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
+	errOriginsNeedBase   = errors.New("PUBLIC_ORIGINS requires BASE_URL, the origin used when a request matches none of them")
 	errSlackNeedsBaseURL = errors.New("SLACK_SIGNING_SECRET requires BASE_URL; Slack messages need absolute room links")
 )
 
@@ -148,6 +154,7 @@ func FromEnv() (*Config, error) {
 	cfg := &Config{
 		HTTPAddr:           "",
 		BaseURL:            "",
+		PublicOrigins:      nil,
 		DBPath:             env("DB_PATH", defaultDBPath),
 		APIKeys:            nil,
 		JoinOnly:           false,
@@ -182,6 +189,10 @@ func FromEnv() (*Config, error) {
 		return nil, errJoinOnlyNeedsKey
 	}
 
+	if len(cfg.PublicOrigins) > 0 && cfg.BaseURL == "" {
+		return nil, errOriginsNeedBase
+	}
+
 	if cfg.SlackSigningSecret != "" && cfg.BaseURL == "" {
 		return nil, errSlackNeedsBaseURL
 	}
@@ -202,7 +213,16 @@ func applyHTTPConfig(cfg *Config) error {
 
 	cfg.BaseURL, err = parseOrigin(env("BASE_URL", ""))
 	if err != nil {
-		return err
+		return fmt.Errorf("BASE_URL: %w", err)
+	}
+
+	for _, raw := range splitList(env("PUBLIC_ORIGINS", "")) {
+		origin, err := parseOrigin(raw)
+		if err != nil {
+			return fmt.Errorf("PUBLIC_ORIGINS: %w", err)
+		}
+
+		cfg.PublicOrigins = append(cfg.PublicOrigins, origin)
 	}
 
 	cfg.APIKeys = splitList(env("API_KEYS", ""))
@@ -227,17 +247,46 @@ func parseOrigin(raw string) (string, error) {
 
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("%w: %q: %w", errBaseURL, raw, err)
+		return "", fmt.Errorf("%w: %q: %w", errOrigin, raw, err)
 	}
 
 	validScheme := parsed.Scheme == "http" || parsed.Scheme == "https"
 	bare := strings.TrimSuffix(parsed.Path, "/") == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.User == nil
 
 	if !validScheme || parsed.Host == "" || !bare {
-		return "", fmt.Errorf("%w: got %q", errBaseURL, raw)
+		return "", fmt.Errorf("%w: got %q", errOrigin, raw)
 	}
 
-	return parsed.Scheme + "://" + parsed.Host, nil
+	return parsed.Scheme + "://" + strings.ToLower(parsed.Host), nil
+}
+
+// OriginFor returns the configured origin whose host matches the
+// request's Host header, falling back to BaseURL. The Host header only
+// selects among configured origins, so it can never inject one.
+func (c *Config) OriginFor(hostHeader string) string {
+	for _, origin := range c.PublicOrigins {
+		if strings.EqualFold(originHost(origin), hostHeader) {
+			return origin
+		}
+	}
+
+	return c.BaseURL
+}
+
+// Origins lists BaseURL followed by PublicOrigins; empty when no
+// BaseURL is configured.
+func (c *Config) Origins() []string {
+	if c.BaseURL == "" {
+		return nil
+	}
+
+	return append([]string{c.BaseURL}, c.PublicOrigins...)
+}
+
+func originHost(origin string) string {
+	_, host, _ := strings.Cut(origin, "://")
+
+	return host
 }
 
 // applyMediaConfig fills the WebRTC settings.
