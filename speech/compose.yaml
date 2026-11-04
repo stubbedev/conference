@@ -1,0 +1,60 @@
+# Speech service. Pick a profile:
+#   docker compose --profile gpu up -d     # NVIDIA GPU: CUDA, whisper large-v3-turbo
+#   docker compose --profile local up -d   # any machine: CPU, whisper small
+# Needs SPEECH_SECRET and the translation engine, e.g. TRANSLATE_URL and
+# TRANSLATE_MODEL for Ollama (in .env or the shell). Every engine setting
+# the service reads (see .env.example and README.md) passes through.
+x-speech: &speech
+  restart: unless-stopped
+  ports:
+    - "${SPEECH_PORT:-8090}:8090"
+  volumes:
+    - models:/models
+  environment: &env
+    SPEECH_SECRET: ${SPEECH_SECRET:?set SPEECH_SECRET}
+    TRANSCRIBE_PROVIDER: ${TRANSCRIBE_PROVIDER:-local}
+    TRANSCRIBE_URL: ${TRANSCRIBE_URL:-}
+    TRANSCRIBE_API_KEY: ${TRANSCRIBE_API_KEY:-}
+    TRANSCRIBE_MODEL: ${TRANSCRIBE_MODEL:-}
+    TRANSLATE_PROVIDER: ${TRANSLATE_PROVIDER:-ollama}
+    TRANSLATE_URL: ${TRANSLATE_URL:-${OLLAMA_URL:-}}
+    TRANSLATE_API_KEY: ${TRANSLATE_API_KEY:-}
+    TRANSLATE_MODEL: ${TRANSLATE_MODEL:-${OLLAMA_MODEL:-}}
+    VOICE_PROVIDER: ${VOICE_PROVIDER:-piper}
+    VOICE_URL: ${VOICE_URL:-}
+    VOICE_API_KEY: ${VOICE_API_KEY:-}
+    VOICE_MODEL: ${VOICE_MODEL:-}
+    VOICE_NAME: ${VOICE_NAME:-}
+    GLOSSARY: ${GLOSSARY:-}
+
+services:
+  speech-gpu:
+    <<: *speech
+    profiles: [gpu]
+    build:
+      context: .
+      args:
+        BASE: nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+    environment:
+      <<: *env
+      DEVICE: cuda
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3-turbo}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${SPEECH_GPU:-0}"]
+              capabilities: [gpu]
+
+  speech-local:
+    <<: *speech
+    profiles: [local]
+    build: .
+    environment:
+      <<: *env
+      DEVICE: cpu
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+
+volumes:
+  models:
