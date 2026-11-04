@@ -84,18 +84,17 @@ function devToolsEndpoint(proc, idx) {
   })
 }
 
-export async function launchChrome(chrome, idx, dir, extraArgs = []) {
+export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless = true, fakeDevices = true } = {}) {
   const profile = mkdtempSync(join(dir, `chrome-${idx}-`))
   const proc = spawn(
     chrome,
     [
-      '--headless=new',
       // Test browsers stay silent: their fake mics would beep through the speakers.
-      '--mute-audio',
+      ...(headless ? ['--headless=new', '--mute-audio'] : []),
       '--no-sandbox',
       '--no-first-run',
       '--disable-gpu',
-      '--use-fake-device-for-media-stream',
+      ...(fakeDevices ? ['--use-fake-device-for-media-stream'] : []),
       '--use-fake-ui-for-media-stream',
       '--autoplay-policy=no-user-gesture-required',
       '--remote-debugging-port=0',
