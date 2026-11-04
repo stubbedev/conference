@@ -791,7 +791,7 @@ export class RoomClient {
     try {
       return JSON.parse(await decryptChat(this.opts.chatKey, { iv: msg.iv, ct: msg.ct })) as unknown
     } catch (err) {
-      console.warn(`${msg.type}: undecryptable message`, err)
+      console.warn('undecryptable message:', msg.type, err)
       return undefined
     }
   }

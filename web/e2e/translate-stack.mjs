@@ -72,7 +72,7 @@ const DEMO_MODELS = {
 export async function ensureSpeech({ secret, openai }) {
   const health = `http://127.0.0.1:${SPEECH_PORT}/healthz`
   if (await healthy(health)) {
-    console.log(`speech service already running on :${SPEECH_PORT} (it must use SPEECH_SECRET=${secret})`)
+    console.log(`speech service already running on :${SPEECH_PORT} (it must use the same SPEECH_SECRET as this run)`)
     return
   }
   const python = join(repoRoot, 'speech/.venv/bin/python')
@@ -89,7 +89,7 @@ export async function ensureSpeech({ secret, openai }) {
     throw new Error('set TRANSLATE_URL (or OLLAMA_URL) to the Ollama endpoint that runs the translation model')
   }
 
-  console.log(`starting the speech service with ${openai ? 'OpenAI' : `${engines.TRANSLATE_MODEL} on Ollama + local Whisper`}…`)
+  console.log(`starting the speech service with ${openai ? 'OpenAI' : 'Ollama + local Whisper'}…`)
   track(
     spawn(python, ['-m', 'app'], {
       cwd: join(repoRoot, 'speech'),
