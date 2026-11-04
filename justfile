@@ -131,9 +131,10 @@ release level:
 # faster than the CPU container. Needs SPEECH_SECRET and a translation
 # engine, e.g. TRANSLATE_URL and TRANSLATE_MODEL (see speech/README.md).
 
-# Create the speech venv and download the Piper voices.
+# Create the speech venv, install Piper (GPL-3.0, kept out of
+# requirements.txt) and download its voices.
 speech-setup:
-    cd speech && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    cd speech && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt piper-tts==1.8.0
     cd speech && .venv/bin/python -m piper.download_voices --data-dir voices $(.venv/bin/python -c "import yaml; print(' '.join(v for l in yaml.safe_load(open('languages.yaml'))['languages'].values() for v in l['voices'].values()))")
 
 # Run the speech service on :8090.

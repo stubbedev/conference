@@ -18,6 +18,7 @@ is reported as not ready (see Engine.problem), the service still starts,
 and the conference app shows live translation as unavailable.
 """
 
+import importlib.util
 import ipaddress
 import os
 from dataclasses import dataclass, field, replace
@@ -163,6 +164,10 @@ def _translate() -> Engine:
     )
 
 
+def piper_installed() -> bool:
+    return importlib.util.find_spec("piper") is not None
+
+
 def _voice(languages: dict[str, Language], voices_dir: Path) -> Engine:
     provider = _env("VOICE_PROVIDER", default="piper")
     if provider == OPENAI_COMPATIBLE:
@@ -173,6 +178,8 @@ def _voice(languages: dict[str, Language], voices_dir: Path) -> Engine:
         return engine
     if provider != "piper":
         return Engine(provider=provider, problem=f"VOICE_PROVIDER must be piper or {OPENAI_COMPATIBLE}")
+    if not piper_installed():
+        return Engine(provider="piper", problem="Piper is not installed (GPL-3.0, kept separate): pip install piper-tts==1.8.0")
     names = {name for lang in languages.values() for name in lang.voices.values()}
     absent = sorted(name for name in names if not (voices_dir / f"{name}.onnx").exists())
     if absent:

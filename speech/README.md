@@ -18,7 +18,7 @@ long as it takes to translate a sentence.
 ## Run it
 
 ```bash
-just speech-setup     # once: Python 3.12 venv and the Piper voices
+just speech-setup     # once: Python 3.12 venv, Piper and its voices
 SPEECH_SECRET=s3cret TRANSLATE_URL=http://localhost:11434 TRANSLATE_MODEL=<model> just speech
 ```
 
@@ -57,6 +57,17 @@ setting. No engine has a vendor's model as its default.
 | | `openai-compatible` | wherever `TRANSLATE_URL` points |
 | `VOICE` | `piper` (default): voices in `languages.yaml` | this machine |
 | | `openai-compatible`: `/audio/speech`, `api_voices` in `languages.yaml` | wherever `VOICE_URL` points |
+
+**Piper is GPL-3.0**, so it is not in `requirements.txt`: `just
+speech-setup` and the Docker build install it separately
+(`pip install piper-tts==1.8.0`; build with `--build-arg WITH_PIPER=false`
+to leave it out). Without it, `/v1/status` reports the voice engine as
+not set up. For a voice engine under a permissive licence, run a local
+model behind an OpenAI-compatible server and set `VOICE_PROVIDER=openai-compatible`:
+for example Chatterbox Multilingual (MIT; English, German, Swedish and
+more) or VoxCPM2 (Apache-2.0; 30 languages), both best on a GPU, or
+Kokoro (Apache-2.0; no German or Swedish). These have not been tested
+with this service yet.
 
 `openai-compatible` is any service with OpenAI's API shape: OpenAI, Azure
 OpenAI, Mistral, Groq or OpenRouter, or a server of your own such as vLLM,

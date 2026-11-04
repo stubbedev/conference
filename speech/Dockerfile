@@ -1,7 +1,11 @@
-# CPU by default; for the L4 build with
+# CPU by default; for an NVIDIA GPU build with
 #   --build-arg BASE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+# The local voice engine, Piper, is GPL-3.0 and installed separately;
+# --build-arg WITH_PIPER=false leaves it out (then use an
+# openai-compatible VOICE_PROVIDER).
 ARG BASE=ubuntu:24.04
 FROM ${BASE}
+ARG WITH_PIPER=true
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
@@ -14,8 +18,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY languages.yaml .
-RUN python -m piper.download_voices --data-dir /srv/voices \
-      $(python -c "import yaml; print(' '.join(v for l in yaml.safe_load(open('languages.yaml'))['languages'].values() for v in l['voices'].values()))")
+RUN if [ "$WITH_PIPER" = true ]; then \
+      pip install --no-cache-dir piper-tts==1.8.0 \
+      && python -m piper.download_voices --data-dir /srv/voices \
+        $(python -c "import yaml; print(' '.join(v for l in yaml.safe_load(open('languages.yaml'))['languages'].values() for v in l['voices'].values()))"); \
+    fi
 
 COPY app ./app
 
