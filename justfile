@@ -60,8 +60,9 @@ dev:
     cd web && npm run dev
 
 # Two headless Chromes with fake cameras join a room through a freshly
-# built server and must exchange E2EE audio and video. Needs Chrome on
-# PATH (or CHROME=/path/to/chrome).
+# built server and must exchange E2EE audio and video, and a recording
+# must contain the other side's voice. Needs Chrome on PATH (or
+# CHROME=/path/to/chrome) and ffmpeg.
 e2e:
     node web/e2e/smoke.mjs
 

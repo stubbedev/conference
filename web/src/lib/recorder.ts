@@ -54,17 +54,22 @@ interface RecorderEntry {
   pinned: boolean
 }
 
-// One track mixed into the recording. Remote tracks route through a
-// detached <audio> element and a MediaElementAudioSourceNode: Safari's
-// MediaStreamAudioSourceNode produces silence for WebRTC streams, while
-// the element path works everywhere. Once an element is captured by the
+// One track mixed into the recording. In WebKit browsers remote tracks
+// route through a detached <audio> element and a
+// MediaElementAudioSourceNode, because WebKit's MediaStreamAudioSourceNode
+// produces silence for WebRTC streams. Once an element is captured by the
 // graph its audio only flows through it, so the mix never leaks to the
 // speakers; the user gesture that started the recording unlocks play().
+// Chrome is the other way round: the element path gives silence for a
+// MediaStream there, so Chrome and Firefox read every track directly.
 interface MixedSource {
   track: MediaStreamTrack
   source: AudioNode
   element?: HTMLAudioElement
 }
+
+// Every iOS browser is WebKit too; Chrome and Edge say "Chrome/" besides "AppleWebKit".
+const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\//.test(navigator.userAgent)
 
 // Chunked data streams into the origin-private file system where the
 // browser has it (Chrome, Firefox, Safari 16.4+), keeping memory flat
@@ -289,7 +294,7 @@ export class CallRecorder {
 
         let source: AudioNode
         let element: HTMLAudioElement | undefined
-        if (tile.local) {
+        if (tile.local || !WEBKIT) {
           source = ctx.createMediaStreamSource(new MediaStream([track]))
         } else {
           element = document.createElement('audio')
