@@ -40,6 +40,9 @@ services:
       EXTERNAL_IPS: ${EXTERNAL_IPS}
       TURN_TLS_HOST: ${TURN_TLS_HOST}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      SPEECH_URL: ${SPEECH_URL:-}
+      SPEECH_SECRET: ${SPEECH_SECRET:-}
+      SPEECH_STATUS_URL: ${SPEECH_STATUS_URL:-}
     volumes:
       - data:/data
     ports:
