@@ -14,7 +14,6 @@ import wave
 import httpx
 import numpy as np
 from faster_whisper import WhisperModel
-from piper import PiperVoice
 
 from .config import DEFAULT_VOICE, OPENAI_COMPATIBLE, Engine, Settings
 
@@ -33,18 +32,21 @@ class Engines:
         self._settings = settings
         self._whisper = WhisperModel(settings.whisper_model, device=settings.device, compute_type=settings.compute_type)
         self._whisper_lock = asyncio.Lock()
-        self._voices = (
-            {
-                (code, choice): PiperVoice.load(str(settings.voices_dir / f"{name}.onnx"))
-                for code, lang in settings.languages.items()
-                for choice, name in lang.voices.items()
-            }
-            if settings.voice.provider == "piper" and settings.voice.ready
-            else {}
-        )
+        self._voices = self._load_piper(settings) if settings.voice.provider == "piper" and settings.voice.ready else {}
         self._transcribe_http = _client(settings.transcribe)
         self._translate_http = _client(settings.translate)
         self._voice_http = _client(settings.voice)
+
+    @staticmethod
+    def _load_piper(settings: Settings) -> dict:
+        # Imported here: Piper is GPL-3.0 and installed separately (see just speech-setup).
+        from piper import PiperVoice
+
+        return {
+            (code, choice): PiperVoice.load(str(settings.voices_dir / f"{name}.onnx"))
+            for code, lang in settings.languages.items()
+            for choice, name in lang.voices.items()
+        }
 
     async def close(self) -> None:
         for client in (self._transcribe_http, self._translate_http, self._voice_http):
