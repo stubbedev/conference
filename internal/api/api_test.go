@@ -46,6 +46,9 @@ func testConfig() *config.Config {
 		SessionTTL:         365 * 24 * time.Hour,
 		MaxRoomMembers:     0,
 		RoomTTL:            0,
+		SpeechURL:          "",
+		SpeechSecret:       "",
+		SpeechStatusURL:    "",
 	}
 }
 
@@ -76,6 +79,7 @@ func newTestAPI(t *testing.T, cfg *config.Config) *api.Server {
 		Relay:          creds,
 		MaxMembers:     0,
 		MaxPublishKbps: 0,
+		Speech:         nil,
 	})
 
 	return api.New(storage, hub, cfg)

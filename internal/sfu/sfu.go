@@ -162,6 +162,13 @@ type Message struct {
 	On       bool   `json:"on,omitempty"`
 	Recorder string `json:"recorder,omitempty"`
 
+	// live translation: TranslatingBy in welcome replays the room mode (the
+	// host who switched it on; empty when off); translate-token carries
+	// the speech service URL and this member's token
+	TranslatingBy string `json:"translatingBy,omitempty"`
+	URL           string `json:"url,omitempty"`
+	Token         string `json:"token,omitempty"`
+
 	// layer (Member names the source, Layer is a simulcast rid)
 	Layer string `json:"layer,omitempty"`
 
@@ -188,6 +195,9 @@ type HubConfig struct {
 	Relay          *relay.Credentials
 	MaxMembers     int
 	MaxPublishKbps int
+
+	// Speech enables live translation; nil turns it off.
+	Speech *SpeechConfig
 }
 
 // NewHub creates an empty hub.
@@ -211,7 +221,7 @@ func (h *Hub) JoinRoom(req JoinRequest, send func(Message)) (*Member, error) {
 			slug: req.Slug, name: req.RoomName,
 			limit: limit, cfg: &h.cfg,
 			members: map[string]*Member{}, hub: h,
-			mu: sync.Mutex{}, nextShort: 0, recorder: "", rembStop: nil,
+			mu: sync.Mutex{}, nextShort: 0, recorder: "", translatingBy: "", rembStop: nil,
 		}
 		h.rooms[req.Slug] = room
 	}
@@ -302,10 +312,11 @@ type Room struct {
 	cfg   *HubConfig
 	hub   *Hub
 
-	mu        sync.Mutex
-	members   map[string]*Member
-	nextShort uint32
-	recorder  string
+	mu            sync.Mutex
+	members       map[string]*Member
+	nextShort     uint32
+	recorder      string
+	translatingBy string
 
 	rembStop chan struct{}
 }
@@ -372,11 +383,12 @@ func (r *Room) takeResumable(token string) *Member {
 
 // admission is the room state a join captured under the room lock.
 type admission struct {
-	member       *Member
-	stale        *Member
-	others       []MemberInfo
-	recorder     string
-	startedEmpty bool
+	member        *Member
+	stale         *Member
+	others        []MemberInfo
+	recorder      string
+	translatingBy string
+	startedEmpty  bool
 }
 
 // admit adds a new member, replacing the stale member that holds the
@@ -404,6 +416,10 @@ func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 		r.recorder = member.ID
 	}
 
+	if stale != nil && r.translatingBy == stale.ID {
+		r.translatingBy = member.ID
+	}
+
 	others := make([]MemberInfo, 0, len(r.members))
 	for _, other := range r.members {
 		others = append(others, other.Info())
@@ -413,7 +429,7 @@ func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 
 	return admission{
 		member: member, stale: stale, others: others,
-		recorder: r.recorder, startedEmpty: len(r.members) == 1,
+		recorder: r.recorder, translatingBy: r.translatingBy, startedEmpty: len(r.members) == 1,
 	}, nil
 }
 
@@ -435,12 +451,17 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 	self := member.Info()
 
 	member.send(Message{
-		Type: "welcome", Self: &self, RoomInfo: r.info(), Members: adm.others, Recorder: adm.recorder,
+		Type: "welcome", Self: &self, RoomInfo: r.info(), Members: adm.others, Recorder: adm.recorder, TranslatingBy: adm.translatingBy,
 		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
 	})
 	r.broadcastExcept(member.ID, Message{
 		Type: "member-joined", ID: member.ID, Short: member.Short, Name: member.Name, Replaces: replaces,
 	})
+
+	// While live translation is on, a joiner translates its own speech too.
+	if adm.translatingBy != "" {
+		member.sendSpeechToken()
+	}
 
 	if adm.stale != nil {
 		adm.stale.Leave()
@@ -470,6 +491,7 @@ func (r *Room) removeMember(member *Member) {
 	if recorderLeft {
 		r.recorder = ""
 	}
+
 	r.mu.Unlock()
 
 	if !empty {
@@ -819,7 +841,7 @@ func (m *Member) fail(code string, err error) {
 	m.send(Message{Type: "error", Code: code, Text: err.Error()})
 }
 
-func (m *Member) apply(msg Message) {
+func (m *Member) apply(msg Message) { //nolint:cyclop // one flat case per signaling message type.
 	switch msg.Type {
 	case "offer":
 		m.handleUpOffer(msg)
@@ -839,6 +861,14 @@ func (m *Member) apply(msg Message) {
 		m.handleModerate(msg)
 	case "layer":
 		m.handleLayer(msg)
+	case "lang":
+		m.handleLang(msg)
+	case "caption":
+		m.handleCaption(msg)
+	case "translate":
+		m.handleTranslate(msg)
+	case "translate-token-request":
+		m.handleTokenRequest()
 	}
 }
 
@@ -1454,7 +1484,7 @@ func (vr *viewerRate) max() uint64 {
 // isVideo reports whether the track carries video (camera or screen);
 // everything that is not audio counts, including unknown kinds.
 func (ut *UpTrack) isVideo() bool {
-	return ut.kind != KindAudio
+	return !isAudioKind(ut.kind)
 }
 
 // addLayer stores a newly arrived encoding and starts forwarding it;

@@ -56,6 +56,7 @@ linters:
             - github.com/stubbe/conference/internal/relay
             - github.com/stubbe/conference/internal/roomcrypt
             - github.com/stubbe/conference/internal/sfu
+            - github.com/stubbe/conference/internal/speech
             - github.com/stubbe/conference/internal/speech/service
             - github.com/stubbe/conference/internal/speech/token
             - github.com/stubbe/conference/internal/speech/vad

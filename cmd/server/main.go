@@ -20,6 +20,7 @@ import (
 	"github.com/stubbe/conference/internal/config"
 	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
+	"github.com/stubbe/conference/internal/speech"
 	"github.com/stubbe/conference/internal/store"
 	"github.com/stubbe/conference/internal/ws"
 	web "github.com/stubbe/conference/web"
@@ -34,6 +35,8 @@ const (
 	assetsDir         = "assets/"
 	apiPrefix         = "/api/"
 	signalingPath     = "/ws"
+
+	speechStatusTimeout = 5 * time.Second
 )
 
 func main() {
@@ -71,12 +74,10 @@ func run() error {
 		return fmt.Errorf("relay: %w", err)
 	}
 
-	hub := sfu.NewHub(sfu.HubConfig{
-		Engine:         engine,
-		Relay:          creds,
-		MaxMembers:     cfg.MaxRoomMembers,
-		MaxPublishKbps: cfg.MaxPublishKbps,
-	})
+	hub, checker, err := newHub(cfg, engine, creds)
+	if err != nil {
+		return err
+	}
 
 	turnServer, err := relay.Start(context.Background(), creds, engine.MediaAddrs(), hub.MemberLive)
 	if err != nil {
@@ -87,7 +88,7 @@ func run() error {
 
 	go reapLoop(database, hub, cfg.RoomTTL)
 
-	mux, err := buildMux(database, hub, cfg)
+	mux, err := buildMux(database, hub, cfg, checker)
 	if err != nil {
 		return err
 	}
@@ -105,10 +106,11 @@ func run() error {
 }
 
 // buildMux assembles the API, signaling, and embedded UI routes.
-func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config) (*http.ServeMux, error) {
+func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config, checker *speech.Checker) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
 	apiServer := api.New(database, hub, cfg)
+	apiServer.Speech = checker
 	apiServer.Routes(mux)
 
 	mux.Handle("GET "+signalingPath, &ws.Handler{
@@ -300,4 +302,48 @@ func logRequests(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// newHub creates the SFU hub, with live translation when a speech
+// service is configured.
+func newHub(cfg *config.Config, engine *sfu.Engine, creds *relay.Credentials) (*sfu.Hub, *speech.Checker, error) {
+	checker, err := speechChecker(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	hub := sfu.NewHub(sfu.HubConfig{
+		Engine:         engine,
+		Relay:          creds,
+		MaxMembers:     cfg.MaxRoomMembers,
+		MaxPublishKbps: cfg.MaxPublishKbps,
+		Speech:         speechConfig(cfg, checker),
+	})
+
+	return hub, checker, nil
+}
+
+// speechChecker asks the configured speech service whether its engines
+// are set up; nil when there is none.
+func speechChecker(cfg *config.Config) (*speech.Checker, error) {
+	if cfg.SpeechURL == "" {
+		//nolint:nilnil // No speech service is a valid setup: live translation is shown as unavailable.
+		return nil, nil
+	}
+
+	checker, err := speech.NewChecker(cfg.SpeechURL, cfg.SpeechStatusURL, &http.Client{Timeout: speechStatusTimeout})
+	if err != nil {
+		return nil, fmt.Errorf("speech: %w", err)
+	}
+
+	return checker, nil
+}
+
+// speechConfig enables live translation when a speech service is configured.
+func speechConfig(cfg *config.Config, checker *speech.Checker) *sfu.SpeechConfig {
+	if checker == nil {
+		return nil
+	}
+
+	return &sfu.SpeechConfig{URL: cfg.SpeechURL, Secret: []byte(cfg.SpeechSecret), Ready: checker.Ready}
 }
