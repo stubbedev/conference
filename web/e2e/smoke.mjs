@@ -135,6 +135,17 @@ async function clickButtonByTitle(browser, label) {
   return false
 }
 
+// Chrome's fake microphone beeps at about -10 dB; silence is below -60.
+const REMOTE_VOICE_MIN_DB = -40
+
+// The loudest moment of a recording's audio, in dB (needs ffmpeg).
+function maxVolume(file) {
+  const res = spawnSync('ffmpeg', ['-hide_banner', '-i', file, '-map', '0:a', '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' })
+  if (res.error) throw new Error('ffmpeg is needed to check the recording: install it or put it on PATH')
+  const match = /max_volume: (-?[\d.]+) dB/.exec(res.stderr)
+  return match ? Number(match[1]) : null
+}
+
 const recordingBadgePresent = `(() => { const h = document.querySelector('header'); return Boolean(h && [...h.querySelectorAll('span')].some(s => s.textContent.trim() === 'Recording')); })()`
 const recordButtonPresent = `[...document.querySelectorAll('button')].some(b => b.getAttribute('aria-label') === 'Record the call')`
 
@@ -344,13 +355,16 @@ async function main() {
         behavior: 'allow',
         downloadPath: dlDir,
       })
+      // The recorder's own microphone goes silent, so any sound in the file
+      // is the guest's voice arriving through the call.
+      check(failures, 'recording', await clickButtonByTitle(late, 'Mute microphone'), 'mute button missing on the second host')
       const reRecord = await clickButtonByTitle(late, 'Record the call')
       check(failures, 'recording', reRecord, 'record button missing on the second host')
 
       if (reRecord) {
         check(failures, 'recording', await waitForBadge(late, true), 'recording badge missing on the second recorder')
         check(failures, 'recording', await waitForBadge(browsers[1], true), 'recording badge missing on the guest for the second recorder')
-        await sleep(3000)
+        await sleep(5000)
 
         const stopped = await clickButtonByTitle(late, 'Stop recording')
         check(failures, 'recording', stopped, 'stop button missing while recording')
@@ -365,7 +379,10 @@ async function main() {
         check(failures, 'recording', recorderErrors.length === 0, `recorder page errors: ${recorderErrors.join(' | ')}`)
         check(failures, 'recording', guestErrors.length === 0, `guest page errors: ${guestErrors.join(' | ')}`)
 
-        console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes` : 'MISSING'}`)
+        const loudest = download ? maxVolume(join(dlDir, download.name)) : null
+        check(failures, 'recording', loudest !== null && loudest > REMOTE_VOICE_MIN_DB, `the guest's voice is not in the recording (loudest ${loudest} dB)`)
+
+        console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
       }
     }
 

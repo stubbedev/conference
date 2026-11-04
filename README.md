@@ -321,8 +321,9 @@ checks that both browsers receive each other's audio and video through
 the encryption transform with zero dropped frames and exactly one tile
 per participant. Then it pins tiles, checks simulcast layer switching,
 drops a browser's signaling and restarts the server mid-call (both must
-reconnect), records, and forces a call through the TURN relay over UDP
-and TCP. It needs Chrome on `PATH` (or `CHROME=/path/to/chrome`) and a
+reconnect), records (the file must contain the other participant's
+voice), and forces a call through the TURN relay over UDP and TCP. It
+needs Chrome on `PATH` (or `CHROME=/path/to/chrome`), `ffmpeg` and a
 non-loopback IPv4 address. It is the gate that catches what type checks
 and unit tests can't: a call that connects fine and transmits nothing.
 

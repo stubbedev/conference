@@ -90,6 +90,8 @@ export async function launchChrome(chrome, idx, dir, extraArgs = []) {
     chrome,
     [
       '--headless=new',
+      // Test browsers stay silent: their fake mics would beep through the speakers.
+      '--mute-audio',
       '--no-sandbox',
       '--no-first-run',
       '--disable-gpu',

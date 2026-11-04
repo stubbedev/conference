@@ -64,6 +64,8 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+      # The smoke test measures the recording's audio with ffmpeg.
+      - run: command -v ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
       - name: smoke
         run: node web/e2e/smoke.mjs
         env:
