@@ -138,6 +138,14 @@ e2e-translate:
 speech:
     go run ./cmd/speech
 
+# Live-translation demo: you (English, real mic) and a guest; options: hear, sv, male, openai.
+translate-demo *args:
+    node web/e2e/translate-demo.mjs {{args}}
+
+# Live translation between computers on the same network (HTTPS on :8443); option: openai.
+translate-lan *args:
+    node web/e2e/translate-lan.mjs {{args}}
+
 # Stream the fixtures through a running speech service with real engines
 # and check the translations both ways.
 speech-test url="ws://localhost:8090":

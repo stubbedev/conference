@@ -401,6 +401,29 @@ needs Chrome on `PATH` (or `CHROME=/path/to/chrome`), `ffmpeg` and a
 non-loopback IPv4 address. It is the gate that catches what type checks
 and unit tests can't: a call that connects fine and transmits nothing.
 
+### Live translation locally
+
+```bash
+just speech-setup                      # once: Python venv and Piper voices for speech/
+TRANSLATE_URL=http://localhost:11434 just translate-demo   # you plus a guest speaking from a recording, in two windows
+TRANSLATE_URL=http://localhost:11434 just translate-lan    # two computers on one network, over HTTPS on :8443
+just speech-unit                       # the speech service's engine settings, no models needed
+just e2e-translate                     # the browser test CI runs, with stand-in speech models
+```
+
+Both demos use `gemma4:26b-a4b-it-qat` on that Ollama unless
+`TRANSLATE_MODEL` names another model. `translate-demo` takes `hear`
+(the guest stays silent so you hear yourself translated; wear
+headphones), `sv` (a Swedish guest) and `male` (your translated voice).
+`translate-lan` prints a guest link for the other computer; Safari there
+has to trust the self-signed certificate it offers at `/certificate.pem`
+before it can connect. `SERVER_LOG=path` keeps the meeting server's log.
+
+For testing without a translation model at hand, `openai` (on both
+commands, with `OPENAI_API_KEY` in `speech/.env`) has OpenAI transcribe
+(`gpt-transcribe`) and translate (`gpt-4o-mini`) instead. That sends the
+call's audio and text to OpenAI, so it is for test conversations only.
+
 ### Monitoring a deployment
 
 `.github/workflows/monitor.yml` places real calls against a deployment
