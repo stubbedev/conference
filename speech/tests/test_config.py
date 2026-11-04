@@ -22,8 +22,10 @@ NAMES = (
 
 
 @contextmanager
-def environment(voices: bool = True, **values: str):
+def environment(voices: bool = True, piper: bool = True, **values: str):
     saved = {name: os.environ.pop(name) for name in NAMES if name in os.environ}
+    installed = config.piper_installed
+    config.piper_installed = lambda: piper
     with tempfile.TemporaryDirectory() as voices_dir:
         if voices:
             for name in ("en_US-lessac-medium", "en_US-ryan-medium", "de_DE-kerstin-low", "de_DE-thorsten-medium",
@@ -33,6 +35,7 @@ def environment(voices: bool = True, **values: str):
         try:
             yield config.load()
         finally:
+            config.piper_installed = installed
             for name in NAMES:
                 os.environ.pop(name, None)
             os.environ.update(saved)
@@ -100,6 +103,11 @@ def test_external_override() -> None:
 def test_unknown_provider() -> None:
     with environment(TRANSLATE_MODEL="m", VOICE_PROVIDER="espeak") as settings:
         assert not settings.voice.ready and "VOICE_PROVIDER" in settings.voice.problem
+
+
+def test_piper_not_installed() -> None:
+    with environment(piper=False, TRANSLATE_MODEL="m") as settings:
+        assert not settings.voice.ready and "piper-tts" in settings.voice.problem
 
 
 def test_missing_piper_voices() -> None:
