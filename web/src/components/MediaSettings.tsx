@@ -19,6 +19,8 @@ import {
 import { Button } from '@/components/ui/button'
 import { Hint } from '@/components/Hint'
 import { Label } from '@/components/ui/label'
+import { Separator } from '@/components/ui/separator'
+import { ThemeSelect } from '@/components/ThemeSelect'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Select,
@@ -193,9 +195,15 @@ export function DeviceSettingsPopover(props: DeviceSettingsProps) {
           </Button>
         </PopoverTrigger>
       </Hint>
-      <PopoverContent side="top" align="end" className="w-80">
+      <PopoverContent
+        side="top"
+        align="end"
+        className="max-h-(--radix-popover-content-available-height) w-80 overflow-y-auto"
+      >
         <p className="mb-3 text-sm font-medium">Audio and video</p>
         <DeviceSettings {...props} />
+        <Separator className="my-4" />
+        <ThemeSelect />
       </PopoverContent>
     </Popover>
   )

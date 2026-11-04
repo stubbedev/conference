@@ -59,6 +59,7 @@ import { JoinGate } from '@/components/JoinGate'
 import { PeoplePanel } from '@/components/PeoplePanel'
 import { SidePanel, type SidePanelTab } from '@/components/SidePanel'
 import { Prejoin } from '@/components/Prejoin'
+import { HudBackdrop } from '@/components/HudBackdrop'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { VideoTile } from '@/components/VideoTile'
 import { toggleTileDebug } from '@/hooks/tileDebug'
@@ -1260,6 +1261,7 @@ export default function Room() {
   if (phase === 'checking') {
     return (
       <div className="grid h-dvh place-items-center">
+        <HudBackdrop />
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Checking the room…
         </p>
@@ -1268,7 +1270,12 @@ export default function Room() {
   }
 
   if (phase === 'gate') {
-    return <div className="relative grid h-dvh place-items-center bg-muted/40">{gate}</div>
+    return (
+      <div className="relative grid h-dvh place-items-center bg-muted/40">
+        <HudBackdrop />
+        {gate}
+      </div>
+    )
   }
 
   if (phase === 'error') {
@@ -1289,6 +1296,7 @@ export default function Room() {
   if (phase === 'prejoin') {
     return (
       <>
+        <HudBackdrop />
         <div className="absolute top-3 right-3 z-10">
           <ThemeToggle />
         </div>
@@ -1310,6 +1318,7 @@ export default function Room() {
   if (phase === 'joining') {
     return (
       <div className="grid h-dvh place-items-center">
+        <HudBackdrop />
         <div className="flex flex-col items-center gap-3">
           <Loader2 className="size-6 animate-spin text-muted-foreground" />
           <p className="text-sm text-muted-foreground">Joining…</p>
@@ -1329,7 +1338,7 @@ export default function Room() {
               aria-label="Copy invite link"
               className="group -mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-sm font-medium transition-colors hover:bg-secondary"
             >
-              <span className="truncate">{roomInfo?.name || slug}</span>
+              <span className="hud-title truncate">{roomInfo?.name || slug}</span>
               <Link2 className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
             </button>
           </Hint>

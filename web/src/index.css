@@ -1,7 +1,8 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-@custom-variant dark (&:is(.dark *));
+/* The HUD theme is a dark theme too, so dark: variants apply in it. */
+@custom-variant dark (&:is(.dark *, .hud *));
 
 :root {
   --radius: 0.625rem;
@@ -129,4 +130,430 @@
   &::-webkit-scrollbar {
     display: none;
   }
+}
+
+/*
+ * HUD theme (class "hud" on <html>, set by next-themes): deep blue-black
+ * glass, teal light, green highlights, cut corners and corner brackets.
+ * Everything below is scoped to .hud, so the light and dark themes above
+ * stay exactly as upstream. The rules are unlayered on purpose: they
+ * reshape the shadcn primitives (by data-slot) and the components' hud-*
+ * marker classes over their utility classes, without editing those.
+ */
+.hud {
+  --radius: 0.25rem;
+  --background: oklch(0.13 0.025 235);
+  --foreground: oklch(0.93 0.035 190);
+  --card: oklch(0.17 0.03 228 / 0.88);
+  --card-foreground: oklch(0.93 0.035 190);
+  --popover: oklch(0.16 0.03 230);
+  --popover-foreground: oklch(0.93 0.035 190);
+  --primary: oklch(0.82 0.14 185);
+  --primary-foreground: oklch(0.15 0.03 235);
+  --secondary: oklch(0.23 0.045 222);
+  --secondary-foreground: oklch(0.9 0.06 185);
+  --muted: oklch(0.21 0.035 225);
+  --muted-foreground: oklch(0.68 0.05 200);
+  --accent: oklch(0.29 0.065 192);
+  --accent-foreground: oklch(0.94 0.09 178);
+  --destructive: oklch(0.64 0.23 12);
+  --border: oklch(0.78 0.13 185 / 26%);
+  --input: oklch(0.78 0.13 185 / 32%);
+  --ring: oklch(0.86 0.17 165);
+  --chart-1: oklch(0.82 0.14 185);
+  --chart-2: oklch(0.85 0.2 150);
+  --chart-3: oklch(0.7 0.14 230);
+  --chart-4: oklch(0.8 0.15 95);
+  --chart-5: oklch(0.64 0.23 12);
+  --sidebar: oklch(0.15 0.03 230);
+  --sidebar-foreground: oklch(0.93 0.035 190);
+  --sidebar-primary: oklch(0.82 0.14 185);
+  --sidebar-primary-foreground: oklch(0.15 0.03 235);
+  --sidebar-accent: oklch(0.29 0.065 192);
+  --sidebar-accent-foreground: oklch(0.94 0.09 178);
+  --sidebar-border: oklch(0.78 0.13 185 / 26%);
+  --sidebar-ring: oklch(0.86 0.17 165);
+
+  --hud: oklch(0.84 0.15 182);
+  --hud-green: oklch(0.86 0.2 150);
+  --hud-glow: oklch(0.82 0.14 185 / 35%);
+  --hud-corner: 12px;
+  --hud-chamfer: 8px;
+  --hud-font: 'Chakra Petch', ui-sans-serif, system-ui, sans-serif;
+  --hud-font-display: 'Orbitron', 'Chakra Petch', ui-sans-serif, sans-serif;
+  /* Corner brackets: a 2px stroke along each edge at every corner. */
+  --hud-brackets:
+    linear-gradient(var(--hud) 0 0), linear-gradient(var(--hud) 0 0), linear-gradient(var(--hud) 0 0),
+    linear-gradient(var(--hud) 0 0), linear-gradient(var(--hud) 0 0), linear-gradient(var(--hud) 0 0),
+    linear-gradient(var(--hud) 0 0), linear-gradient(var(--hud) 0 0);
+  --hud-bracket-spots: top left, top left, top right, top right, bottom left, bottom left, bottom right, bottom right;
+
+  color-scheme: dark;
+}
+
+.hud body {
+  font-family: var(--hud-font);
+  /* A faint grid under a soft teal haze. */
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% -10%, oklch(0.82 0.14 185 / 14%), transparent 70%),
+    linear-gradient(oklch(0.82 0.14 185 / 5%) 1px, transparent 1px),
+    linear-gradient(90deg, oklch(0.82 0.14 185 / 5%) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    32px 32px,
+    32px 32px;
+  background-attachment: fixed;
+}
+
+/* Scanlines, barely there. */
+.hud body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom, oklch(1 0 0 / 2.5%) 0 1px, transparent 1px 3px);
+}
+
+.hud :is(h1, h2, h3),
+.hud .hud-title {
+  font-family: var(--hud-font-display);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hud .hud-title {
+  font-size: 0.75rem;
+  letter-spacing: 0.18em;
+}
+
+.hud ::selection {
+  background: oklch(0.82 0.14 185 / 35%);
+}
+
+.hud .rounded-xl,
+.hud .rounded-2xl {
+  border-radius: calc(var(--radius) + 2px);
+}
+
+/* Buttons and badges: cut corners, wide uppercase lettering. */
+.hud :is([data-slot='button'], [data-slot='badge']) {
+  clip-path: polygon(
+    var(--hud-chamfer) 0,
+    100% 0,
+    100% calc(100% - var(--hud-chamfer)),
+    calc(100% - var(--hud-chamfer)) 100%,
+    0 100%,
+    0 var(--hud-chamfer)
+  );
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hud [data-slot='button'].bg-primary:hover {
+  filter: brightness(1.12);
+}
+
+/* Panels and floating surfaces: glass with glowing corner brackets. */
+.hud :is(.bg-card, [data-slot='popover-content'], [data-slot='dialog-content'], [data-slot='select-content']) {
+  background-image: var(--hud-brackets);
+  background-repeat: no-repeat;
+  background-size:
+    var(--hud-corner) 2px,
+    2px var(--hud-corner),
+    var(--hud-corner) 2px,
+    2px var(--hud-corner),
+    var(--hud-corner) 2px,
+    2px var(--hud-corner),
+    var(--hud-corner) 2px,
+    2px var(--hud-corner);
+  background-position: var(--hud-bracket-spots);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 0 24px -8px var(--hud-glow);
+  backdrop-filter: blur(6px);
+}
+
+/* The call's top and bottom bars. */
+.hud header.border-b {
+  box-shadow: 0 1px 0 var(--hud-glow);
+}
+
+.hud footer.border-t {
+  box-shadow: 0 -1px 0 var(--hud-glow);
+}
+
+/* Video tiles: bracket the frame like a viewfinder. */
+.hud .hud-tile::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: var(--hud-brackets);
+  background-repeat: no-repeat;
+  background-size:
+    18px 2px,
+    2px 18px,
+    18px 2px,
+    2px 18px,
+    18px 2px,
+    2px 18px,
+    18px 2px,
+    2px 18px;
+  background-position: var(--hud-bracket-spots);
+  opacity: 0.85;
+}
+
+/* Name tags on video tiles. */
+.hud .hud-label {
+  border-radius: 0;
+  background: oklch(0.12 0.03 230 / 78%);
+  border-left: 2px solid var(--hud);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/*
+ * Cyberchat 2077 scenery before a call (HudBackdrop, HudTitle): red
+ * accents, structure lines, a circuit board and a glitching title. The
+ * elements exist in every theme and only show in this one.
+ */
+.hud-only {
+  display: none;
+}
+
+.hud .hud-only {
+  display: block;
+}
+
+.hud .hud-hide {
+  display: none;
+}
+
+.hud {
+  --hud-red: oklch(0.63 0.24 18);
+  --hud-red-glow: oklch(0.63 0.24 18 / 45%);
+}
+
+.hud .hud-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.hud .hud-board {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.7;
+}
+
+.hud .hud-trace path,
+.hud .hud-trace circle {
+  fill: none;
+  stroke: oklch(0.82 0.14 185 / 30%);
+  stroke-width: 1.5;
+}
+
+.hud .hud-trace circle {
+  fill: oklch(0.13 0.025 235);
+}
+
+.hud .hud-trace-red path,
+.hud .hud-trace-red circle {
+  stroke: oklch(0.63 0.24 18 / 45%);
+}
+
+/* A short bright dash travelling along a trace. */
+.hud .hud-trace .hud-pulse {
+  stroke: var(--hud);
+  stroke-width: 2;
+  stroke-dasharray: 18 1600;
+  stroke-dashoffset: 1600;
+  filter: drop-shadow(0 0 4px var(--hud));
+  animation: hud-pulse 6s linear infinite;
+}
+
+.hud .hud-trace-red .hud-pulse {
+  stroke: var(--hud-red);
+  filter: drop-shadow(0 0 4px var(--hud-red));
+}
+
+@keyframes hud-pulse {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.hud .hud-chip rect {
+  fill: oklch(0.12 0.03 232);
+  stroke: oklch(0.82 0.14 185 / 40%);
+  stroke-width: 1.5;
+}
+
+.hud .hud-chip path {
+  stroke: oklch(0.82 0.14 185 / 35%);
+  stroke-width: 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud .hud-trace .hud-pulse {
+    animation: none;
+    display: none;
+  }
+}
+
+/* A frame with tick marks along the top and bottom and notched corners. */
+.hud .hud-frame {
+  position: absolute;
+  inset: 12px;
+  border: 1px solid oklch(0.82 0.14 185 / 22%);
+  clip-path: polygon(22px 0, calc(100% - 22px) 0, 100% 22px, 100% calc(100% - 22px), calc(100% - 22px) 100%, 22px 100%, 0 calc(100% - 22px), 0 22px);
+  background:
+    repeating-linear-gradient(90deg, oklch(0.82 0.14 185 / 35%) 0 1px, transparent 1px 24px) top / 100% 6px no-repeat,
+    repeating-linear-gradient(90deg, oklch(0.82 0.14 185 / 35%) 0 1px, transparent 1px 24px) bottom / 100% 6px no-repeat;
+}
+
+.hud .hud-status {
+  position: absolute;
+  font-family: var(--hud-font-display);
+  font-size: 0.65rem;
+  letter-spacing: 0.25em;
+  color: var(--hud);
+  text-shadow: 0 0 8px var(--hud-glow);
+  white-space: nowrap;
+}
+
+.hud .hud-status-top-left {
+  top: 14px;
+  left: 34px;
+  color: var(--hud-red);
+  text-shadow: 0 0 8px var(--hud-red-glow);
+}
+
+.hud .hud-status-top-right {
+  top: 14px;
+  right: 34px;
+}
+
+.hud .hud-status-bottom {
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--hud-red);
+  text-shadow: 0 0 8px var(--hud-red-glow);
+}
+
+/* Red data bars under the top edge, like a loading readout. */
+.hud .hud-bars {
+  position: absolute;
+  top: 36px;
+  left: 34px;
+  width: min(40vw, 420px);
+  height: 3px;
+  background: linear-gradient(90deg, var(--hud-red) 0 55%, transparent 55% 58%, var(--hud-red) 58% 72%, transparent 72%);
+  box-shadow: 0 0 10px var(--hud-red-glow);
+}
+
+@media (max-width: 640px) {
+  .hud .hud-status-top-right,
+  .hud .hud-status-bottom {
+    display: none;
+  }
+}
+
+/* The start page's title, with a short red/cyan glitch every few seconds. */
+.hud .hud-title-block {
+  margin: 0.5rem auto 2rem;
+  text-align: center;
+}
+
+.hud .hud-wordmark {
+  position: relative;
+  display: inline-block;
+  font-family: var(--hud-font-display);
+  font-size: clamp(2.25rem, 9vw, 4rem);
+  font-weight: 700;
+  font-style: italic;
+  letter-spacing: 0.06em;
+  color: var(--foreground);
+  text-shadow:
+    0 0 18px var(--hud-glow),
+    0 0 2px var(--hud);
+  transform: skewX(-8deg);
+}
+
+.hud .hud-wordmark::before,
+.hud .hud-wordmark::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+
+.hud .hud-wordmark::before {
+  color: var(--hud-red);
+  animation: hud-glitch 5s infinite steps(1);
+}
+
+.hud .hud-wordmark::after {
+  color: var(--hud);
+  animation: hud-glitch 5s infinite steps(1) reverse;
+}
+
+@keyframes hud-glitch {
+  0%,
+  91%,
+  100% {
+    opacity: 0;
+    transform: none;
+    clip-path: none;
+  }
+  92% {
+    opacity: 0.9;
+    transform: translate(-4px, 1px);
+    clip-path: inset(12% 0 58% 0);
+  }
+  94% {
+    opacity: 0.9;
+    transform: translate(4px, -1px);
+    clip-path: inset(56% 0 14% 0);
+  }
+  96% {
+    opacity: 0.9;
+    transform: translate(-2px, 0);
+    clip-path: inset(34% 0 40% 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud .hud-wordmark::before,
+  .hud .hud-wordmark::after {
+    animation: none;
+  }
+}
+
+/* Panel headings as red notched tabs, Netwatch-style. */
+.hud .bg-card > h2:first-child {
+  margin: -1.5rem -1.5rem 0.25rem;
+  padding: 0.55rem 1.5rem;
+  font-size: 0.8rem;
+  color: oklch(0.97 0.02 20);
+  background: linear-gradient(90deg, var(--hud-red), oklch(0.63 0.24 18 / 55%));
+  clip-path: polygon(16px 0, 100% 0, 100% 100%, 0 100%, 0 16px);
+  text-shadow: 0 0 8px var(--hud-red-glow);
+}
+
+/* The join screen's heading gets a red bar with ticks. */
+.hud h1::after {
+  content: '';
+  display: block;
+  width: 96px;
+  height: 3px;
+  margin-top: 0.45rem;
+  background: linear-gradient(90deg, var(--hud-red) 0 70%, transparent 70% 76%, var(--hud-red) 76%);
+  box-shadow: 0 0 10px var(--hud-red-glow);
 }
