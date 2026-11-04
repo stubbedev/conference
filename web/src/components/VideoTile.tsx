@@ -185,7 +185,7 @@ export const VideoTile = memo(function VideoTile({
   }, [videoStream, debugOn])
 
   return (
-    <div className="group relative isolate h-full w-full">
+    <div className="group hud-tile relative isolate h-full w-full">
       {speakingNow && (
         <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-emerald-400" />
       )}
@@ -230,7 +230,7 @@ export const VideoTile = memo(function VideoTile({
           Tap for sound
         </button>
       )}
-      <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1.5 rounded-full bg-black/60 py-1 pr-2.5 pl-2 text-xs font-medium text-white backdrop-blur-sm">
+      <div className="hud-label absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1.5 rounded-full bg-black/60 py-1 pr-2.5 pl-2 text-xs font-medium text-white backdrop-blur-sm">
         {sharing && <MonitorUp className="size-3.5 shrink-0" />}
         {!sharing && micOff && <MicOff className="size-3.5 shrink-0 text-red-400" />}
         <span className={cn('truncate', compact ? 'max-w-24' : 'max-w-48')}>{name}</span>

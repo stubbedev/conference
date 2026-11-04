@@ -6,6 +6,7 @@ import { toast } from 'sonner'
 import { api, type CreatedRoom as CreatedRoomInfo, type ServerConfig } from '@/lib/api'
 import { CreatedRoom } from '@/components/CreatedRoom'
 import { Logo } from '@/components/Logo'
+import { HudBackdrop, HudTitle } from '@/components/HudBackdrop'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { Button } from '@/components/ui/button'
 import {
@@ -75,7 +76,9 @@ export default function Home() {
       <div className="absolute top-4 right-4">
         <ThemeToggle />
       </div>
-      <Logo className="mx-auto mb-6 size-24" />
+      <Logo className="hud-hide mx-auto mb-6 size-24" />
+      <HudTitle />
+      <HudBackdrop />
 
       <div className="grid gap-4">
         {config && !config.joinOnly && (
