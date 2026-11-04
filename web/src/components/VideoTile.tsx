@@ -29,6 +29,14 @@ interface VideoTileProps {
   onTogglePin?: (tileKey: string) => void
   compact?: boolean
   onAspectRatio?: (tileKey: string, ratio: number) => void
+  /** Live-translation subtitle for what this member is saying. */
+  caption?: string
+  /**
+   * Overrides voice detection for the speaking ring: set while this
+   * member is heard through their translation, which plays later than
+   * their own (muted) voice.
+   */
+  speaking?: boolean
 }
 
 // Mobile browsers suspend decoding in ways that leave elements paused
@@ -71,6 +79,8 @@ export const VideoTile = memo(function VideoTile({
   onTogglePin,
   compact,
   onAspectRatio,
+  caption,
+  speaking: speakingOverride,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -167,7 +177,7 @@ export const VideoTile = memo(function VideoTile({
       .toUpperCase() || '?'
 
   const hideVideo = Boolean(camOff && !sharing)
-  const speakingNow = speaking && !micOff && !sharing
+  const speakingNow = (speakingOverride ?? speaking) && !micOff && !sharing
 
   useEffect(() => {
     if (!debugOn) return
@@ -236,6 +246,16 @@ export const VideoTile = memo(function VideoTile({
         <span className={cn('truncate', compact ? 'max-w-24' : 'max-w-48')}>{name}</span>
         {sharing && <span className="shrink-0 text-white/60">screen</span>}
       </div>
+      {caption && (
+        <p
+          className={cn(
+            'hud-caption pointer-events-none absolute left-1/2 line-clamp-3 w-max max-w-[90%] -translate-x-1/2 rounded-lg bg-black/75 px-3 py-1.5 text-center font-medium text-white',
+            compact ? 'bottom-8 text-xs' : 'bottom-10 text-sm sm:text-base',
+          )}
+        >
+          {caption}
+        </p>
+      )}
       {debugOn && debugStats && (
         <span className="absolute right-2 bottom-9 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
           {debugStats}

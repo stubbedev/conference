@@ -127,6 +127,12 @@ release level:
     git push origin "$next"
     echo "released $next"
 
+# Live translation end to end with stand-in speech engines: two headless
+# Chromes must get each other's subtitles and translated voice. Needs
+# Chrome.
+e2e-translate:
+    node web/e2e/translate.mjs
+
 # Speech service (live translation) on :8090. Needs SPEECH_SECRET and the
 # engines (see speech/README.md); ENGINES=fake runs it with stand-ins.
 speech:

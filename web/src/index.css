@@ -313,6 +313,18 @@
   text-transform: uppercase;
 }
 
+/* Live subtitles: a holographic readout. */
+.hud .hud-caption {
+  border-radius: 0;
+  color: oklch(0.95 0.06 180);
+  background: linear-gradient(90deg, oklch(0.16 0.04 220 / 88%), oklch(0.14 0.03 230 / 80%));
+  border-left: 2px solid var(--hud-green);
+  box-shadow:
+    0 0 0 1px oklch(0.82 0.14 185 / 25%),
+    0 0 18px -6px var(--hud-glow);
+  text-shadow: 0 0 10px oklch(0.82 0.14 185 / 45%);
+}
+
 /*
  * Cyberchat 2077 scenery before a call (HudBackdrop, HudTitle): red
  * accents, structure lines, a circuit board and a glitching title. The

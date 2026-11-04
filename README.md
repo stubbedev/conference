@@ -27,6 +27,10 @@
 - 🎥 **Recording that stays with you.** The host can record the meeting
   in their own browser and download the video afterwards. The recording
   never touches the server, and everyone sees a badge while it runs.
+- 🗣️ **Live translation, if you want it.** Everyone picks their language;
+  speech in other languages arrives as subtitles and a translated voice
+  in yours, on a speech service you run yourself. See
+  [Live translation](#live-translation).
 - 🌐 **Works on tricky networks.** A built-in relay gets people through
   firewalls and corporate networks, including over port 443.
 - 📦 **One small program.** A single binary (or Docker image) with its
@@ -100,6 +104,9 @@ All settings are environment variables.
 | `TRUSTED_PROXIES`   | —               | Comma-separated IPs or CIDRs of reverse proxies whose `X-Forwarded-For` names the real client, so rate limits apply per visitor instead of per proxy |
 | `ALLOWED_ORIGINS`   | same origin     | Extra origins allowed to connect to the signaling WebSocket                               |
 | `SLACK_SIGNING_SECRET` | —            | Enables the [`/meet` Slack command](#start-meetings-from-slack); requires `BASE_URL`      |
+| `SPEECH_URL`        | —               | WebSocket address of your [speech service](#live-translation), e.g. `wss://speech.example.com/v1/stream`; enables live translation |
+| `SPEECH_SECRET`     | —               | Secret shared with the speech service, which checks the short-lived tokens the server hands each member while translation is on; set together with `SPEECH_URL` |
+| `SPEECH_STATUS_URL` | `SPEECH_URL`'s `/v1/status` | Where the server checks the speech service is ready, e.g. an internal `http://speech:8090/v1/status` |
 
 ### Who can create rooms?
 
@@ -173,6 +180,58 @@ anything older than five minutes.
 > (see [How privacy works](#how-privacy-works)). The moderator link
 > reaches you through Slack, so Slack can see it too.
 
+### Live translation
+
+Everyone sets **My language** before joining (or in the settings), plus
+whether they want subtitles, a translated voice, and which voice others
+hear them in. A host then turns on **Live translation** in the call:
+
+- Subtitles appear on each speaker's tile in your language.
+- Someone speaking another language is heard through their translated
+  voice instead of their own, so the call sounds like one conversation
+  in your language. A recording does the same in the recording host's
+  language.
+- Everyone sees **Live translation** while it runs, with the state of
+  their own translation and anything that keeps their speech from being
+  translated, such as nobody else in the call speaking another language.
+- It keeps running when the host who started it leaves, until a host
+  switches it off.
+
+It needs a speech service: the `speech/` directory, a small Python
+service with three AI engines (transcription, translation, voice), each
+either local (faster-whisper, a model on Ollama, Piper) or any
+OpenAI-compatible API. Run it on a machine you control, preferably with
+a GPU, and point the server at it:
+
+```bash
+cd speech
+SPEECH_SECRET=s3cret TRANSLATE_URL=http://ollama:11434 TRANSLATE_MODEL=<model> \
+  docker compose --profile gpu up -d   # or --profile local on a CPU
+```
+
+Then set `SPEECH_URL` (behind TLS, e.g. `wss://speech.example.com/v1/stream`)
+and the same `SPEECH_SECRET` on the conference server.
+[speech/README.md](speech/README.md) covers the engines and their
+settings, where each sends its data, and the setups it was tested with
+(fully local with Gemma on Ollama, and OpenAI's `gpt-4o-mini` and
+`gpt-transcribe`). English, German and Swedish are included; a language
+is an entry in `speech/languages.yaml`, and the app takes its list from
+there.
+
+Until the speech service is reachable and all three engines are set up,
+everyone still sees the live-translation settings and hosts the button,
+greyed out, with what is missing (for example "set TRANSLATE_MODEL").
+With an engine on a public service, the app says "Live translation via
+an external service".
+
+> [!NOTE]
+> Each browser translates its own speech, because only it holds its
+> speaker's microphone before encryption: it sends that audio to your
+> speech service and passes the subtitles and translated voice back into
+> the room, encrypted, as its own tracks. So the speech service handles
+> one connection per person talking, and every translated voice stays
+> its speaker's own.
+
 ## How privacy works
 
 - Every room has its own 256-bit key. Your browser uses it to encrypt
@@ -189,6 +248,14 @@ anything older than five minutes.
   send to a server.
 - Joining is authorized separately from the media key, through a session
   issued by `/auth`.
+- **Live translation** sends each speaker's audio from their own browser
+  to *your* speech service, which hears it in the clear: run it on
+  hardware you trust. It keeps audio and text in memory only, for as
+  long as it takes to translate a sentence, and logs neither. The
+  conference server still sees only ciphertext: languages and subtitles
+  travel sealed with the room's chat key, translated voices as encrypted
+  audio tracks. With an OpenAI-compatible engine on a public service,
+  that service gets the audio or text too.
 
 <details>
 <summary>Technical details</summary>

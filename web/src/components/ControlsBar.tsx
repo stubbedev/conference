@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   Circle,
+  Languages,
   Maximize2,
   MessageSquare,
   Mic,
@@ -31,6 +32,12 @@ interface ControlsBarProps {
   /** Host-only: browsers without MediaRecorder canvas capture hide it too. */
   canRecord?: boolean
   recording?: boolean
+  /** Host-only. */
+  canTranslate?: boolean
+  /** Why live translation cannot start: the button shows greyed out with it. */
+  translateUnavailable?: string
+  translating?: boolean
+  onTranslate?: () => void
   onMic: () => void
   onCam: () => void
   onShare: () => void
@@ -57,6 +64,10 @@ export const ControlsBar = memo(function ControlsBar({
   canShare = true,
   canRecord = false,
   recording = false,
+  canTranslate = false,
+  translateUnavailable,
+  translating = false,
+  onTranslate,
   onMic,
   onCam,
   onShare,
@@ -66,6 +77,9 @@ export const ControlsBar = memo(function ControlsBar({
   onToggleFullscreen,
   children,
 }: ControlsBarProps) {
+  // A room already translating can always be switched off.
+  const translateBlocked = Boolean(translateUnavailable) && !translating
+  const translateLabel = translating ? 'Stop live translation' : 'Start live translation'
   const [revealed, setRevealed] = useState(true)
   const visible = !fullscreen || revealed
   const hideTimer = useRef<number | undefined>(undefined)
@@ -150,6 +164,23 @@ export const ControlsBar = memo(function ControlsBar({
             aria-label={recording ? 'Stop recording' : 'Record the call'}
           >
             {recording ? <Square className="fill-current" /> : <Circle className="fill-current" />}
+          </Button>
+        </Hint>
+      )}
+      {canTranslate && onTranslate && (
+        <Hint label={(translateBlocked && translateUnavailable) || translateLabel}>
+          {/* aria-disabled rather than disabled, so the hint still shows on hover. */}
+          <Button
+            variant={translating ? 'default' : 'secondary'}
+            size="icon"
+            className={cn(ICON_BUTTON, translateBlocked && 'cursor-not-allowed opacity-50')}
+            onClick={translateBlocked ? undefined : onTranslate}
+            aria-label={translateLabel}
+            aria-description={translateBlocked ? translateUnavailable : undefined}
+            aria-disabled={translateBlocked}
+            aria-pressed={translating}
+          >
+            <Languages />
           </Button>
         </Hint>
       )}

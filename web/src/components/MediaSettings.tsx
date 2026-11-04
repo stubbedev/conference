@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Settings2 } from 'lucide-react'
 
 import {
@@ -185,7 +186,10 @@ export function DeviceSettings({
   )
 }
 
-export function DeviceSettingsPopover(props: DeviceSettingsProps) {
+export function DeviceSettingsPopover({
+  translation,
+  ...props
+}: DeviceSettingsProps & { translation?: ReactNode }) {
   return (
     <Popover>
       <Hint label="Audio and video settings" side="top">
@@ -202,6 +206,13 @@ export function DeviceSettingsPopover(props: DeviceSettingsProps) {
       >
         <p className="mb-3 text-sm font-medium">Audio and video</p>
         <DeviceSettings {...props} />
+        {translation && (
+          <>
+            <Separator className="my-4" />
+            <p className="mb-3 text-sm font-medium">Live translation</p>
+            {translation}
+          </>
+        )}
         <Separator className="my-4" />
         <ThemeSelect />
       </PopoverContent>
