@@ -6,6 +6,7 @@
 // relays ciphertext.
 
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
+import { isLangPrefs, isRoomCaption, type LangPrefs, type RoomCaption } from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -48,6 +49,15 @@ export interface RoomClientOptions {
 
 /** Join codes after which retrying cannot succeed. */
 const FINAL_JOIN_CODES = new Set(['room-not-found', 'unauthorized'])
+
+// A page served over HTTPS on a bare IP address is a local-network
+// setup (just translate-lan) with a self-signed certificate. Safari opens
+// the page after "Proceed" but refuses the WebSocket until the Mac trusts
+// the certificate, which then looks like a plain connection failure.
+function selfSignedHint(): string {
+  if (location.protocol !== 'https:' || !/^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname)) return ''
+  return ` If this is Safari on a local-network link, trust the certificate first: open ${location.origin}/certificate.pem, then in Keychain Access set it to "Always Trust".`
+}
 
 export class JoinError extends Error {
   readonly code: string
@@ -93,10 +103,13 @@ interface WireMessage {
   resume?: string
   replaces?: string
   layer?: Layer
+  translatingBy?: string
+  url?: string
+  token?: string
 }
 
 interface Events {
-  welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string }
+  welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string; translatingBy: string }
   'member-joined': { member: MemberInfo; replaces: string }
   'member-left': { id: string }
   'member-state': { id: string; mic: boolean; cam: boolean; sharing: boolean }
@@ -104,6 +117,10 @@ interface Events {
   'track-removed': { sourceId: string; mid: string }
   chat: ChatMessage
   recording: { from: string; on: boolean }
+  lang: { from: string; prefs: LangPrefs }
+  caption: { from: string; caption: RoomCaption }
+  translating: { from: string; on: boolean }
+  'translate-token': { url: string; token: string }
   error: { code: string; text: string }
   forced: { action: ForcedAction }
   kicked: Record<string, never>
@@ -161,6 +178,11 @@ export class RoomClient {
   private downKinds = new Map<string, string>()
   private screenTrackIds = new Set<string>()
   private screenSenders: RTCRtpSender[] = []
+  private translationTrackLangs = new Map<string, string>()
+  private translationSenders: RTCRtpSender[] = []
+  private langPrefs: LangPrefs | null = null
+  private memberLangs = new Map<string, LangPrefs>()
+  private negotiation: Promise<void> = Promise.resolve()
   private transformed = new WeakSet<object>()
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
@@ -252,8 +274,10 @@ export class RoomClient {
             self: msg.self as MemberInfo,
             members: msg.members ?? [],
             recorder: msg.recorder ?? '',
+            translatingBy: msg.translatingBy ?? '',
           })
           resolve()
+          void this.sendLang()
           return
         }
         if (msg.type === 'error') {
@@ -266,7 +290,7 @@ export class RoomClient {
       }
       ws.onerror = () => {
         clearTimeout(timeout)
-        reject(new JoinError('network', 'Signaling connection failed.'))
+        reject(new JoinError('network', `Signaling connection failed.${selfSignedHint()}`))
       }
       ws.onclose = () => {
         clearTimeout(timeout)
@@ -290,6 +314,11 @@ export class RoomClient {
   /** Rejoin token for replacing this membership after a dropped connection. */
   get resume(): string {
     return this.resumeToken
+  }
+
+  /** Language settings other members have announced so far. */
+  get memberLangPrefs(): ReadonlyMap<string, LangPrefs> {
+    return this.memberLangs
   }
 
   memberName(id: string): string {
@@ -397,6 +426,57 @@ export class RoomClient {
     this.send({ type: 'chat', iv: sealed.iv, ct: sealed.ct })
   }
 
+  /** Sets and announces this member's language settings; re-sent to every joiner. */
+  setLangPrefs(prefs: LangPrefs): void {
+    this.langPrefs = prefs
+    void this.sendLang()
+  }
+
+  // announceTranslating switches the room's live translation on or off
+  // (hosts only). While it is on, the server hands every member a
+  // translate-token event for the speech service.
+  announceTranslating(on: boolean): void {
+    this.send({ type: 'translate', on })
+  }
+
+  /** Asks for a fresh speech token; answered only while translation is on. */
+  requestSpeechToken(): void {
+    this.send({ type: 'translate-token-request' })
+  }
+
+  async sendCaption(caption: RoomCaption): Promise<void> {
+    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify(caption))
+    this.send({ type: 'caption', iv: sealed.iv, ct: sealed.ct })
+  }
+
+  /** Publishes a translated-voice track, labelled translation-<lang> for the room. */
+  async addTranslationTrack(lang: string, track: MediaStreamTrack): Promise<void> {
+    const pc = this.up
+    if (!pc) throw new Error('Publish before adding a translation track.')
+
+    this.translationTrackLangs.set(track.id, lang)
+    const sender = pc.addTrack(track, new MediaStream([track]))
+    this.translationSenders.push(sender)
+    this.installSenderTransform(sender)
+    await this.sendUpOffer()
+  }
+
+  async removeTranslationTracks(): Promise<void> {
+    const pc = this.up
+    if (!pc || this.translationSenders.length === 0) return
+
+    for (const sender of this.translationSenders) {
+      try {
+        pc.removeTrack(sender)
+      } catch (err) {
+        console.warn('removeTrack', err)
+      }
+    }
+    this.translationSenders = []
+    this.translationTrackLangs.clear()
+    await this.sendUpOffer()
+  }
+
   moderate(target: string, action: ModerateAction): void {
     this.send({ type: 'moderate', target, action })
   }
@@ -420,6 +500,12 @@ export class RoomClient {
   private send(msg: WireMessage): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     this.ws.send(JSON.stringify(msg))
+  }
+
+  private async sendLang(): Promise<void> {
+    if (!this.langPrefs) return
+    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify(this.langPrefs))
+    this.send({ type: 'lang', iv: sealed.iv, ct: sealed.ct })
   }
 
   private sendState(): void {
@@ -478,7 +564,16 @@ export class RoomClient {
     return transceiver.sender
   }
 
-  private async sendUpOffer(): Promise<void> {
+  // Offers are serialized: a second createOffer/setLocalDescription
+  // overlapping the first (two translation tracks added at once) makes
+  // Chrome reject the description as modified.
+  private sendUpOffer(): Promise<void> {
+    const next = this.negotiation.then(() => this.negotiateUp())
+    this.negotiation = next.catch(() => {})
+    return next
+  }
+
+  private async negotiateUp(): Promise<void> {
     const pc = this.up
     if (!pc) return
 
@@ -495,6 +590,8 @@ export class RoomClient {
 
   private kindOf(track: MediaStreamTrack | null): string {
     if (!track) return 'camera'
+    const translationLang = this.translationTrackLangs.get(track.id)
+    if (translationLang) return `translation-${translationLang}`
     if (track.kind === 'audio') return 'audio'
     if (this.screenTrackIds.has(track.id)) return 'screen'
     return 'camera'
@@ -530,6 +627,7 @@ export class RoomClient {
           if (replaces) this.dropMember(replaces)
           this.members.set(member.id, member)
           this.emit('member-joined', { member, replaces })
+          void this.sendLang()
         }
         return
       }
@@ -560,6 +658,29 @@ export class RoomClient {
       case 'recording':
         if (msg.from) this.emit('recording', { from: msg.from, on: msg.on ?? false })
         return
+      case 'lang': {
+        const prefs = await this.openSealed(msg)
+        if (msg.from && isLangPrefs(prefs)) {
+          this.memberLangs.set(msg.from, prefs)
+          this.emit('lang', { from: msg.from, prefs })
+        }
+        return
+      }
+      case 'caption': {
+        const caption = await this.openSealed(msg)
+        // Everyone captions their own speech: a caption naming any other
+        // speaker than its sender is dropped.
+        if (msg.from && isRoomCaption(caption) && caption.speaker === msg.from) {
+          this.emit('caption', { from: msg.from, caption })
+        }
+        return
+      }
+      case 'translating':
+        if (msg.from) this.emit('translating', { from: msg.from, on: msg.on ?? false })
+        return
+      case 'translate-token':
+        if (msg.url && msg.token) this.emit('translate-token', { url: msg.url, token: msg.token })
+        return
       case 'forced': {
         const action = msg.action
         if (action === 'mute' || action === 'cam' || action === 'screen') {
@@ -578,6 +699,7 @@ export class RoomClient {
   /** Forgets a member and closes its downstream; reports whether it was known. */
   private dropMember(id: string): boolean {
     this.layerPrefs.delete(id)
+    this.memberLangs.delete(id)
     const known = this.members.delete(id)
     this.downs.get(id)?.close()
     this.downs.delete(id)
@@ -592,8 +714,18 @@ export class RoomClient {
       pc.ontrack = (ev) => {
         this.installReceiverTransform(ev.receiver)
         const key = `${sourceId}:${ev.transceiver.mid ?? ''}`
-        const kind = ev.track.kind === 'audio' ? 'audio' : (this.downKinds.get(key) ?? 'camera')
-        const stream = ev.streams[0] ?? new MediaStream([ev.track])
+        const labelled = this.downKinds.get(key)
+        const kind =
+          ev.track.kind === 'audio'
+            ? labelled?.startsWith('translation-')
+              ? labelled
+              : 'audio'
+            : (labelled ?? 'camera')
+        // A translated voice is played on its own, never as part of the
+        // speaker's camera stream, so it gets a stream of its own.
+        const stream = kind.startsWith('translation-')
+          ? new MediaStream([ev.track])
+          : (ev.streams[0] ?? new MediaStream([ev.track]))
         this.emit('track', { sourceId, stream, kind })
       }
     }
@@ -650,6 +782,17 @@ export class RoomClient {
       })
     } catch (err) {
       console.warn('chat: undecryptable message', err)
+    }
+  }
+
+  /** Decrypts a sealed JSON message; undefined when it cannot be opened. */
+  private async openSealed(msg: WireMessage): Promise<unknown> {
+    if (!msg.iv || !msg.ct) return undefined
+    try {
+      return JSON.parse(await decryptChat(this.opts.chatKey, { iv: msg.iv, ct: msg.ct })) as unknown
+    } catch (err) {
+      console.warn(`${msg.type}: undecryptable message`, err)
+      return undefined
     }
   }
 

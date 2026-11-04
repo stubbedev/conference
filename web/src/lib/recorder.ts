@@ -13,6 +13,8 @@ export interface RecorderTile {
   local: boolean
   /** Spotlights the tile, mirroring the recorder's pinned view. */
   pinned: boolean
+  /** Left out of the mix: live translation replaces this speaker's voice. */
+  audioMuted?: boolean
 }
 
 const CANVAS_WIDTH = 1280
@@ -62,14 +64,23 @@ interface RecorderEntry {
 // speakers; the user gesture that started the recording unlocks play().
 // Chrome is the other way round: the element path gives silence for a
 // MediaStream there, so Chrome and Firefox read every track directly.
+// Every iOS browser is WebKit too; Chrome and Edge say "Chrome/" besides "AppleWebKit".
+const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\//.test(navigator.userAgent)
+
 interface MixedSource {
   track: MediaStreamTrack
   source: AudioNode
+  gain: GainNode
   element?: HTMLAudioElement
 }
 
-// Every iOS browser is WebKit too; Chrome and Edge say "Chrome/" besides "AppleWebKit".
-const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\//.test(navigator.userAgent)
+// A translated voice in the recorder's language, so the file plays as
+// one conversation in that language. A remote (received) stream takes
+// the <audio> element path in WebKit; a stream made in this browser is local.
+interface TranslationAudio {
+  stream: MediaStream
+  local: boolean
+}
 
 // Chunked data streams into the origin-private file system where the
 // browser has it (Chrome, Firefox, Safari 16.4+), keeping memory flat
@@ -91,6 +102,8 @@ export class CallRecorder {
   private entries = new Map<string, RecorderEntry>()
   private latest: RecorderTile[] = []
   private mixed = new Map<MediaStreamTrack, MixedSource>()
+  private translations: TranslationAudio[] = []
+  private translationsMixed: MixedSource[] = []
   private mixer: MediaStreamAudioDestinationNode | null = null
   private storageRoot: FileSystemDirectoryHandle | null = null
   private canvasStream: MediaStream | null = null
@@ -164,6 +177,16 @@ export class CallRecorder {
     return this.starting
   }
 
+  /** Mixes these translated voices (one per other-language speaker) into the recording. */
+  setTranslations(translations: TranslationAudio[]): void {
+    const same =
+      translations.length === this.translations.length &&
+      translations.every((t, i) => t.stream === this.translations[i].stream && t.local === this.translations[i].local)
+    if (same) return
+    this.translations = translations
+    this.connectTranslations()
+  }
+
   private async doStart(): Promise<void> {
     if (this.active) return
 
@@ -171,6 +194,7 @@ export class CallRecorder {
     if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {})
     this.mixer = ctx ? ctx.createMediaStreamDestination() : null
     this.connectAudio(this.latest)
+    this.connectTranslations()
 
     const mime = MIME_CANDIDATES.find((candidate) => MediaRecorder.isTypeSupported(candidate))
 
@@ -289,28 +313,53 @@ export class CallRecorder {
     }
 
     for (const tile of tiles) {
+      const volume = tile.audioMuted ? 0 : 1
       for (const track of tile.stream?.getAudioTracks() ?? []) {
-        if (this.mixed.has(track)) continue
-
-        let source: AudioNode
-        let element: HTMLAudioElement | undefined
-        if (tile.local || !WEBKIT) {
-          source = ctx.createMediaStreamSource(new MediaStream([track]))
-        } else {
-          element = document.createElement('audio')
-          element.srcObject = new MediaStream([track])
-          playMediaElement(element)
-          source = ctx.createMediaElementSource(element)
+        const existing = this.mixed.get(track)
+        if (existing) {
+          existing.gain.gain.value = volume
+          continue
         }
-        source.connect(mixer)
-        this.mixed.set(track, { track, source, element })
+        const mixedSource = this.mixSource(ctx, mixer, track, tile.local)
+        mixedSource.gain.gain.value = volume
+        this.mixed.set(track, mixedSource)
       }
     }
+  }
+
+  private connectTranslations(): void {
+    for (const mixed of this.translationsMixed) this.disconnectMixed(mixed)
+    this.translationsMixed = []
+    const ctx = audioContext()
+    const mixer = this.mixer
+    if (!ctx || !mixer) return
+    for (const translation of this.translations) {
+      const track = translation.stream.getAudioTracks()[0]
+      if (track) this.translationsMixed.push(this.mixSource(ctx, mixer, track, translation.local))
+    }
+  }
+
+
+  private mixSource(ctx: AudioContext, mixer: MediaStreamAudioDestinationNode, track: MediaStreamTrack, local: boolean): MixedSource {
+    let source: AudioNode
+    let element: HTMLAudioElement | undefined
+    if (local || !WEBKIT) {
+      source = ctx.createMediaStreamSource(new MediaStream([track]))
+    } else {
+      element = document.createElement('audio')
+      element.srcObject = new MediaStream([track])
+      playMediaElement(element)
+      source = ctx.createMediaElementSource(element)
+    }
+    const gain = ctx.createGain()
+    source.connect(gain).connect(mixer)
+    return { track, source, gain, element }
   }
 
   private disconnectMixed(mixed: MixedSource): void {
     try {
       mixed.source.disconnect()
+      mixed.gain.disconnect()
     } catch {
       // already detached
     }
@@ -434,6 +483,9 @@ export class CallRecorder {
     this.storageRoot = null
     for (const mixed of this.mixed.values()) this.disconnectMixed(mixed)
     this.mixed.clear()
+    for (const mixed of this.translationsMixed) this.disconnectMixed(mixed)
+    this.translationsMixed = []
+    this.translations = []
     this.mixer = null
     for (const entry of this.entries.values()) {
       entry.video.pause()

@@ -327,6 +327,20 @@ async function main() {
     await checkCall(failures, browsers, ['server restart 0', 'server restart 1'], { seconds })
     await checkStillInRoom(failures, 'server restart', browsers)
 
+    // No speech service here: live translation shows, greyed out with
+    // what has to be set up, and does nothing when clicked.
+    const translateButton = `(() => {
+      const b = document.querySelector('[aria-label="Start live translation"]')
+      return b && { disabled: b.getAttribute('aria-disabled'), reason: b.getAttribute('aria-description') ?? '' }
+    })()`
+    const blocked = await waitFor(browsers[0], translateButton, (b) => b?.disabled === 'true', 10_000)
+    check(failures, 'translation', blocked.ok, `translate button not greyed out: ${JSON.stringify(blocked.value)}`)
+    check(failures, 'translation', blocked.value?.reason.includes('SPEECH_URL'), `no setup hint: ${JSON.stringify(blocked.value)}`)
+    check(failures, 'translation', !(await evalJs(browsers[1], translateButton)), 'translate button visible on the unprivileged browser')
+    await evalJs(browsers[0], `document.querySelector('[aria-label="Start live translation"]')?.click()`)
+    await sleep(500)
+    check(failures, 'translation', !(await evalJs(browsers[0], `document.querySelector('header').innerText.includes('Live translation')`)), 'greyed-out translate button started translation')
+
     // Recording phase. Round one: the host records, a third browser
     // joins late (the badge must be replayed in its welcome), then the
     // host navigates away (the badge must clear everywhere — recording

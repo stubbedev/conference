@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import { Circle, CircleAlert, Link2, Loader2, Users } from 'lucide-react'
+import { Circle, CircleAlert, Languages, Link2, Loader2, TriangleAlert, Users } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -29,7 +29,7 @@ import {
   type TrackKind,
 } from '@/hooks/media'
 import { usePersistentState } from '@/hooks/persistent'
-import { api, type RoomInfo } from '@/lib/api'
+import { api, type RoomInfo, type TranslationConfig } from '@/lib/api'
 import { randomDisplayName } from '@/lib/names'
 import {
   deriveChatKey,
@@ -42,6 +42,9 @@ import {
 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
 import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
+import { Translator } from '@/lib/translate/bridge'
+import { DEFAULT_LANGUAGE, languageName, type Language } from '@/lib/translate/languages'
+import { isVoiceChoice, type LangPrefs, type RoomCaption, type TranslatorStatus } from '@/lib/translate/types'
 import {
   JoinError,
   RoomClient,
@@ -59,10 +62,12 @@ import { JoinGate } from '@/components/JoinGate'
 import { PeoplePanel } from '@/components/PeoplePanel'
 import { SidePanel, type SidePanelTab } from '@/components/SidePanel'
 import { Prejoin } from '@/components/Prejoin'
-import { HudBackdrop } from '@/components/HudBackdrop'
 import { ThemeToggle } from '@/components/ThemeToggle'
+import { HudBackdrop } from '@/components/HudBackdrop'
 import { VideoTile } from '@/components/VideoTile'
 import { toggleTileDebug } from '@/hooks/tileDebug'
+import { TranslationAudio } from '@/components/TranslationAudio'
+import { TranslationSettings } from '@/components/TranslationSettings'
 
 interface Controls {
   mic: boolean
@@ -85,6 +90,45 @@ const LOCAL_SOURCE = 'local'
 const NO_PIN = 'none'
 const RECOVER_BACKOFF_MS = 5000
 const RECONNECT_TOAST = 'reconnect'
+const TRANSLATION_KIND_PREFIX = 'translation-'
+// A final subtitle stays up this long; an interim one that never got its
+// final (the speaker trailed off) is dropped after the longer hold.
+const CAPTION_HOLD_MS = 5000
+const INTERIM_HOLD_MS = 10_000
+const CAPTION_PRUNE_MS = 500
+
+// Until /api/config answers, and when it cannot be read.
+const TRANSLATION_CHECKING: TranslationConfig = {
+  available: false,
+  reason: 'Checking whether live translation is available…',
+  languages: [],
+  external: false,
+}
+const TRANSLATION_UNKNOWN: TranslationConfig = {
+  available: false,
+  reason: 'Live translation is unavailable: the server configuration could not be read.',
+  languages: [],
+  external: false,
+}
+
+const TRANSLATOR_STATE_LABELS: Record<TranslatorStatus['state'], string> = {
+  claiming: 'starting…',
+  connecting: 'connecting…',
+  live: 'live',
+  retrying: 'reconnecting…',
+  failed: 'failed',
+}
+
+interface ShownCaption {
+  segId: string
+  text: string
+  final: boolean
+  at: number
+}
+
+function localMicTrack(stream: MediaStream | null): MediaStreamTrack | null {
+  return stream?.getAudioTracks()[0] ?? null
+}
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000, ...Array<number>(14).fill(10_000)]
 
 // layoutLayer is the camera layer a tile's on-screen size can use: the
@@ -119,6 +163,18 @@ function supportsE2EE(): boolean {
 // The name a tile carries, on screen and in the recording composite;
 // screens are labeled by their owner, since the picture alone does not
 // say whose it is.
+// What keeps this member's speech from being translated, in words.
+function translationWarnings(status: TranslatorStatus, selfLang: string, languages: readonly Language[]): string[] {
+  const warnings: string[] = []
+  if (status.sameLanguage) {
+    warnings.push(`Everyone here speaks ${languageName(languages, selfLang)}: nothing to translate`)
+  }
+  if (status.failedTranslations > 0) {
+    warnings.push(`${status.failedTranslations} sentence${status.failedTranslations === 1 ? '' : 's'} sent untranslated`)
+  }
+  return warnings
+}
+
 function tileLabel(tile: Tile, displayName: string, members: MemberInfo[]): string {
   if (tile.sourceId === LOCAL_SOURCE) {
     return tile.kind === SCREEN_KIND ? 'Your screen' : `${displayName} (you)`
@@ -153,6 +209,23 @@ export default function Room() {
   const [debugOpen, setDebugOpen] = useState(false)
   const [recorder, setRecorder] = useState<string | null>(null)
   const [recording, setRecording] = useState(false)
+  const [translation, setTranslation] = useState<TranslationConfig>(TRANSLATION_CHECKING)
+  const translationAvailable = translation.available
+  // The room's live translation: the host who switched it on, null when off.
+  const [translationBy, setTranslationBy] = useState<string | null>(null)
+  const [selfId, setSelfId] = useState('')
+  const [captions, setCaptions] = useState<Record<string, ShownCaption>>({})
+  // Each speaker's translated voices, by speaker and then language.
+  const [translationStreams, setTranslationStreams] = useState<Record<string, Record<string, MediaStream>>>({})
+  // Each member's announced language.
+  const [memberLangs, setMemberLangs] = useState<Record<string, string>>({})
+  // Speakers whose translated voice is playing right now, driven by the
+  // bridge's voice cues; voiceEndsRef holds when each one's last ends.
+  const [voicePlaying, setVoicePlaying] = useState<Record<string, true>>({})
+  const [translatorStatus, setTranslatorStatus] = useState<TranslatorStatus | null>(null)
+  // Why live translation stopped on its own; stays until dismissed or restarted.
+  const [translationFailure, setTranslationFailure] = useState('')
+  const voiceEndsRef = useRef(new Map<string, number>())
   const titleTapsRef = useRef<number[]>([])
   const copyTimerRef = useRef<number | undefined>(undefined)
   const pageErrorsRef = useRef<string[]>([])
@@ -184,12 +257,23 @@ export default function Room() {
     (stored) => (stored === 'people' || stored === 'chat' ? stored : null),
   )
   const chatOpen = sidebar === 'chat'
+  const [langPrefs, setLangPrefs] = usePersistentState<LangPrefs>(
+    'conference:translation',
+    { lang: DEFAULT_LANGUAGE, voice: true, subtitles: true, voiceChoice: 'female' },
+    (stored) => ({
+      lang: typeof stored.lang === 'string' && stored.lang ? stored.lang : DEFAULT_LANGUAGE,
+      voice: typeof stored.voice === 'boolean' ? stored.voice : true,
+      subtitles: typeof stored.subtitles === 'boolean' ? stored.subtitles : true,
+      voiceChoice: isVoiceChoice(stored.voiceChoice) ? stored.voiceChoice : 'female',
+    }),
+  )
 
   const { devices, refresh: refreshDevices } = useMediaDevices()
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
 
   const clientRef = useRef<RoomClient | null>(null)
   const recorderRef = useRef<CallRecorder | null>(null)
+  const translatorRef = useRef<Translator | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
   const micPipelineRef = useRef<MicPipeline | null>(null)
@@ -201,6 +285,7 @@ export default function Room() {
   const devicesRef = useLatest(devices)
   const chatOpenRef = useLatest(chatOpen)
   const membersRef = useLatest(members)
+  const langPrefsRef = useLatest(langPrefs)
   const kickedRef = useRef(false)
   const endedRef = useRef(false)
   const reconnectingRef = useRef(false)
@@ -423,7 +508,7 @@ export default function Room() {
 
         if (!supportsE2EE()) {
           throw new Error(
-            'This browser cannot do end-to-end encrypted media. Use a recent Chrome, Edge or Safari.',
+            'This browser cannot do end-to-end encrypted media. Use a current Chrome or Edge, or Safari 15.4 or newer.',
           )
         }
 
@@ -457,6 +542,7 @@ export default function Room() {
       endedRef.current = true
       clientRef.current?.leave()
       recorderRef.current?.stop().catch(() => {})
+      translatorRef.current?.stop().catch(() => {})
       micPipelineRef.current?.dispose()
       stopMediaStream(localStreamRef.current)
       stopMediaStream(screenStreamRef.current)
@@ -529,6 +615,116 @@ export default function Room() {
     else startRecording()
   }, [startRecording, stopRecording])
 
+  useEffect(() => {
+    api
+      .config()
+      .then((config) => setTranslation(config.translation))
+      .catch(() => setTranslation(TRANSLATION_UNKNOWN))
+  }, [])
+
+  // A language the speech service no longer speaks falls back to the default.
+  useEffect(() => {
+    const codes = translation.languages.map((language) => language.code)
+    if (codes.length === 0 || codes.includes(langPrefs.lang)) return
+    setLangPrefs({ ...langPrefs, lang: codes.includes(DEFAULT_LANGUAGE) ? DEFAULT_LANGUAGE : codes[0] })
+  }, [translation, langPrefs, setLangPrefs])
+
+  // Captions for this member's own language only; interim lines are
+  // replaced in place by the next line from the same speaker.
+  const handleRoomCaption = useCallback(
+    (caption: RoomCaption) => {
+      const prefs = langPrefsRef.current
+      if (caption.lang !== prefs.lang) return
+      if (caption.k === 'caption') {
+        if (!prefs.subtitles) return
+        const shown: ShownCaption = {
+          segId: caption.segId,
+          text: caption.text,
+          final: caption.final,
+          at: Date.now(),
+        }
+        setCaptions((prev) => ({ ...prev, [caption.speaker]: shown }))
+        return
+      }
+      const { speaker, startInMs, durationMs } = caption
+      const ends = Date.now() + startInMs + durationMs
+      voiceEndsRef.current.set(speaker, Math.max(voiceEndsRef.current.get(speaker) ?? 0, ends))
+      window.setTimeout(() => setVoicePlaying((prev) => ({ ...prev, [speaker]: true })), startInMs)
+      window.setTimeout(() => {
+        // A later segment of the same speaker keeps the ring on.
+        if (Date.now() < (voiceEndsRef.current.get(speaker) ?? 0) - 50) return
+        setVoicePlaying(({ [speaker]: _ended, ...rest }) => rest)
+      }, startInMs + durationMs)
+    },
+    [langPrefsRef],
+  )
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now()
+      setCaptions((prev) => {
+        const kept = Object.entries(prev).filter(
+          ([, caption]) => now - caption.at < (caption.final ? CAPTION_HOLD_MS : INTERIM_HOLD_MS),
+        )
+        return kept.length === Object.keys(prev).length ? prev : Object.fromEntries(kept)
+      })
+    }, CAPTION_PRUNE_MS)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  // This member's own bridge: it runs while the room's live translation
+  // is on, translating this member's speech only.
+  const stopTranslation = useCallback(async () => {
+    const translator = translatorRef.current
+    translatorRef.current = null
+    setTranslatorStatus(null)
+    await translator?.stop()
+  }, [])
+
+  const startTranslation = useCallback(
+    (client: RoomClient) => {
+      if (translatorRef.current) return
+      setTranslationFailure('')
+      const translator = new Translator(langPrefsRef.current, {
+        onCaption: handleRoomCaption,
+        onFailure: (reason) => {
+          toast.error(reason, { duration: 10_000 })
+          setTranslationFailure(reason)
+          void stopTranslation()
+        },
+        onStatus: setTranslatorStatus,
+      })
+      translatorRef.current = translator
+      translator.attach(client)
+      translator.start(localMicTrack(localStreamRef.current))
+    },
+    [langPrefsRef, handleRoomCaption, stopTranslation],
+  )
+
+  // The host's switch for the whole room; each browser's bridge follows
+  // the translating events.
+  const toggleTranslation = useCallback(() => {
+    clientRef.current?.announceTranslating(translationBy === null)
+  }, [translationBy])
+
+  useEffect(() => {
+    clientRef.current?.setLangPrefs(langPrefs)
+    translatorRef.current?.setSelfPrefs(langPrefs)
+  }, [langPrefs])
+
+  // Subtitles on screen are in the old language once it changes.
+  const changeLangPrefs = useCallback(
+    (prefs: LangPrefs) => {
+      setLangPrefs(prefs)
+      setCaptions({})
+    },
+    [setLangPrefs],
+  )
+
+  useEffect(() => {
+    translatorRef.current?.setLocalMic(localMicTrack(localStream))
+  }, [localStream])
+
   const connectClient = useCallback(
     async (resume: string): Promise<RoomClient> => {
       const stream = localStreamRef.current
@@ -549,10 +745,18 @@ export default function Room() {
         resume,
       })
       clientRef.current = client
+      client.setLangPrefs(langPrefsRef.current)
+      // A rejoining member's bridge follows the new client before it connects.
+      translatorRef.current?.attach(client)
+      let translatingAtJoin = false
 
-      client.on('welcome', ({ members: initial, recorder }) => {
+      client.on('welcome', ({ self, members: initial, recorder, translatingBy }) => {
         setMembers(initial)
         setRecorder(recorder || null)
+        setTranslationBy(translatingBy || null)
+        translatingAtJoin = Boolean(translatingBy)
+        setSelfId(self.id)
+        setMemberLangs({})
       })
       client.on('member-joined', ({ member, replaces }) => {
         setMembers((prev) => [
@@ -570,6 +774,8 @@ export default function Room() {
         toast(`${name} left`)
         setMembers((prev) => prev.filter((m) => m.id !== id))
         setTiles((prev) => prev.filter((t) => t.sourceId !== id))
+        setMemberLangs(({ [id]: _left, ...rest }) => rest)
+        setTranslationStreams(({ [id]: _gone, ...rest }) => rest)
       })
       client.on('member-state', ({ id, mic, cam, sharing }) => {
         setMembers((prev) => prev.map((m) => (m.id === id ? { ...m, mic, cam, sharing } : m)))
@@ -578,6 +784,11 @@ export default function Room() {
         }
       })
       client.on('track', ({ sourceId, stream: stream_, kind }) => {
+        if (kind.startsWith(TRANSLATION_KIND_PREFIX)) {
+          const lang = kind.slice(TRANSLATION_KIND_PREFIX.length)
+          setTranslationStreams((prev) => ({ ...prev, [sourceId]: { ...prev[sourceId], [lang]: stream_ } }))
+          return
+        }
         // A member's microphone and camera share one tile (and one
         // MediaStream from the SFU); only a screen share gets its own.
         const tileKind = kind === SCREEN_KIND ? SCREEN_KIND : CAMERA_KIND
@@ -602,6 +813,24 @@ export default function Room() {
         const name = client.memberName(from)
         if (on) toast(`${name} started recording this call`)
         else toast(`${name} stopped recording`)
+      })
+      client.on('caption', ({ caption }) => handleRoomCaption(caption))
+      client.on('lang', ({ from, prefs }) => setMemberLangs((prev) => ({ ...prev, [from]: prefs.lang })))
+      client.on('translating', ({ from, on }) => {
+        setTranslationBy(on ? from : null)
+        if (on) startTranslation(client)
+        else {
+          setTranslationStreams({})
+          void stopTranslation()
+        }
+        if (from === client.memberId) {
+          if (on) toast.success('Live translation started')
+          else toast('Live translation stopped')
+          return
+        }
+        const name = client.memberName(from)
+        if (on) toast(`${name} started live translation`)
+        else toast(`${name} stopped live translation`)
       })
       client.on('error', ({ code, text }) => {
         toast.error(text)
@@ -635,10 +864,26 @@ export default function Room() {
         throw err
       }
       if (recorderRef.current) client.announceRecording(true)
+      // A rejoining bridge resumes; a fresh joiner starts one if the room
+      // was already translating.
+      if (translatorRef.current) translatorRef.current.start(localMicTrack(stream))
+      else if (translatingAtJoin) startTranslation(client)
       setClientGeneration((generation) => generation + 1)
       return client
     },
-    [slug, displayName, navigate, chatOpenRef, membersRef, kickedRef, stopRecording],
+    [
+      slug,
+      displayName,
+      navigate,
+      chatOpenRef,
+      membersRef,
+      kickedRef,
+      stopRecording,
+      langPrefsRef,
+      handleRoomCaption,
+      startTranslation,
+      stopTranslation,
+    ],
   )
 
   const reconnect = useCallback(
@@ -1030,9 +1275,15 @@ export default function Room() {
         onResolutionChange={handleResolutionChange}
         onVolumeChange={handleVolumeChange}
         onMicGainChange={handleMicGainChange}
+        translation={
+          <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+        }
       />
     ),
     [
+      translation,
+      langPrefs,
+      changeLangPrefs,
       devices,
       devicePrefs,
       hasMic,
@@ -1110,9 +1361,10 @@ export default function Room() {
   const leave = useCallback(async () => {
     endedRef.current = true
     await stopRecording()
+    await stopTranslation()
     clientRef.current?.leave()
     navigate('/')
-  }, [navigate, stopRecording])
+  }, [navigate, stopRecording, stopTranslation])
 
   const sendChat = useCallback(async (text: string) => {
     await clientRef.current?.sendChat(text)
@@ -1185,6 +1437,17 @@ export default function Room() {
   // While recording, every tile change (member joins or leaves, a pin
   // changes, a screen share starts or stops) re-lays out the composite
   // to mirror what the recorder sees on screen.
+  // While live translation runs, a remote speaker of another language is
+  // heard through their translation instead of their own voice.
+  const speaksOtherLanguage = useCallback(
+    (sourceId: string) => {
+      if (!translationBy || sourceId === LOCAL_SOURCE) return false
+      const lang = memberLangs[sourceId]
+      return Boolean(lang) && lang !== langPrefs.lang
+    },
+    [translationBy, memberLangs, langPrefs.lang],
+  )
+
   const recorderTiles = useMemo<RecorderTile[]>(
     () =>
       allTiles.map((tile) => ({
@@ -1193,14 +1456,30 @@ export default function Room() {
         name: tileLabel(tile, displayName, members),
         local: tile.sourceId === LOCAL_SOURCE,
         pinned: pinnedKey === tile.key,
+        audioMuted: tile.kind !== SCREEN_KIND && speaksOtherLanguage(tile.sourceId),
       })),
-    [allTiles, displayName, members, pinnedKey],
+    [allTiles, displayName, members, pinnedKey, speaksOtherLanguage],
   )
 
   useEffect(() => {
     if (!recording) return
     recorderRef.current?.setTiles(recorderTiles)
   }, [recording, recorderTiles])
+
+  // The recording plays as one conversation in the recorder's language:
+  // other-language speakers are left out of the mix (above) and each
+  // one's translated voice goes in.
+  const recordingVoices = useMemo(
+    () =>
+      Object.entries(translationStreams)
+        .filter(([sourceId, langs]) => speaksOtherLanguage(sourceId) && langs[langPrefs.lang])
+        .map(([, langs]) => langs[langPrefs.lang]),
+    [translationStreams, speaksOtherLanguage, langPrefs.lang],
+  )
+  useEffect(() => {
+    if (!recording) return
+    recorderRef.current?.setTranslations(recordingVoices.map((stream) => ({ stream, local: false })))
+  }, [recording, recordingVoices])
 
   const handleTileRatio = useCallback((key: string, ratio: number) => {
     setTileRatios((prev) =>
@@ -1224,6 +1503,9 @@ export default function Room() {
     // Only a remote camera tile plays audio; local and screen tiles get
     // no sink or volume so a volume drag does not re-render them.
     const playsAudio = !isLocal && !isScreen
+    const speakerId = isLocal ? selfId : tile.sourceId
+    const caption = isScreen ? undefined : captions[speakerId]?.text
+    const replaced = langPrefs.voice && speaksOtherLanguage(tile.sourceId)
     return (
       <VideoTile
         key={tile.key}
@@ -1236,7 +1518,9 @@ export default function Room() {
         camOff={!isScreen ? !(member?.cam ?? true) : false}
         sharing={isScreen}
         sinkId={playsAudio ? devicePrefs.speaker : undefined}
-        volume={playsAudio ? devicePrefs.volume : undefined}
+        volume={playsAudio ? (replaced ? 0 : devicePrefs.volume) : undefined}
+        caption={caption}
+        speaking={replaced ? speakerId in voicePlaying : undefined}
         pinned={pinnedKey === tile.key}
         onTogglePin={allTiles.length > 1 ? togglePin : undefined}
         compact={compact}
@@ -1310,6 +1594,9 @@ export default function Room() {
           onNameChange={setDisplayName}
           onRetryMedia={() => void acquireMedia()}
           onJoin={() => void joinCall()}
+          translation={
+            <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+          }
         />
       </>
     )
@@ -1348,6 +1635,44 @@ export default function Room() {
               Recording
             </span>
           )}
+          {translationBy && (
+            <Hint
+              label={[
+                `Started by ${translationBy === selfId ? 'you' : (members.find((m) => m.id === translationBy)?.name ?? 'a host')}.`,
+                translatorStatus?.detail ?? '',
+              ].join(' ')}
+              side="bottom"
+            >
+              <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                <Languages className="size-3 shrink-0" />
+                <span className="truncate">
+                  {translation.external ? 'Live translation via an external service' : 'Live translation'}
+                  {translatorStatus && ` · ${TRANSLATOR_STATE_LABELS[translatorStatus.state]}`}
+                </span>
+              </span>
+            </Hint>
+          )}
+          {translationFailure && (
+            <Hint label={`${translationFailure} Click to dismiss.`} side="bottom">
+              <button
+                type="button"
+                onClick={() => setTranslationFailure('')}
+                className="flex min-w-0 items-center gap-1.5 rounded-full bg-destructive/15 px-2 py-0.5 text-xs font-medium text-destructive"
+              >
+                <TriangleAlert className="size-3 shrink-0" />
+                <span className="truncate">Live translation failed: {translationFailure}</span>
+              </button>
+            </Hint>
+          )}
+          {translatorStatus && translationWarnings(translatorStatus, langPrefs.lang, translation.languages).map((warning) => (
+            <span
+              key={warning}
+              className="flex min-w-0 items-center gap-1.5 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400"
+            >
+              <TriangleAlert className="size-3 shrink-0" />
+              <span className="truncate">{warning}</span>
+            </span>
+          ))}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <Hint label={sidebar === 'people' ? 'Hide participants' : 'Show participants'} side="bottom">
@@ -1448,12 +1773,27 @@ export default function Room() {
         onCam={toggleCam}
         onShare={toggleScreen}
         onRecord={toggleRecording}
+        canTranslate={privileged}
+        translateUnavailable={translationAvailable ? undefined : translation.reason || TRANSLATION_UNKNOWN.reason}
+        translating={translationBy !== null}
+        onTranslate={toggleTranslation}
         onLeave={leave}
         onToggleChat={toggleChat}
         onToggleFullscreen={toggleFullscreen}
       >
         {settingsPopover}
       </ControlsBar>
+      {langPrefs.voice &&
+        Object.entries(translationStreams)
+          .filter(([sourceId, langs]) => speaksOtherLanguage(sourceId) && langs[langPrefs.lang])
+          .map(([sourceId, langs]) => (
+            <TranslationAudio
+              key={sourceId}
+              stream={langs[langPrefs.lang]}
+              sinkId={devicePrefs.speaker}
+              volume={devicePrefs.volume}
+            />
+          ))}
       {debugOpen && <DiagnosticsPanel clientRef={clientRef} errorsRef={pageErrorsRef} />}
     </div>
   )

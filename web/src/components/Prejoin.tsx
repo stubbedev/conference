@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Loader2, RotateCcw, ShieldCheck } from 'lucide-react'
 
 import { FALLBACK_ASPECT_RATIO } from '@/hooks/media'
@@ -17,6 +17,8 @@ interface PrejoinProps {
   onNameChange: (name: string) => void
   onRetryMedia: () => void
   onJoin: () => void
+  /** Live-translation settings, when the server offers it. */
+  translation?: ReactNode
 }
 
 export function Prejoin({
@@ -29,6 +31,7 @@ export function Prejoin({
   onNameChange,
   onRetryMedia,
   onJoin,
+  translation,
 }: PrejoinProps) {
   const [ratio, setRatio] = useState(FALLBACK_ASPECT_RATIO)
   const canJoin = !mediaBusy && !mediaError && Boolean(stream)
@@ -90,6 +93,8 @@ export function Prejoin({
               placeholder="Your name"
             />
           </div>
+
+          {translation}
 
           <Button size="lg" onClick={onJoin} disabled={!canJoin}>
             {mediaBusy ? (
