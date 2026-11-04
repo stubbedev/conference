@@ -121,3 +121,24 @@ release level:
     git push origin HEAD
     git push origin "$next"
     echo "released $next"
+
+# Speech service (live translation), run natively: on a Mac this is far
+# faster than the CPU container. Needs SPEECH_SECRET and a translation
+# engine, e.g. TRANSLATE_URL and TRANSLATE_MODEL (see speech/README.md).
+
+# Create the speech venv and download the Piper voices.
+speech-setup:
+    cd speech && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    cd speech && .venv/bin/python -m piper.download_voices --data-dir voices $(.venv/bin/python -c "import yaml; print(' '.join(v for l in yaml.safe_load(open('languages.yaml'))['languages'].values() for v in l['voices'].values()))")
+
+# Run the speech service on :8090.
+speech:
+    cd speech && .venv/bin/python -m app
+
+# Check the speech service's engine settings (no models needed).
+speech-unit:
+    cd speech && .venv/bin/python -m tests.test_config
+
+# Stream the fixtures through a running speech service and check the translations.
+speech-test url="ws://localhost:8090":
+    cd speech && .venv/bin/python -m tests.stream_sample {{url}}

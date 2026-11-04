@@ -1,0 +1,5 @@
+.venv
+voices
+tests
+tools
+__pycache__
