@@ -197,26 +197,24 @@ hear them in. A host then turns on **Live translation** in the call:
 - It keeps running when the host who started it leaves, until a host
   switches it off.
 
-It needs a speech service: the `speech/` directory, a small Python
-service with three AI engines (transcription, translation, voice), each
-either local (faster-whisper, a model on Ollama, Piper) or any
-OpenAI-compatible API. Run it on a machine you control, preferably with
-a GPU, and point the server at it:
+It needs a speech service: `cmd/speech`, a single static Go binary that
+detects speech itself and hands transcription, translation and the
+translated voice to engines you choose, on your own machines (whisper.cpp,
+Ollama, an OpenAI-compatible voice server) or any OpenAI-compatible API.
+Run it on a machine you control and point the server at it:
 
 ```bash
 cd speech
-SPEECH_SECRET=s3cret TRANSLATE_URL=http://ollama:11434 TRANSLATE_MODEL=<model> \
-  docker compose --profile gpu up -d   # or --profile local on a CPU
+SPEECH_SECRET=s3cret TRANSLATE_URL=http://ollama:11434 TRANSLATE_MODEL=<model> … docker compose up -d
 ```
 
 Then set `SPEECH_URL` (behind TLS, e.g. `wss://speech.example.com/v1/stream`)
 and the same `SPEECH_SECRET` on the conference server.
 [speech/README.md](speech/README.md) covers the engines and their
-settings, where each sends its data, and the setups it was tested with
-(fully local with Gemma on Ollama, and OpenAI's `gpt-4o-mini` and
-`gpt-transcribe`). English, German and Swedish are included; a language
-is an entry in `speech/languages.yaml`, and the app takes its list from
-there.
+settings and where each sends its data. English and the national
+languages of Europe that Whisper transcribes are included (35), each
+translated with the form of address a business call uses; the app takes
+its list from the speech service.
 
 Until the speech service is reachable and all three engines are set up,
 everyone still sees the live-translation settings and hosts the button,
@@ -404,25 +402,27 @@ and unit tests can't: a call that connects fine and transmits nothing.
 ### Live translation locally
 
 ```bash
-just speech-setup                      # once: Python venv and Piper voices for speech/
-TRANSLATE_URL=http://localhost:11434 just translate-demo   # you plus a guest speaking from a recording, in two windows
-TRANSLATE_URL=http://localhost:11434 just translate-lan    # two computers on one network, over HTTPS on :8443
-just speech-unit                       # the speech service's engine settings, no models needed
-just e2e-translate                     # the browser test CI runs, with stand-in speech models
+just translate-demo openai   # you plus a guest speaking from a recording, in two windows
+just translate-lan openai    # two computers on one network, over HTTPS on :8443
+just e2e-translate           # the browser test CI runs, with stand-in speech engines
 ```
 
-Both demos use `gemma4:26b-a4b-it-qat` on that Ollama unless
-`TRANSLATE_MODEL` names another model. `translate-demo` takes `hear`
-(the guest stays silent so you hear yourself translated; wear
-headphones), `sv` (a Swedish guest) and `male` (your translated voice).
+Without `openai`, both demos use your own engines instead: Ollama at
+`TRANSLATE_URL` (`gemma4:26b-a4b-it-qat` unless `TRANSLATE_MODEL` names
+another model), a transcription server at `TRANSCRIBE_URL` (such as
+whisper.cpp's `whisper-server`) and a voice server at `VOICE_URL` with
+`VOICE_MODEL` and `VOICE_NAME`, from the environment or `speech/.env`.
+`translate-demo` takes `hear` (the guest stays silent so you hear
+yourself translated; wear headphones), `sv` (a Swedish guest) and `male`
+(your translated voice).
 `translate-lan` prints a guest link for the other computer; Safari there
 has to trust the self-signed certificate it offers at `/certificate.pem`
 before it can connect. `SERVER_LOG=path` keeps the meeting server's log.
 
-For testing without a translation model at hand, `openai` (on both
-commands, with `OPENAI_API_KEY` in `speech/.env`) has OpenAI transcribe
-(`gpt-transcribe`) and translate (`gpt-4o-mini`) instead. That sends the
-call's audio and text to OpenAI, so it is for test conversations only.
+`openai` (with `OPENAI_API_KEY` in `speech/.env`) has OpenAI transcribe
+(`gpt-transcribe`), translate (`gpt-4o-mini`) and speak (`gpt-4o-mini-tts`).
+That sends the call's audio and text to OpenAI, so it is for test
+conversations only.
 
 ### Monitoring a deployment
 
