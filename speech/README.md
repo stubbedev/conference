@@ -1,16 +1,21 @@
 # Speech service
 
-The engine behind live translation: a small Python service (FastAPI) that
-each speaking member's browser streams its own microphone to while a host
-has live translation switched on. For every finished sentence it sends
-back subtitles in the speaker's language and every listener's language,
-and a translated voice per listener language. The conference server never
-sees any of it; it only hands out the tokens.
+The engine behind live translation: a small Go service (`cmd/speech`)
+that each speaking member's browser streams its own microphone to while a
+host has live translation switched on. For every finished sentence it
+sends back subtitles in the speaker's language and every listener's
+language, and a translated voice per listener language. The conference
+server never sees any of it; it only hands out the tokens.
 
 ```
 browser ──16 kHz audio──► voice detection ─► transcription ─► translation ─► voice
         ◄── subtitles, translated voice ──────────────────────────────────────┘
 ```
+
+Voice detection runs in the service itself: the Silero VAD model in pure
+Go ([go-silerovad](https://github.com/vithnilica/go-silerovad), MIT), so
+the binary is static and needs no cgo, Python or model download.
+Transcription, translation and the voice are HTTP engines you choose.
 
 No audio or text is logged or written to disk: it lives in memory for as
 long as it takes to translate a sentence.
@@ -18,16 +23,14 @@ long as it takes to translate a sentence.
 ## Run it
 
 ```bash
-just speech-setup     # once: Python 3.12 venv, Piper and its voices
-SPEECH_SECRET=s3cret TRANSLATE_URL=http://localhost:11434 TRANSLATE_MODEL=<model> just speech
+SPEECH_SECRET=s3cret TRANSCRIBE_MODEL=… TRANSLATE_MODEL=… VOICE_MODEL=… VOICE_NAME=… just speech
 ```
 
-Or in Docker, on a GPU or any CPU:
+Or in Docker (build context is the repository root):
 
 ```bash
 cd speech
-SPEECH_SECRET=s3cret TRANSLATE_URL=http://ollama:11434 TRANSLATE_MODEL=<model> \
-  docker compose --profile gpu up -d   # or --profile local
+SPEECH_SECRET=s3cret TRANSLATE_URL=http://ollama:11434 TRANSLATE_MODEL=… docker compose up -d
 ```
 
 Then point the conference server at it with the same secret:
@@ -40,77 +43,80 @@ internal one, e.g. `http://speech:8090/v1/status`.
 whether every engine is set up, whether any sends data off this network
 and which languages are available. The conference app shows live
 translation greyed out, with what is missing, until everything is ready.
-The service also logs a warning at start for every engine that is not set
-up or that leaves the network.
+The service also logs, at start, every engine that is not set up or that
+leaves the network.
 
-## Choosing the AI engines
+## Choosing the engines
 
-Each of the three engines has a provider, plus `<ENGINE>_URL`,
-`<ENGINE>_API_KEY` and `<ENGINE>_MODEL`. `.env.example` lists every
-setting. No engine has a vendor's model as its default.
+`.env.example` lists every setting. No engine has a vendor's model as its
+default.
 
-| Engine | Provider | Where the data goes |
+| Engine | API | Settings |
 |---|---|---|
-| `TRANSCRIBE` | `local` (default): faster-whisper, `WHISPER_MODEL` | this machine |
-| | `openai-compatible` | wherever `TRANSCRIBE_URL` points |
-| `TRANSLATE` | `ollama` (default): any model Ollama serves | your Ollama server |
-| | `openai-compatible` | wherever `TRANSLATE_URL` points |
-| `VOICE` | `piper` (default): voices in `languages.yaml` | this machine |
-| | `openai-compatible`: `/audio/speech`, `api_voices` in `languages.yaml` | wherever `VOICE_URL` points |
+| Transcription | OpenAI-compatible `/audio/transcriptions` | `TRANSCRIBE_URL`, `TRANSCRIBE_API_KEY`, `TRANSCRIBE_MODEL` |
+| Translation | Ollama `/api/chat` (default) or OpenAI-compatible `/chat/completions` | `TRANSLATE_PROVIDER`, `TRANSLATE_URL`, `TRANSLATE_API_KEY`, `TRANSLATE_MODEL` |
+| Voice | OpenAI-compatible `/audio/speech`, raw PCM | `VOICE_URL`, `VOICE_API_KEY`, `VOICE_MODEL`, `VOICE_NAME`, `VOICE_RATE` |
 
-**Piper is GPL-3.0**, so it is not in `requirements.txt`: `just
-speech-setup` and the Docker build install it separately
-(`pip install piper-tts==1.8.0`; build with `--build-arg WITH_PIPER=false`
-to leave it out). Without it, `/v1/status` reports the voice engine as
-not set up. For a voice engine under a permissive licence, run a local
-model behind an OpenAI-compatible server and set `VOICE_PROVIDER=openai-compatible`:
-for example Chatterbox Multilingual (MIT; English, German, Swedish and
-more) or VoxCPM2 (Apache-2.0; 30 languages), both best on a GPU, or
-Kokoro (Apache-2.0; no German or Swedish). These have not been tested
-with this service yet.
+`OPENAI_URL` and `OPENAI_API_KEY` set the address and key for every
+OpenAI-compatible engine that doesn't set its own; the address defaults
+to OpenAI's. OpenAI-compatible means OpenAI itself, Azure OpenAI,
+Mistral, Groq or OpenRouter, or a server of your own:
 
-`openai-compatible` is any service with OpenAI's API shape: OpenAI, Azure
-OpenAI, Mistral, Groq or OpenRouter, or a server of your own such as vLLM,
-LM Studio or speaches. Live subtitles always come from the local Whisper;
-an `openai-compatible` transcription engine transcribes finished sentences.
+- **Transcription on your own machine:** whisper.cpp's `whisper-server`
+  (C++), started with `--inference-path /v1/audio/transcriptions`.
+- **Translation on your own machine:** any model Ollama serves.
+- **Voice on your own machine:** any server that speaks OpenAI's
+  `/audio/speech` and can return `pcm`; set `VOICE_RATE` to its sample
+  rate (OpenAI's is 24000).
+
+Interim subtitles, shown while someone is still talking, transcribe the
+growing sentence every `INTERIM_MS` (600 ms). Against a paid API that is
+a call per interim; `INTERIM_MS=0` turns them off.
+
 `<ENGINE>_EXTERNAL=true|false` overrides the guess whether an engine is
-outside your network.
-
-### What it was tested with
-
-- **Fully local:** Whisper `small` on a Mac CPU,
-  `gemma4:26b-a4b-it-qat` on Ollama for translation, and Piper for the
-  voices. On an NVIDIA GPU the compose file's `gpu` profile uses Whisper
-  `large-v3-turbo` instead.
-- **OpenAI:** `gpt-4o-mini` for translation and `gpt-transcribe` for
-  transcription, with Piper voices; the voice was also tried with
-  `gpt-4o-mini-tts`. This sends the call's audio and text to OpenAI, so
-  it suits testing, not confidential calls.
-
-```bash
-TRANSCRIBE_PROVIDER=openai-compatible TRANSCRIBE_MODEL=gpt-transcribe \
-TRANSLATE_PROVIDER=openai-compatible TRANSLATE_MODEL=gpt-4o-mini \
-OPENAI_API_KEY=sk-... SPEECH_SECRET=s3cret just speech
-```
+outside your network (anything but loopback, private and link-local
+addresses, bare host names and `.local`, `.internal`, `.lan` names).
 
 ## Languages
 
-English, German and Swedish are included. A language is an entry in
-`languages.yaml`: a Whisper code, a Piper voice per voice choice (female,
-male), optionally a form-of-address rule for the translation (German
-"Sie", Swedish "du") and voice names for an `openai-compatible` voice
-engine. The conference app takes its language list from here.
+35 languages are included: English and the national languages of Europe
+that Whisper transcribes (Irish is not among them). The list is
+[`internal/speech/service/languages.json`](../internal/speech/service/languages.json),
+built into the binary; the conference app takes its language list from
+the service. Each entry has a Whisper language code and, where the
+language has a formal and an informal "you", the form of address the
+translation uses (formal for most; "du" in the Scandinavian languages
+and "sinä" in Finnish, as is usual at work there).
+
+To change the list, or to give each language its own voices, point
+`LANGUAGES_FILE` at a file of the same shape. `voices` maps the speaker's
+voice choice to the voice engine's voice name:
+
+```json
+[
+  { "code": "en", "name": "English", "whisper": "en", "voices": { "female": "nova", "male": "onyx" } },
+  { "code": "de", "name": "German", "whisper": "de", "address": "Always address people formally with \"Sie\", never \"du\"" }
+]
+```
+
+A language without `voices` uses `VOICE_NAME`.
 
 ## Tests
 
+`go test ./internal/speech/...` covers the settings, the token format the
+meeting server mints, voice detection on the fixtures, the engines'
+requests against a stand-in API, and the whole stream: German and English
+speakers at once through the real voice detection and protocol with
+stand-in engines (`ENGINES=fake`: numbered transcripts, `[lang] …`
+translations, a tone for a voice), which the browser tests use too.
+
+With real engines:
+
 ```bash
-just speech-unit                               # engine settings, no models needed
-SPEECH_SECRET=dev TRANSLATE_MODEL=<model> just speech &
-SPEECH_SECRET=dev just speech-test             # the fixtures through a running service
+SPEECH_SECRET=dev … just speech &
+SPEECH_SECRET=dev just speech-test
 ```
 
-`speech-test` streams `fixtures/german.wav` and `fixtures/english.wav` as
-two speakers at once and checks that each comes back as subtitles and
-voice in the other language. `ENGINES=fake` swaps all three engines for
-stand-ins (numbered transcripts, `[lang] …` translations, a tone for a
-voice), which the browser tests use.
+`speech-test` streams `fixtures/german.wav` and `fixtures/english.wav` in
+real time as two speakers at once and checks that each comes back as
+subtitles and voice in the other language.
