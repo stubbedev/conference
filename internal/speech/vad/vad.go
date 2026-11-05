@@ -12,49 +12,50 @@ import (
 // Rate is the sample rate, in Hz, of the audio Utterances takes.
 const Rate = silerovad.SampleRate
 
+// MaxUtterance is the longest an utterance runs before it is cut.
+const MaxUtterance = 12 * time.Second
+
 const (
-	frame         = silerovad.ChunkSize
-	startProb     = 0.5
-	endProb       = 0.35
-	prerollFrames = 10
-	longSpeech    = 3 * time.Second
-	shortSilence  = 160 * time.Millisecond
-	sampleScale   = 32768
+	frame          = silerovad.ChunkSize
+	startProb      = 0.5
+	endProb        = 0.35
+	prerollFrames  = 10
+	silence        = 400 * time.Millisecond
+	longSpeech     = 3 * time.Second
+	shortSilence   = 160 * time.Millisecond
+	sampleScale    = 32768
+	endFrames      = int(silence*Rate/time.Second) / frame
+	shortEndFrames = int(shortSilence*Rate/time.Second) / frame
+	longFrames     = int(longSpeech*Rate/time.Second) / frame
+	maxFrames      = int(MaxUtterance*Rate/time.Second) / frame
 )
 
 // Utterances collects one speaker's audio into utterances. It is not safe
 // for concurrent use.
 type Utterances struct {
-	detector       *silerovad.Detector
-	samples        [frame]float32
-	pending        []int16
-	preroll        []int16
-	speech         []int16
-	silentFrames   int
-	endFrames      int
-	shortEndFrames int
-	longFrames     int
-	maxFrames      int
+	detector     *silerovad.Detector
+	samples      [frame]float32
+	pending      []int16
+	preroll      []int16
+	speech       []int16
+	silentFrames int
 }
 
-// New ends an utterance after silence, or after maxSegment of speech.
-func New(silence, maxSegment time.Duration) (*Utterances, error) {
+// New ends an utterance after 400 ms of silence (160 ms once it has run
+// for 3 s), or after MaxUtterance of speech.
+func New() (*Utterances, error) {
 	detector, err := silerovad.NewDetector()
 	if err != nil {
 		return nil, fmt.Errorf("vad: load the Silero model: %w", err)
 	}
 
 	return &Utterances{
-		detector:       detector,
-		samples:        [frame]float32{},
-		pending:        make([]int16, 0, frame),
-		preroll:        make([]int16, 0, prerollFrames*frame),
-		speech:         nil,
-		silentFrames:   0,
-		endFrames:      framesIn(silence),
-		shortEndFrames: framesIn(min(silence, shortSilence)),
-		longFrames:     framesIn(longSpeech),
-		maxFrames:      framesIn(maxSegment),
+		detector:     detector,
+		samples:      [frame]float32{},
+		pending:      make([]int16, 0, frame),
+		preroll:      make([]int16, 0, prerollFrames*frame),
+		speech:       nil,
+		silentFrames: 0,
 	}, nil
 }
 
@@ -144,18 +145,14 @@ func (u *Utterances) frame(pcm []int16) ([]int16, error) {
 
 	frames := len(u.speech) / frame
 
-	endFrames := u.endFrames
-	if frames >= u.longFrames {
-		endFrames = u.shortEndFrames
+	end := endFrames
+	if frames >= longFrames {
+		end = shortEndFrames
 	}
 
-	if u.silentFrames >= endFrames || frames >= u.maxFrames {
+	if u.silentFrames >= end || frames >= maxFrames {
 		return u.Flush(), nil
 	}
 
 	return nil, nil
-}
-
-func framesIn(d time.Duration) int {
-	return max(1, int(d*Rate/time.Second)/frame)
 }

@@ -33,6 +33,22 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDecodeStreamedLength(t *testing.T) {
+	t.Parallel()
+
+	pcm := []int16{5, -5, 300}
+
+	for _, placeholder := range []byte{0x00, 0xff} {
+		streamed := encode(t, pcm, 24000)
+		copy(streamed[40:44], []byte{placeholder, placeholder, placeholder, placeholder})
+
+		got, rate, err := wav.Decode(streamed)
+		if err != nil || rate != 24000 || !slices.Equal(got, pcm) {
+			t.Fatalf("placeholder %#x: got %v at %d Hz (%v), want %v at 24000 Hz", placeholder, got, rate, err, pcm)
+		}
+	}
+}
+
 func TestDecodeRejects(t *testing.T) {
 	t.Parallel()
 

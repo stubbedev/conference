@@ -5,17 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stubbe/conference/internal/speech/vad"
 	"github.com/stubbe/conference/internal/speech/wav"
 )
 
-const (
-	silence    = 400 * time.Millisecond
-	maxSegment = 12 * time.Second
-	chunk      = 320
-)
+const chunk = 320
 
 func fixture(t *testing.T, name string) []int16 {
 	t.Helper()
@@ -40,7 +35,7 @@ func fixture(t *testing.T, name string) []int16 {
 func utterances(t *testing.T, pcm []int16) [][]int16 {
 	t.Helper()
 
-	cutter, err := vad.New(silence, maxSegment)
+	cutter, err := vad.New()
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -80,7 +75,7 @@ func TestSpeechIsCutIntoUtterances(t *testing.T) {
 			total := 0
 
 			for _, utterance := range found {
-				if len(utterance) > int(maxSegment.Seconds())*vad.Rate {
+				if len(utterance) > int(vad.MaxUtterance.Seconds())*vad.Rate {
 					t.Fatalf("utterance of %d samples is longer than the maximum segment", len(utterance))
 				}
 

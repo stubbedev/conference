@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	bearer      = "Bearer key"
-	helloGerman = "hallo welt"
+	bearer        = "Bearer key"
+	helloGerman   = "hallo welt"
+	voiceTestRate = 22050
 )
 
 type transcriptionSeen struct {
@@ -64,30 +65,7 @@ func fakeAPI(t *testing.T) (*httptest.Server, *apiSeen) {
 	}
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /v1/audio/transcriptions", func(w http.ResponseWriter, r *http.Request) {
-		file, _, err := r.FormFile("file")
-		if err != nil {
-			t.Errorf("transcription form: %v", err)
-
-			return
-		}
-
-		data, _ := io.ReadAll(file)
-
-		pcm, rate, err := wav.Decode(data)
-		if err != nil {
-			t.Errorf("transcription audio: %v", err)
-		}
-
-		seen.record(r, func() {
-			seen.transcription = transcriptionSeen{
-				model: r.FormValue("model"), language: r.FormValue("language"), format: r.FormValue("response_format"),
-				samples: len(pcm), rate: rate,
-			}
-		})
-
-		_, _ = io.WriteString(w, `{"text":"  hallo welt  "}`)
-	})
+	mux.HandleFunc("POST /v1/audio/transcriptions", transcriptionHandler(t, seen))
 
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		seen.record(r, func() { decodeInto(t, r, &seen.chat) })
@@ -104,7 +82,12 @@ func fakeAPI(t *testing.T) (*httptest.Server, *apiSeen) {
 	mux.HandleFunc("POST /v1/audio/speech", func(w http.ResponseWriter, r *http.Request) {
 		seen.record(r, func() { decodeInto(t, r, &seen.speech) })
 
-		_, _ = w.Write([]byte{1, 0, 2, 0})
+		voiced, err := wav.Encode([]int16{1, 2}, voiceTestRate)
+		if err != nil {
+			t.Errorf("encode the voice: %v", err)
+		}
+
+		_, _ = w.Write(voiced)
 	})
 
 	server := httptest.NewServer(mux)
@@ -117,14 +100,16 @@ func openAISettings(t *testing.T, api *httptest.Server) Settings {
 	t.Helper()
 
 	return load(t, map[string]string{
-		envOpenAIURL:         api.URL + "/v1",
-		envOpenAIKey:         "key",
-		envTranscribeModel:   "stt",
-		envTranslateProvider: providerOpenAI,
-		envTranslateModel:    "chat",
-		envVoiceModel:        modelTTS,
-		envVoiceName:         voiceAlloy,
-		"GLOSSARY":           "Kontainer = Kontainer",
+		prefixTranscribe + "_URL": api.URL + "/v1",
+		envTranslateURL:           api.URL + "/v1",
+		prefixVoice + "_URL":      api.URL + "/v1",
+		envOpenAIKey:              "key",
+		envTranscribeModel:        "stt",
+		envTranslateProvider:      providerOpenAI,
+		envTranslateModel:         "chat",
+		envVoiceModel:             modelTTS,
+		envVoiceName:              voiceAlloy,
+		"GLOSSARY":                "Kontainer = Kontainer",
 	})
 }
 
@@ -189,11 +174,11 @@ func TestOpenAIVoice(t *testing.T) {
 	settings := openAISettings(t, api)
 
 	spoken, err := newHTTPEngines(settings).speak(t.Context(), "hello world", mustLanguage(t, settings, "en"), voiceMale)
-	if err != nil || len(spoken.pcm) != 4 || spoken.rate != defaultVoiceRate {
+	if err != nil || len(spoken.pcm) != 4 || spoken.rate != voiceTestRate {
 		t.Fatalf("speak: %+v, %v", spoken, err)
 	}
 
-	want := speechRequest{Model: modelTTS, Voice: voiceAlloy, Input: "hello world", ResponseFormat: "pcm"}
+	want := speechRequest{Model: modelTTS, Voice: voiceAlloy, Input: "hello world", ResponseFormat: "wav"}
 	if seen.speech != want || seen.auth["/v1/audio/speech"] != bearer {
 		t.Fatalf("speech request %+v with %q, want %+v with the key", seen.speech, seen.auth, want)
 	}
@@ -286,5 +271,34 @@ func TestEngineErrorsHideURLPasswords(t *testing.T) {
 	_, err := newHTTPEngines(settings).translate(t.Context(), "hi", english, english, nil)
 	if err == nil || strings.Contains(err.Error(), "hunter2") || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("error %v, want status 502 without the password", err)
+	}
+}
+
+func transcriptionHandler(t *testing.T, seen *apiSeen) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			t.Errorf("transcription form: %v", err)
+
+			return
+		}
+
+		data, _ := io.ReadAll(file)
+
+		pcm, rate, err := wav.Decode(data)
+		if err != nil {
+			t.Errorf("transcription audio: %v", err)
+		}
+
+		seen.record(r, func() {
+			seen.transcription = transcriptionSeen{
+				model: r.FormValue("model"), language: r.FormValue("language"), format: r.FormValue("response_format"),
+				samples: len(pcm), rate: rate,
+			}
+		})
+
+		_, _ = io.WriteString(w, `{"text":"  hallo welt  "}`)
 	}
 }
