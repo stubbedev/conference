@@ -21,10 +21,11 @@ const MAX_REFUSED_CONNECTS = 3
 const RECONNECT_DELAY_MS = 2_000
 // How long start() waits for the token the server sends on its own before asking.
 const TOKEN_GRACE_MS = 1_500
-// A translated voice that would start later than this behind the speaker
-// is skipped (its subtitle still shows), so a slow voice engine can't
-// build up an ever growing delay.
-const MAX_VOICE_LAG_S = 3
+// A translated voice queued further behind than this is skipped (its
+// subtitle still shows), so a voice engine that can't keep up doesn't
+// build an ever growing delay. Far beyond what a talkative speaker
+// queues with a normal voice engine.
+const MAX_VOICE_LAG_S = 10
 
 interface Voice {
   output: MediaStreamAudioDestinationNode
@@ -120,6 +121,8 @@ export class Translator {
         this.others.set(from, { lang: prefs.lang, voice: prefs.voice })
         this.sendTargets()
       }),
+      // A recording mixes in the recorder's language, voice switch or not.
+      client.on('recording', () => this.sendTargets()),
       client.on('member-left', ({ id }) => {
         this.others.delete(id)
         this.sendTargets()
@@ -224,10 +227,16 @@ export class Translator {
     return [...new Set([this.selfPrefs.lang, ...[...this.others.values()].map((other) => other.lang)])]
   }
 
-  /** The other languages someone in the room wants to hear a translated voice in. */
+  /**
+   * The other languages a translated voice is wanted in: by everyone who
+   * listens to one, and by the recorder, whose recording mixes it in.
+   */
   private voiceTargets(): string[] {
-    const wanted = [...this.others.values()].filter((other) => other.voice && other.lang !== this.selfPrefs.lang)
-    return [...new Set(wanted.map((other) => other.lang))]
+    const recorder = this.client?.recorder ?? ''
+    const wanted = [...this.others.entries()]
+      .filter(([id, other]) => (other.voice || id === recorder) && other.lang !== this.selfPrefs.lang)
+      .map(([, other]) => other.lang)
+    return [...new Set(wanted)]
   }
 
   private sendTargets(): void {

@@ -134,9 +134,10 @@ needs a GPU to keep up with a live call.
 
 **Voices only where someone listens.** Each speaker's browser tells the
 service which languages someone wants a translated voice in; others get
-subtitles only, so no voice is synthesized for nobody. A voice that would
-start more than 3 s behind is skipped (its subtitle still shows), so a
-slow voice engine can't build up an ever growing delay.
+subtitles only, so no voice is synthesized for nobody. A voice queued more
+than 10 s behind is skipped (its subtitle still shows), so a voice engine
+that can't keep up doesn't build an ever growing delay. A recorder counts
+as listening in their language, since the recording mixes the voices in.
 
 ## Streams
 

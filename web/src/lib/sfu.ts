@@ -187,6 +187,8 @@ export class RoomClient {
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
   private memberLangs = new Map<string, LangPrefs>()
+  /** The member recording the room, or '' when nobody is. */
+  recorder = ''
   private negotiation: Promise<void> = Promise.resolve()
   private transformed = new WeakSet<object>()
   private selfId = ''
@@ -274,6 +276,7 @@ export class RoomClient {
           this.resumeToken = msg.resume ?? ''
           if (msg.self) this.selfId = msg.self.id
           for (const member of msg.members ?? []) this.members.set(member.id, member)
+          this.recorder = msg.recorder ?? ''
           this.emit('welcome', {
             self: msg.self as MemberInfo,
             members: msg.members ?? [],
@@ -660,7 +663,11 @@ export class RoomClient {
         await this.handleChat(msg)
         return
       case 'recording':
-        if (msg.from) this.emit('recording', { from: msg.from, on: msg.on ?? false })
+        if (msg.from) {
+          if (msg.on) this.recorder = msg.from
+          else if (this.recorder === msg.from) this.recorder = ''
+          this.emit('recording', { from: msg.from, on: msg.on ?? false })
+        }
         return
       case 'lang': {
         const prefs = await this.openSealed(msg)
