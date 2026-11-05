@@ -301,12 +301,19 @@ Galène-style SFU (selective forwarding unit):
   third-party STUN.
 - SQLite storage in pure Go (no CGO), with the web UI embedded.
 
+Live translation has its own optional service, `cmd/speech`, also a single
+static Go binary: voice detection in pure Go, and transcription,
+translation and the translated voice on engines you choose, on your own
+machines or a provider's. See [speech/README.md](speech/README.md).
+
 ## Development
 
 ```bash
 just check    # vet + test + lint + web build + go build + browser smoke (what CI runs)
 just e2e      # only the browser smoke test
 just run      # local server with a scratch database
+just speech   # the speech service (ENGINES=fake runs it with stand-in engines)
+just speech-test  # the fixtures through a running speech service with real engines
 just release-preview
 ```
 

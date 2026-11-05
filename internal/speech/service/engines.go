@@ -253,19 +253,29 @@ func (e *httpEngines) speak(ctx context.Context, text string, lang language, cho
 		return speech{}, fmt.Errorf("%s: %w for %s", voice, errNoVoiceName, lang.Code)
 	}
 
-	payload, err := json.Marshal(speechRequest{Model: e.settings.voice.model, Voice: name, Input: text, ResponseFormat: "pcm"})
+	payload, err := json.Marshal(speechRequest{Model: e.settings.voice.model, Voice: name, Input: text, ResponseFormat: "wav"})
 	if err != nil {
 		return speech{}, fmt.Errorf("%s: encode the request: %w", voice, err)
 	}
 
-	var pcm bytes.Buffer
+	var reply bytes.Buffer
 
-	err = e.call(ctx, voice, e.settings.voice, "/audio/speech", "application/json", bytes.NewReader(payload), &pcm)
+	err = e.call(ctx, voice, e.settings.voice, "/audio/speech", "application/json", bytes.NewReader(payload), &reply)
 	if err != nil {
 		return speech{}, err
 	}
 
-	return speech{pcm: pcm.Bytes(), rate: e.settings.voiceRate}, nil
+	samples, rate, err := wav.Decode(reply.Bytes())
+	if err != nil {
+		return speech{}, fmt.Errorf("%s: read the voice: %w", voice, err)
+	}
+
+	pcm, err := binary.Append(make([]byte, 0, len(samples)*pcmWidth), binary.LittleEndian, samples)
+	if err != nil {
+		return speech{}, fmt.Errorf("%s: encode the voice: %w", voice, err)
+	}
+
+	return speech{pcm: pcm, rate: int(rate)}, nil
 }
 
 func (e *httpEngines) callJSON(ctx context.Context, use purpose, target engine, path string, request, reply any) error {

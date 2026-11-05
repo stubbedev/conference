@@ -63,7 +63,7 @@ type session struct {
 var errForeignSpeaker = errors.New("speaker is not the member the token was minted for")
 
 func newSession(ctx context.Context, settings Settings, engines speechEngines, member string, send sender) (*session, error) {
-	utterances, err := vad.New(settings.silence, settings.maxSegment)
+	utterances, err := vad.New()
 	if err != nil {
 		return nil, fmt.Errorf("speaker %s: %w", member, err)
 	}

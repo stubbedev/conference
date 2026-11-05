@@ -58,18 +58,11 @@ func TestDefaultsNeedModels(t *testing.T) {
 	}
 }
 
-func TestTuningDefaults(t *testing.T) {
+func TestAddrDefault(t *testing.T) {
 	t.Parallel()
 
-	settings := load(t, nil)
-
-	got := []any{settings.Addr, settings.silence, settings.maxSegment, settings.voiceRate}
-	want := []any{"0.0.0.0:8090", 400 * time.Millisecond, 12 * time.Second, 24000}
-
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("defaults %v, want %v", got, want)
-		}
+	if got := load(t, nil).Addr; got != "0.0.0.0:8090" {
+		t.Fatalf("address %q, want 0.0.0.0:8090", got)
 	}
 }
 
@@ -140,22 +133,30 @@ func TestVoiceNeedsVoiceNames(t *testing.T) {
 	}
 }
 
-func TestExternalOverride(t *testing.T) {
+func TestInternalDomains(t *testing.T) {
 	t.Parallel()
 
-	settings := load(t, map[string]string{
-		envTranslateProvider:          providerOpenAI,
-		envTranslateURL:               "https://llm.example.com/v1",
-		envTranslateModel:             "m",
-		prefixTranslate + "_EXTERNAL": "false",
-	})
-	if settings.translation.external {
-		t.Fatal("TRANSLATE_EXTERNAL=false did not override")
+	values := map[string]string{
+		envTranslateProvider: providerOpenAI,
+		envTranslateURL:      "https://llm.corp.example.com/v1",
+		envTranslateModel:    "m",
+		prefixVoice + "_URL": "https://tts.Corp.Example.com/v1",
 	}
 
-	settings = load(t, map[string]string{envTranslateURL: "http://gpu-box:11434", prefixTranslate + "_EXTERNAL": "TRUE"})
-	if !settings.translation.external {
-		t.Fatal("TRANSLATE_EXTERNAL=TRUE did not override")
+	settings := load(t, values)
+	if !settings.translation.external || !settings.voice.external {
+		t.Fatal("an unlisted domain counted as internal")
+	}
+
+	values[envInternalDomains] = " example.org, .corp.example.com "
+
+	settings = load(t, values)
+	if settings.translation.external || settings.voice.external {
+		t.Fatalf("%s=%q did not make its subdomains internal", envInternalDomains, values[envInternalDomains])
+	}
+
+	if !settings.transcription.external {
+		t.Fatal("OpenAI counted as internal")
 	}
 }
 
@@ -175,10 +176,9 @@ func TestInvalidSettingsFail(t *testing.T) {
 		"no secret":         {},
 		"engines mode":      {envSecret: "s", envEngines: "mock"},
 		"translate":         {envSecret: "s", envTranslateProvider: "deepl"},
-		"external":          {envSecret: "s", prefixVoice + "_EXTERNAL": "maybe"},
-		"silence":           {envSecret: "s", "SILENCE_MS": "soon"},
-		"negative segment":  {envSecret: "s", "MAX_SEGMENT_S": "-1"},
-		"voice rate":        {envSecret: "s", "VOICE_RATE": "24k"},
+		"internal domains":  {envSecret: "s", envInternalDomains: "http://corp.example.com"},
+		"interim":           {envSecret: "s", envInterim: "soon"},
+		"negative interim":  {envSecret: "s", envInterim: "-1"},
 		"missing languages": {envSecret: "s", envLanguagesFile: "/nonexistent/languages.json"},
 	}
 
@@ -238,7 +238,7 @@ func externalByURL(t *testing.T, address string) bool {
 		t.Fatalf("parse %s: %v", address, err)
 	}
 
-	return isExternal(parsed)
+	return isExternal(parsed, nil)
 }
 
 func TestIsExternal(t *testing.T) {

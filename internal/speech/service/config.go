@@ -40,20 +40,17 @@ const (
 )
 
 const (
-	openAIURL         = "https://api.openai.com/v1"
-	defaultOllamaURL  = "http://localhost:11434"
-	defaultHost       = "0.0.0.0"
-	defaultPort       = "8090"
-	defaultVoiceRate  = 24000
-	defaultSilence    = 400 * time.Millisecond
-	defaultMaxSegment = 12 * time.Second
-	defaultInterim    = 600 * time.Millisecond
+	openAIURL        = "https://api.openai.com/v1"
+	defaultOllamaURL = "http://localhost:11434"
+	defaultHost      = "0.0.0.0"
+	defaultPort      = "8090"
+	defaultInterim   = 600 * time.Millisecond
 
 	envSecret            = "SPEECH_SECRET"
 	envEngines           = "ENGINES"
 	envLanguagesFile     = "LANGUAGES_FILE"
-	envOpenAIURL         = "OPENAI_URL"
 	envOpenAIKey         = "OPENAI_API_KEY"
+	envInternalDomains   = "INTERNAL_DOMAINS"
 	envTranslateProvider = "TRANSLATE_PROVIDER"
 	envTranscribeFormat  = "TRANSCRIBE_RESPONSE_FORMAT"
 	envVoiceName         = "VOICE_NAME"
@@ -90,9 +87,6 @@ type Settings struct {
 	translation      engine
 	voice            engine
 	voiceName        string
-	voiceRate        int
-	silence          time.Duration
-	maxSegment       time.Duration
 	interim          time.Duration
 	glossary         string
 	languages        languages
@@ -137,11 +131,11 @@ func (s Settings) external() bool {
 var (
 	errNoSecret       = errors.New(envSecret + " must be set")
 	errEnginesMode    = errors.New(envEngines + " must be real or fake")
-	errExternalValue  = errors.New("must be true or false")
 	errTranslateValue = errors.New(envTranslateProvider + " must be ollama or openai-compatible")
 	errFormatValue    = errors.New(envTranscribeFormat + " must be json or verbose_json")
 	errNegative       = errors.New("must not be negative")
 	errEngineURL      = errors.New("must be an http:// or https:// URL with a host")
+	errDomain         = errors.New("must be domain names separated by commas")
 )
 
 // FromEnv reads the settings from the environment that getenv looks up.
@@ -153,27 +147,32 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		return Settings{}, errNoSecret
 	}
 
-	settings, err := env.tuning()
+	langs, err := env.languages()
 	if err != nil {
 		return Settings{}, err
 	}
 
-	settings.secret = []byte(secret)
-	settings.Addr = net.JoinHostPort(env.or("HOST", defaultHost), env.or("PORT", defaultPort))
-	settings.voiceName = env(envVoiceName)
-	settings.glossary = env("GLOSSARY")
+	format := responseFormat(env.or(envTranscribeFormat, string(formatJSON)))
+	if format != formatJSON && format != formatVerbose {
+		return Settings{}, fmt.Errorf("%w, not %q", errFormatValue, format)
+	}
 
-	switch env.or(envEngines, "real") {
-	case "fake":
-		stand := engine{provider: fake, endpoint: nil, apiKey: "", model: "", problem: "", external: false}
-		settings.transcription, settings.translation, settings.voice = stand, stand, stand
-	case "real":
-		settings, err = env.realEngines(settings)
-		if err != nil {
-			return Settings{}, err
-		}
-	default:
-		return Settings{}, errEnginesMode
+	settings := Settings{
+		Addr:             net.JoinHostPort(env.or("HOST", defaultHost), env.or("PORT", defaultPort)),
+		secret:           []byte(secret),
+		transcription:    standIn(),
+		transcribeFormat: format,
+		translation:      standIn(),
+		voice:            standIn(),
+		voiceName:        env(envVoiceName),
+		interim:          0,
+		glossary:         env("GLOSSARY"),
+		languages:        langs,
+	}
+
+	settings, err = env.chosenEngines(settings)
+	if err != nil {
+		return Settings{}, err
 	}
 
 	interimDefault := defaultInterim
@@ -189,63 +188,40 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	return settings, nil
 }
 
-func (env environment) tuning() (Settings, error) {
-	langs, err := env.languages()
-	if err != nil {
-		return Settings{}, err
+func (env environment) chosenEngines(settings Settings) (Settings, error) {
+	switch env.or(envEngines, "real") {
+	case "fake":
+		return settings, nil
+	case "real":
+		return env.realEngines(settings)
+	default:
+		return Settings{}, errEnginesMode
 	}
+}
 
-	voiceRate, err := env.int("VOICE_RATE", defaultVoiceRate)
-	if err != nil {
-		return Settings{}, err
-	}
-
-	silence, err := env.duration("SILENCE_MS", time.Millisecond, defaultSilence)
-	if err != nil {
-		return Settings{}, err
-	}
-
-	maxSegment, err := env.duration("MAX_SEGMENT_S", time.Second, defaultMaxSegment)
-	if err != nil {
-		return Settings{}, err
-	}
-
-	format := responseFormat(env.or(envTranscribeFormat, string(formatJSON)))
-	if format != formatJSON && format != formatVerbose {
-		return Settings{}, fmt.Errorf("%w, not %q", errFormatValue, format)
-	}
-
-	return Settings{
-		Addr:             "",
-		secret:           nil,
-		transcription:    engine{provider: "", endpoint: nil, apiKey: "", model: "", problem: "", external: false},
-		transcribeFormat: format,
-		translation:      engine{provider: "", endpoint: nil, apiKey: "", model: "", problem: "", external: false},
-		voice:            engine{provider: "", endpoint: nil, apiKey: "", model: "", problem: "", external: false},
-		voiceName:        "",
-		voiceRate:        voiceRate,
-		silence:          silence,
-		maxSegment:       maxSegment,
-		interim:          0,
-		glossary:         "",
-		languages:        langs,
-	}, nil
+func standIn() engine {
+	return engine{provider: fake, endpoint: nil, apiKey: "", model: "", problem: "", external: false}
 }
 
 func (env environment) realEngines(settings Settings) (Settings, error) {
-	var err error
-
-	settings.transcription, err = env.openAICompatible(prefixTranscribe, transcription)
+	internal, err := parseDomains(env(envInternalDomains))
 	if err != nil {
 		return Settings{}, err
 	}
 
-	settings.translation, err = env.translationEngine()
+	engines := engineReader{env: env, internal: internal}
+
+	settings.transcription, err = engines.openAICompatible(prefixTranscribe, transcription)
 	if err != nil {
 		return Settings{}, err
 	}
 
-	settings.voice, err = env.openAICompatible(prefixVoice, voice)
+	settings.translation, err = engines.translation()
+	if err != nil {
+		return Settings{}, err
+	}
+
+	settings.voice, err = engines.openAICompatible(prefixVoice, voice)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -281,24 +257,6 @@ func (env environment) or(name, fallback string) string {
 	}
 
 	return fallback
-}
-
-func (env environment) int(name string, fallback int) (int, error) {
-	value := env(name)
-	if value == "" {
-		return fallback, nil
-	}
-
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return 0, fmt.Errorf("%s=%q: %w", name, value, err)
-	}
-
-	if parsed < 0 {
-		return 0, fmt.Errorf("%s=%q %w", name, value, errNegative)
-	}
-
-	return parsed, nil
 }
 
 func (env environment) duration(name string, unit, fallback time.Duration) (time.Duration, error) {
@@ -338,34 +296,53 @@ func (env environment) languages() (languages, error) {
 	return langs, nil
 }
 
-func (env environment) endpoint(prefix, fallback string) (*url.URL, bool, error) {
-	name := prefix + "_URL"
-	raw := env.or(name, fallback)
+func parseDomains(value string) ([]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
 
-	parsed, err := url.Parse(strings.TrimRight(raw, "/"))
+	parts := strings.Split(value, ",")
+	domains := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		domain := strings.ToLower(strings.Trim(strings.TrimSpace(part), "."))
+		if domain == "" || strings.ContainsAny(domain, "/:@ ") {
+			return nil, fmt.Errorf("%s=%q %w", envInternalDomains, value, errDomain)
+		}
+
+		domains = append(domains, domain)
+	}
+
+	return domains, nil
+}
+
+type engineReader struct {
+	env      environment
+	internal []string
+}
+
+func (r engineReader) endpoint(prefix, fallback string) (*url.URL, error) {
+	name := prefix + "_URL"
+
+	parsed, err := url.Parse(strings.TrimRight(r.env.or(name, fallback), "/"))
 	if err != nil {
-		return nil, false, fmt.Errorf("%s: %w", name, err)
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 
 	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return nil, false, fmt.Errorf("%s=%q %w", name, parsed.Redacted(), errEngineURL)
+		return nil, fmt.Errorf("%s=%q %w", name, parsed.Redacted(), errEngineURL)
 	}
 
-	external, err := env.external(prefix, parsed)
-	if err != nil {
-		return nil, false, err
-	}
-
-	return parsed, external, nil
+	return parsed, nil
 }
 
-func (env environment) openAICompatible(prefix string, use purpose) (engine, error) {
-	endpoint, external, err := env.endpoint(prefix, env.or(envOpenAIURL, openAIURL))
+func (r engineReader) openAICompatible(prefix string, use purpose) (engine, error) {
+	endpoint, err := r.endpoint(prefix, openAIURL)
 	if err != nil {
 		return engine{}, err
 	}
 
-	model := env(prefix + "_MODEL")
+	model := r.env(prefix + "_MODEL")
 
 	problem := ""
 	if model == "" {
@@ -375,54 +352,46 @@ func (env environment) openAICompatible(prefix string, use purpose) (engine, err
 	return engine{
 		provider: openAICompatible,
 		endpoint: endpoint,
-		apiKey:   env.or(prefix+"_API_KEY", env(envOpenAIKey)),
+		apiKey:   r.env.or(prefix+"_API_KEY", r.env(envOpenAIKey)),
 		model:    model,
 		problem:  problem,
-		external: external,
+		external: isExternal(endpoint, r.internal),
 	}, nil
 }
 
-func (env environment) translationEngine() (engine, error) {
-	chosen := provider(env.or(envTranslateProvider, string(ollama)))
+func (r engineReader) translation() (engine, error) {
+	chosen := provider(r.env.or(envTranslateProvider, string(ollama)))
 	if chosen == openAICompatible {
-		return env.openAICompatible(prefixTranslate, translation)
+		return r.openAICompatible(prefixTranslate, translation)
 	}
 
 	if chosen != ollama {
 		return engine{}, fmt.Errorf("%w, not %q", errTranslateValue, chosen)
 	}
 
-	endpoint, external, err := env.endpoint(prefixTranslate, defaultOllamaURL)
+	endpoint, err := r.endpoint(prefixTranslate, defaultOllamaURL)
 	if err != nil {
 		return engine{}, err
 	}
 
-	model := env(prefixTranslate + "_MODEL")
+	model := r.env(prefixTranslate + "_MODEL")
 
 	problem := ""
 	if model == "" {
 		problem = "set " + prefixTranslate + "_MODEL to the Ollama model to translate with"
 	}
 
-	return engine{provider: ollama, endpoint: endpoint, apiKey: "", model: model, problem: problem, external: external}, nil
+	return engine{
+		provider: ollama,
+		endpoint: endpoint,
+		apiKey:   "",
+		model:    model,
+		problem:  problem,
+		external: isExternal(endpoint, r.internal),
+	}, nil
 }
 
-func (env environment) external(prefix string, endpoint *url.URL) (bool, error) {
-	name := prefix + "_EXTERNAL"
-
-	switch value := strings.ToLower(env(name)); value {
-	case "":
-		return isExternal(endpoint), nil
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	default:
-		return false, fmt.Errorf("%s=%q %w", name, value, errExternalValue)
-	}
-}
-
-func isExternal(endpoint *url.URL) bool {
+func isExternal(endpoint *url.URL, internalDomains []string) bool {
 	host := strings.ToLower(endpoint.Hostname())
 
 	ip, err := netip.ParseAddr(host)
@@ -430,6 +399,15 @@ func isExternal(endpoint *url.URL) bool {
 		return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast()
 	}
 
-	return host != "localhost" && strings.Contains(host, ".") &&
-		!strings.HasSuffix(host, ".local") && !strings.HasSuffix(host, ".internal") && !strings.HasSuffix(host, ".lan")
+	if host == "localhost" || !strings.Contains(host, ".") {
+		return false
+	}
+
+	for _, domain := range append([]string{"local", "internal", "lan"}, internalDomains...) {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return false
+		}
+	}
+
+	return true
 }

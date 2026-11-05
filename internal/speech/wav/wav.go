@@ -108,6 +108,10 @@ func nextChunk(data []byte) (string, []byte, []byte, error) {
 	size := uint64(binary.LittleEndian.Uint32(data[4:8]))
 	rest := data[chunkHeader:]
 
+	if id == "data" && (size == 0 || size == math.MaxUint32) {
+		size = uint64(len(rest))
+	}
+
 	if size > uint64(len(rest)) {
 		return "", nil, nil, fmt.Errorf("%w: %q", errTruncated, id)
 	}
