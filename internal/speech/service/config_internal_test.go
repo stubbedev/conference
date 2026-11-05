@@ -24,13 +24,7 @@ const (
 func load(t *testing.T, values map[string]string) Settings {
 	t.Helper()
 
-	settings, err := FromEnv(func(name string) string {
-		if name == envSecret {
-			return "s"
-		}
-
-		return values[name]
-	})
+	settings, err := FromEnv(func(name string) string { return values[name] })
 	if err != nil {
 		t.Fatalf("settings from %v: %v", values, err)
 	}
@@ -55,14 +49,6 @@ func TestDefaultsNeedModels(t *testing.T) {
 
 	if !strings.Contains(settings.translation.problem, envTranslateModel) {
 		t.Fatalf("translation problem %q does not name %s", settings.translation.problem, envTranslateModel)
-	}
-}
-
-func TestAddrDefault(t *testing.T) {
-	t.Parallel()
-
-	if got := load(t, nil).Addr; got != "0.0.0.0:8090" {
-		t.Fatalf("address %q, want 0.0.0.0:8090", got)
 	}
 }
 
@@ -173,13 +159,12 @@ func TestInvalidSettingsFail(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]map[string]string{
-		"no secret":         {},
-		"engines mode":      {envSecret: "s", envEngines: "mock"},
-		"translate":         {envSecret: "s", envTranslateProvider: "deepl"},
-		"internal domains":  {envSecret: "s", envInternalDomains: "http://corp.example.com"},
-		"interim":           {envSecret: "s", envInterim: "soon"},
-		"negative interim":  {envSecret: "s", envInterim: "-1"},
-		"missing languages": {envSecret: "s", envLanguagesFile: "/nonexistent/languages.json"},
+		"engines mode":      {envEngines: "mock"},
+		"translate":         {envTranslateProvider: "deepl"},
+		"internal domains":  {envInternalDomains: "http://corp.example.com"},
+		"interim":           {envInterim: "soon"},
+		"negative interim":  {envInterim: "-1"},
+		"missing languages": {envLanguagesFile: "/nonexistent/languages.json"},
 	}
 
 	for name, values := range cases {
@@ -265,7 +250,7 @@ func TestEngineURLsMustBeHTTP(t *testing.T) {
 	t.Parallel()
 
 	for _, address := range []string{"ftp://files.example.com", "localhost:11434", "http://", "::"} {
-		_, err := FromEnv(lookup(map[string]string{envSecret: "s", envTranslateURL: address}))
+		_, err := FromEnv(lookup(map[string]string{envTranslateURL: address}))
 		if err == nil {
 			t.Errorf("%s=%q loaded, want an error", envTranslateURL, address)
 		}
@@ -309,7 +294,7 @@ func TestTranscribeResponseFormat(t *testing.T) {
 		t.Fatalf("format %q, want verbose_json", got)
 	}
 
-	_, err := FromEnv(lookup(map[string]string{envSecret: "s", envTranscribeFormat: "srt"}))
+	_, err := FromEnv(lookup(map[string]string{envTranscribeFormat: "srt"}))
 	if err == nil {
 		t.Fatal("srt loaded, want an error")
 	}

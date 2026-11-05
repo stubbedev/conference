@@ -18,7 +18,7 @@ interface TranslationSettingsProps {
 // while the speech service cannot translate.
 export function TranslationSettings({ config, prefs, onChange }: TranslationSettingsProps) {
   const disabled = !config.available
-  // Without a speech service there is no list, but the setting still shows.
+  // Until the server configuration is read there is no list, but the setting still shows.
   const languages = config.languages.length > 0 ? config.languages : [{ code: prefs.lang, name: 'Not available' }]
   return (
     <div className="flex flex-col gap-3">

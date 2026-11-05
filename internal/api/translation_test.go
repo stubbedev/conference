@@ -3,18 +3,28 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/stubbe/conference/internal/speech"
+	"github.com/stubbe/conference/internal/speech/service"
 )
 
 type translationPayload struct {
-	Translation speech.Status `json:"translation"`
+	Translation service.Status `json:"translation"`
 }
 
-func translationStatus(t *testing.T, handler http.Handler) speech.Status {
+func speechStatus(t *testing.T, env map[string]string) service.Status {
+	t.Helper()
+
+	settings, err := service.FromEnv(func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatalf("speech settings from %v: %v", env, err)
+	}
+
+	return settings.Status()
+}
+
+func translationStatus(t *testing.T, handler http.Handler) service.Status {
 	t.Helper()
 
 	rec := do(t, handler, http.MethodGet, "/api/config", "")
@@ -32,39 +42,22 @@ func translationStatus(t *testing.T, handler http.Handler) speech.Status {
 	return payload.Translation
 }
 
-func TestConfigTranslationWithoutSpeechService(t *testing.T) {
+func TestConfigTranslationNamesTheMissingEngines(t *testing.T) {
 	t.Parallel()
 
 	status := translationStatus(t, newTestServer(t))
-	if status.Available || status.Reason != speech.ReasonNotConfigured || status.Languages == nil {
+	if status.Available || !strings.Contains(status.Reason, "TRANSLATE_MODEL") || len(status.Languages) == 0 {
 		t.Fatalf("got %+v", status)
 	}
 }
 
-func TestConfigTranslationFromSpeechService(t *testing.T) {
+func TestConfigTranslationAvailable(t *testing.T) {
 	t.Parallel()
 
-	speechService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"ready": false, "external": true,
-			"engines": {"translation": {"ready": false, "problem": "set TRANSLATE_MODEL"}},
-			"languages": [{"code": "en", "name": "English"}, {"code": "sv", "name": "Swedish"}]}`))
-	}))
-	t.Cleanup(speechService.Close)
-
-	checker, err := speech.NewChecker("ws"+strings.TrimPrefix(speechService.URL, "http")+"/v1/stream", "", speechService.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	server := newTestAPI(t, testConfig())
-	server.Speech = checker
+	server := newTranslatingAPI(t, testConfig(), speechStatus(t, map[string]string{"SPEECH_ENGINES": "fake"}))
 
 	status := translationStatus(t, routes(server))
-	if status.Available || !status.External || !strings.Contains(status.Reason, "translation model") {
+	if !status.Available || status.Reason != "" || status.External || status.Languages[0].Code != "en" {
 		t.Fatalf("got %+v", status)
-	}
-
-	if len(status.Languages) != 2 || status.Languages[1].Code != "sv" {
-		t.Fatalf("languages = %+v", status.Languages)
 	}
 }

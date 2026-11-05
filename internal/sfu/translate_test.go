@@ -7,7 +7,6 @@ import (
 
 	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
-	"github.com/stubbe/conference/internal/speech/token"
 )
 
 const (
@@ -15,21 +14,20 @@ const (
 	msgToken       = "translate-token"
 	msgTokenAsk    = "translate-token-request"
 	translate      = "translate"
-	speechURL      = "wss://speech.example/v1/stream"
-	speechSecret   = "test-secret"
 	msgCaption     = "caption"
 	msgLang        = "lang"
 	codeNotAllowed = "not-allowed"
 	sealedPrefs    = "sealed-prefs"
 )
 
-func newTranslateHub(t *testing.T) (*sfu.Hub, *sfu.Engine) {
-	t.Helper()
+// roomTokens hands out "<room>/<member>" as the speech token.
+type roomTokens struct{}
 
-	return newSpeechHub(t, nil)
+func (roomTokens) Token(room, member string) (string, error) {
+	return room + "/" + member, nil
 }
 
-func newSpeechHub(t *testing.T, ready func() bool) (*sfu.Hub, *sfu.Engine) {
+func newTranslateHub(t *testing.T) (*sfu.Hub, *sfu.Engine) {
 	t.Helper()
 
 	engine, closeEngine, err := sfu.NewEngine(0, nil)
@@ -46,7 +44,7 @@ func newSpeechHub(t *testing.T, ready func() bool) (*sfu.Hub, *sfu.Engine) {
 
 	return sfu.NewHub(sfu.HubConfig{
 		Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500,
-		Speech: &sfu.SpeechConfig{URL: speechURL, Secret: []byte(speechSecret), Ready: ready},
+		Speech: roomTokens{},
 	}), engine
 }
 
@@ -60,23 +58,14 @@ func expectTranslating(t *testing.T, peer *testPeer, fromID string, announced bo
 	}
 }
 
-// expectToken asserts the next translate-token names the speech service
-// and carries a valid, unexpired token for this member.
+// expectToken asserts the next translate-token carries this member's
+// token for the room.
 func expectToken(t *testing.T, peer *testPeer) {
 	t.Helper()
 
 	msg := peer.next(t, msgToken)
-	if msg.URL != speechURL {
-		t.Fatalf("token URL %q, want %q", msg.URL, speechURL)
-	}
-
-	claims, err := token.Verify([]byte(speechSecret), msg.Token, time.Now())
-	if err != nil {
-		t.Fatalf("token does not verify: %v", err)
-	}
-
-	if claims.Room != testSlug || claims.Member != peer.member.ID {
-		t.Fatalf("unexpected claims %+v", claims)
+	if want := testSlug + "/" + peer.member.ID; msg.Token != want {
+		t.Fatalf("token %q, want %q", msg.Token, want)
 	}
 }
 
@@ -93,7 +82,7 @@ func expectNo(t *testing.T, peer *testPeer, msgType string) {
 	}
 }
 
-func TestTranslationUnavailableWithoutSpeechService(t *testing.T) {
+func TestTranslationUnavailableWithoutSpeechEngines(t *testing.T) {
 	t.Parallel()
 
 	engine, closeEngine, err := sfu.NewEngine(0, nil)
@@ -104,19 +93,6 @@ func TestTranslationUnavailableWithoutSpeechService(t *testing.T) {
 	defer closeEngine()
 
 	host := newTestPeer(t, newTestHub(t, engine), engine, "host", true)
-	host.member.Handle(sfu.Message{Type: translate, On: true})
-
-	if msg := host.next(t, "error"); msg.Code != "translate-unavailable" {
-		t.Fatalf("expected translate-unavailable, got %q", msg.Code)
-	}
-}
-
-func TestTranslationUnavailableUntilSpeechServiceReady(t *testing.T) {
-	t.Parallel()
-
-	hub, engine := newSpeechHub(t, func() bool { return false })
-
-	host := newTestPeer(t, hub, engine, "host", true)
 	host.member.Handle(sfu.Message{Type: translate, On: true})
 
 	if msg := host.next(t, "error"); msg.Code != "translate-unavailable" {

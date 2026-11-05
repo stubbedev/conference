@@ -164,9 +164,8 @@ type Message struct {
 
 	// live translation: TranslatingBy in welcome replays the room mode (the
 	// host who switched it on; empty when off); translate-token carries
-	// the speech service URL and this member's token
+	// this member's token for the speech stream
 	TranslatingBy string `json:"translatingBy,omitempty"`
-	URL           string `json:"url,omitempty"`
 	Token         string `json:"token,omitempty"`
 
 	// layer (Member names the source, Layer is a simulcast rid)
@@ -197,7 +196,7 @@ type HubConfig struct {
 	MaxPublishKbps int
 
 	// Speech enables live translation; nil turns it off.
-	Speech *SpeechConfig
+	Speech SpeechTokens
 }
 
 // NewHub creates an empty hub.

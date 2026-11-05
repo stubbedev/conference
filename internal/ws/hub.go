@@ -41,7 +41,7 @@ type Handler struct {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: h.originPatterns(r),
+		OriginPatterns: OriginPatterns(h.AllowedOrigins, r),
 	})
 	if err != nil {
 		return
@@ -75,13 +75,14 @@ func requestHost(hostport string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]")
 }
 
-// originPatterns converts the origin policy into websocket.Accept host
-// patterns for this request.
-func (h *Handler) originPatterns(r *http.Request) []string {
-	if len(h.AllowedOrigins) > 0 {
-		patterns := make([]string, 0, len(h.AllowedOrigins))
+// OriginPatterns converts the origin policy into websocket.Accept host
+// patterns for this request: the allowed origins when there are any,
+// otherwise the request's own.
+func OriginPatterns(allowed []string, r *http.Request) []string {
+	if len(allowed) > 0 {
+		patterns := make([]string, 0, len(allowed))
 
-		for _, origin := range h.AllowedOrigins {
+		for _, origin := range allowed {
 			parsed, err := url.Parse(origin)
 			if err == nil && parsed.Host != "" {
 				patterns = append(patterns, parsed.Host)

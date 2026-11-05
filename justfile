@@ -133,11 +133,6 @@ release level:
 e2e-translate:
     node web/e2e/translate.mjs
 
-# Speech service (live translation) on :8090. Needs SPEECH_SECRET and the
-# engines (see speech/README.md); ENGINES=fake runs it with stand-ins.
-speech:
-    go run ./cmd/speech
-
 # Live-translation demo: you (English, real mic) and a guest; options: hear, sv, male, openai.
 translate-demo *args:
     node web/e2e/translate-demo.mjs {{args}}
@@ -146,7 +141,8 @@ translate-demo *args:
 translate-lan *args:
     node web/e2e/translate-lan.mjs {{args}}
 
-# Stream the fixtures through a running speech service with real engines
-# and check the translations both ways.
-speech-test url="ws://localhost:8090":
-    go run ./cmd/speechcheck {{url}}
+# Stream the fixtures through the speech service with the engines the
+# environment sets up (see docs/live-translation.md) and check the
+# translations both ways.
+speech-test:
+    go run ./cmd/speechcheck

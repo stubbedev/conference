@@ -7,15 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/stubbe/conference/internal/speech/wire"
 )
 
 type provider string
@@ -29,9 +26,9 @@ const (
 type purpose string
 
 const (
-	transcription purpose = wire.PurposeTranscription
-	translation   purpose = wire.PurposeTranslation
-	voice         purpose = wire.PurposeVoice
+	transcription purpose = "transcription"
+	translation   purpose = "translation"
+	voice         purpose = "voice"
 )
 
 type responseFormat string
@@ -44,12 +41,9 @@ const (
 const (
 	openAIURL        = "https://api.openai.com/v1"
 	defaultOllamaURL = "http://localhost:11434"
-	defaultHost      = "0.0.0.0"
-	defaultPort      = "8090"
 	defaultInterim   = 600 * time.Millisecond
 
-	envSecret            = "SPEECH_SECRET"
-	envEngines           = "ENGINES"
+	envEngines           = "SPEECH_ENGINES"
 	envLanguagesFile     = "LANGUAGES_FILE"
 	envOpenAIKey         = "OPENAI_API_KEY"
 	envInternalDomains   = "INTERNAL_DOMAINS"
@@ -82,8 +76,6 @@ type namedEngine struct {
 
 // Settings configure the speech service; FromEnv reads them.
 type Settings struct {
-	Addr             string
-	secret           []byte
 	transcription    engine
 	transcribeFormat responseFormat
 	translation      engine
@@ -131,7 +123,6 @@ func (s Settings) external() bool {
 }
 
 var (
-	errNoSecret       = errors.New(envSecret + " must be set")
 	errEnginesMode    = errors.New(envEngines + " must be real or fake")
 	errTranslateValue = errors.New(envTranslateProvider + " must be ollama or openai-compatible")
 	errFormatValue    = errors.New(envTranscribeFormat + " must be json or verbose_json")
@@ -144,11 +135,6 @@ var (
 func FromEnv(getenv func(string) string) (Settings, error) {
 	env := environment(getenv)
 
-	secret := env(envSecret)
-	if secret == "" {
-		return Settings{}, errNoSecret
-	}
-
 	langs, err := env.languages()
 	if err != nil {
 		return Settings{}, err
@@ -160,8 +146,6 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	}
 
 	settings := Settings{
-		Addr:             net.JoinHostPort(env.or("HOST", defaultHost), env.or("PORT", defaultPort)),
-		secret:           []byte(secret),
 		transcription:    standIn(),
 		transcribeFormat: format,
 		translation:      standIn(),

@@ -1,7 +1,7 @@
-// Command speechcheck streams the German and English fixtures through a
-// running speech service as two members at once, each on its own
-// connection, and checks that each comes back as subtitles and voice in
-// the other language.
+// Command speechcheck runs the speech service with the engines the
+// environment sets up, streams the German and English fixtures through
+// it as two members at once, each on its own connection, and checks that
+// each comes back as subtitles and voice in the other language.
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -20,22 +21,21 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/stubbe/conference/internal/speech/token"
+	"github.com/stubbe/conference/internal/speech/service"
 	"github.com/stubbe/conference/internal/speech/wav"
 	"github.com/stubbe/conference/internal/speech/wire"
 )
 
 const (
-	defaultURL      = "ws://localhost:8090"
-	fixturesDir     = "fixtures"
-	room            = "speechcheck"
-	chunkSamples    = 320
-	chunkInterval   = 20 * time.Millisecond
-	sampleRate      = 16000
-	pcmWidth        = 2
-	tokenTTL        = time.Hour
-	speakingTimeout = 60 * time.Second
-	drainTimeout    = 10 * time.Second
+	fixturesDir       = "fixtures"
+	room              = "speechcheck"
+	chunkSamples      = 320
+	chunkInterval     = 20 * time.Millisecond
+	sampleRate        = 16000
+	pcmWidth          = 2
+	headerReadTimeout = 10 * time.Second
+	speakingTimeout   = 60 * time.Second
+	drainTimeout      = 10 * time.Second
 )
 
 type speakerSpec struct {
@@ -58,19 +58,14 @@ var (
 	errBadTokenAccepted = errors.New("a bad token was accepted")
 	errFailed           = errors.New("FAIL")
 	errNotReady         = errors.New("the service did not answer hello with ready")
-	errNoSecret         = errors.New("SPEECH_SECRET must be set")
+	errNotSetUp         = errors.New("live translation is not set up")
 	errFixtureRate      = errors.New("fixture is not 16 kHz")
 )
 
 func main() {
 	log.SetFlags(0)
 
-	base := defaultURL
-	if len(os.Args) > 1 {
-		base = os.Args[1]
-	}
-
-	err := run(context.Background(), base, []byte(os.Getenv("SPEECH_SECRET")))
+	err := run(context.Background())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -78,11 +73,35 @@ func main() {
 	log.Print("PASS")
 }
 
-func run(ctx context.Context, base string, secret []byte) error {
-	if len(secret) == 0 {
-		return errNoSecret
+func run(ctx context.Context) error {
+	settings, err := service.FromEnv(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("speech settings: %w", err)
 	}
 
+	if status := settings.Status(); !status.Available {
+		return fmt.Errorf("%w: %s", errNotSetUp, status.Reason)
+	}
+
+	settings.LogEngines()
+
+	speech := service.New(settings, func(*http.Request) []string { return nil })
+	defer speech.Shutdown()
+
+	listener, err := new(net.ListenConfig).Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+
+	server := &http.Server{Handler: speech, ReadHeaderTimeout: headerReadTimeout}
+	defer func() { _ = server.Close() }()
+
+	go func() { _ = server.Serve(listener) }()
+
+	return checkAll(ctx, "ws://"+listener.Addr().String(), speech)
+}
+
+func checkAll(ctx context.Context, base string, speech *service.Service) error {
 	err := rejectsBadToken(ctx, base)
 	if err != nil {
 		return err
@@ -96,7 +115,7 @@ func run(ctx context.Context, base string, secret []byte) error {
 	var checks sync.WaitGroup
 
 	for i, who := range all {
-		checks.Go(func() { outcomes[i], failures[i] = check(ctx, base, secret, who, started) })
+		checks.Go(func() { outcomes[i], failures[i] = check(ctx, base, speech, who, started) })
 	}
 
 	checks.Wait()
@@ -110,7 +129,7 @@ func run(ctx context.Context, base string, secret []byte) error {
 }
 
 func rejectsBadToken(ctx context.Context, base string) error {
-	conn, response, err := websocket.Dial(ctx, base+"/v1/stream?token=bogus", nil)
+	conn, response, err := websocket.Dial(ctx, base+"?token=bogus", nil)
 	if response != nil && response.Body != nil {
 		_ = response.Body.Close()
 	}
@@ -128,15 +147,15 @@ func rejectsBadToken(ctx context.Context, base string) error {
 	return nil
 }
 
-func check(ctx context.Context, base string, secret []byte, who speakerSpec, started time.Time) (result, error) {
+func check(ctx context.Context, base string, speech *service.Service, who speakerSpec, started time.Time) (result, error) {
 	got := result{finals: map[string][]string{}, voiced: map[string]bool{}, interims: 0}
 
-	tok, err := token.Mint(secret, token.Claims{Room: room, Member: who.id, Exp: time.Now().Add(tokenTTL).Unix()})
+	tok, err := speech.Token(room, who.id)
 	if err != nil {
-		return got, fmt.Errorf("%s: mint a token: %w", who.id, err)
+		return got, fmt.Errorf("%s: %w", who.id, err)
 	}
 
-	conn, err := connect(ctx, base+"/v1/stream?token="+tok)
+	conn, err := connect(ctx, base+"?token="+tok)
 	if err != nil {
 		return got, fmt.Errorf("%s: %w", who.id, err)
 	}

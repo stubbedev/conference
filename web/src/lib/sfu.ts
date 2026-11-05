@@ -50,6 +50,12 @@ export interface RoomClientOptions {
 /** Join codes after which retrying cannot succeed. */
 const FINAL_JOIN_CODES = new Set(['room-not-found', 'unauthorized'])
 
+/** The WebSocket URL of path on the server this page came from. */
+export function serverSocketURL(path: string): string {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
+  return `${scheme}://${location.host}${path}`
+}
+
 // A page served over HTTPS on a bare IP address is a local-network
 // setup (just translate-lan) with a self-signed certificate. Safari opens
 // the page after "Proceed" but refuses the WebSocket until the Mac trusts
@@ -104,7 +110,6 @@ interface WireMessage {
   replaces?: string
   layer?: Layer
   translatingBy?: string
-  url?: string
   token?: string
 }
 
@@ -120,7 +125,7 @@ interface Events {
   lang: { from: string; prefs: LangPrefs }
   caption: { from: string; caption: RoomCaption }
   translating: { from: string; on: boolean }
-  'translate-token': { url: string; token: string }
+  'translate-token': { token: string }
   error: { code: string; text: string }
   forced: { action: ForcedAction }
   kicked: Record<string, never>
@@ -238,8 +243,7 @@ export class RoomClient {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-      const ws = new WebSocket(`${scheme}://${location.host}/ws`)
+      const ws = new WebSocket(serverSocketURL('/ws'))
       this.ws = ws
 
       const timeout = setTimeout(() => reject(new JoinError('timeout', 'Join timed out.')), 15_000)
@@ -679,7 +683,7 @@ export class RoomClient {
         if (msg.from) this.emit('translating', { from: msg.from, on: msg.on ?? false })
         return
       case 'translate-token':
-        if (msg.url && msg.token) this.emit('translate-token', { url: msg.url, token: msg.token })
+        if (msg.token) this.emit('translate-token', { token: msg.token })
         return
       case 'forced': {
         const action = msg.action

@@ -11,7 +11,7 @@
 // Each speaker's voice stays its own track, which is also where a
 // speaker's own (cloned) voice would come in.
 
-import type { RoomClient } from '@/lib/sfu'
+import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import type { CaptionLine, LangPrefs, RoomCaption, TranslatorStatus } from '@/lib/translate/types'
 import captureWorkletUrl from '@/lib/translate/pcm-capture.worklet.ts?worker&url'
 
@@ -97,9 +97,9 @@ export class Translator {
     for (const [memberId, prefs] of client.memberLangPrefs) this.otherLangs.set(memberId, prefs.lang)
 
     this.unsubscribe = [
-      client.on('translate-token', ({ url, token }) => {
+      client.on('translate-token', ({ token }) => {
         this.setStatus({ state: 'connecting', detail: '' })
-        this.openSpeech(url, token)
+        this.openSpeech(token)
       }),
       client.on('lang', ({ from, prefs }) => {
         this.otherLangs.set(from, prefs.lang)
@@ -165,9 +165,9 @@ export class Translator {
     this.client = null
   }
 
-  private openSpeech(url: string, token: string): void {
+  private openSpeech(token: string): void {
     this.speech?.close()
-    const speech = new WebSocket(`${url}?token=${encodeURIComponent(token)}`)
+    const speech = new WebSocket(`${serverSocketURL('/ws/speech')}?token=${encodeURIComponent(token)}`)
     speech.binaryType = 'arraybuffer'
     this.speech = speech
 
@@ -186,7 +186,7 @@ export class Translator {
       if (this.speech !== speech || this.stopped) return
       this.speech = null
       if (!opened && ++this.refusedConnects >= MAX_REFUSED_CONNECTS) {
-        const reason = `The speech service at ${url} cannot be reached or refused the connection.`
+        const reason = 'The speech service cannot be reached or refused the connection.'
         this.setStatus({ state: 'failed', detail: reason })
         this.events.onFailure(reason)
         return
@@ -195,7 +195,7 @@ export class Translator {
         state: 'retrying',
         detail: opened
           ? 'The speech connection dropped; reconnecting.'
-          : `The speech service at ${url} did not answer (try ${this.refusedConnects} of ${MAX_REFUSED_CONNECTS}).`,
+          : `The speech service did not answer (try ${this.refusedConnects} of ${MAX_REFUSED_CONNECTS}).`,
       })
       // A fresh token for the new connection (they expire after an hour).
       setTimeout(() => {

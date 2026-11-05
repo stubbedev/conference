@@ -20,7 +20,7 @@ import (
 	"github.com/stubbe/conference/internal/config"
 	"github.com/stubbe/conference/internal/roomcrypt"
 	"github.com/stubbe/conference/internal/sfu"
-	"github.com/stubbe/conference/internal/speech"
+	"github.com/stubbe/conference/internal/speech/service"
 	"github.com/stubbe/conference/internal/store"
 )
 
@@ -49,22 +49,20 @@ type Server struct {
 	// SlackClient posts the Slack slash command's follow-up messages.
 	SlackClient *http.Client
 
-	// Speech reports whether live translation can run; nil when no
-	// speech service is configured.
-	Speech *speech.Checker
-
+	translation   service.Status
 	authLimiter   *limiter
 	createLimiter *limiter
 }
 
-// New creates an API server around the shared store, hub, and config.
-func New(storage *store.Store, hub *sfu.Hub, cfg *config.Config) *Server {
+// New creates an API server around the shared store, hub, and config,
+// reporting translation as whether live translation can run.
+func New(storage *store.Store, hub *sfu.Hub, cfg *config.Config, translation service.Status) *Server {
 	return &Server{
 		Store:         storage,
 		Hub:           hub,
 		Cfg:           cfg,
 		SlackClient:   &http.Client{Timeout: slackFollowUpTimeout},
-		Speech:        nil,
+		translation:   translation,
 		authLimiter:   newLimiter(authLimiterCapacity, authLimiterRefill),
 		createLimiter: newLimiter(createLimiterCapacity, createLimiterRefill),
 	}
@@ -97,7 +95,7 @@ type configResponse struct {
 	JoinOnly            bool `json:"joinOnly"`
 	// Translation is shown either way: unavailable, the web app greys it
 	// out with the reason.
-	Translation speech.Status `json:"translation"`
+	Translation service.Status `json:"translation"`
 }
 
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +105,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		CreateAuthRequired:  len(s.Cfg.APIKeys) > 0 && !open,
 		SessionLifetimeDays: int(s.Cfg.SessionTTL / (hoursPerDay * time.Hour)),
 		JoinOnly:            s.Cfg.JoinOnly && !open,
-		Translation:         s.Speech.Status(r.Context()),
+		Translation:         s.translation,
 	})
 }
 

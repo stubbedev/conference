@@ -23,7 +23,6 @@ import (
 )
 
 const (
-	testSecret  = "s"
 	testRoom    = "room"
 	chunk       = 320
 	testTimeout = 30 * time.Second
@@ -47,28 +46,48 @@ func testSpeakers() []speakerCase {
 	}
 }
 
-func start(t *testing.T, values map[string]string) *httptest.Server {
+type testServer struct {
+	http   *httptest.Server
+	speech *Service
+}
+
+func sameOrigin(r *http.Request) []string {
+	return []string{r.Host}
+}
+
+func start(t *testing.T, values map[string]string) testServer {
 	t.Helper()
 
-	speech := New(load(t, values))
-	server := httptest.NewServer(speech.Handler())
+	speech := New(load(t, values), sameOrigin)
+	server := httptest.NewServer(speech)
 
 	t.Cleanup(func() {
 		server.Close()
-		speech.Wait()
+		speech.Shutdown()
 	})
 
-	return server
+	return testServer{http: server, speech: speech}
 }
 
-func streamURL(server *httptest.Server, tok string) string {
-	return "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/stream?token=" + tok
+func streamURL(server testServer, tok string) string {
+	return "ws" + strings.TrimPrefix(server.http.URL, "http") + "?token=" + tok
 }
 
-func mint(t *testing.T, member string, exp time.Time) string {
+func admit(t *testing.T, server testServer, member string) string {
 	t.Helper()
 
-	tok, err := token.Mint([]byte(testSecret), token.Claims{Room: testRoom, Member: member, Exp: exp.Unix()})
+	tok, err := server.speech.Token(testRoom, member)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+
+	return tok
+}
+
+func expired(t *testing.T, server testServer, member string) string {
+	t.Helper()
+
+	tok, err := token.Mint(server.speech.key, token.Claims{Room: testRoom, Member: member, Exp: time.Now().Add(-time.Minute).Unix()})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -146,10 +165,10 @@ func speak(ctx context.Context, conn *websocket.Conn, who speakerCase) error {
 	return writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, Speaker: who.id})
 }
 
-func dialStream(ctx context.Context, t *testing.T, server *httptest.Server, member string) *websocket.Conn {
+func dialStream(ctx context.Context, t *testing.T, server testServer, member string) *websocket.Conn {
 	t.Helper()
 
-	conn, response, err := websocket.Dial(ctx, streamURL(server, mint(t, member, time.Now().Add(time.Hour))), nil)
+	conn, response, err := websocket.Dial(ctx, streamURL(server, admit(t, server, member)), nil)
 	if response != nil && response.Body != nil {
 		_ = response.Body.Close()
 	}
@@ -317,25 +336,33 @@ func TestStreamRefusals(t *testing.T) {
 	t.Parallel()
 
 	ready := start(t, map[string]string{envEngines: enginesFake})
+	other := start(t, map[string]string{envEngines: enginesFake})
 	unready := start(t, nil)
-	valid := time.Now().Add(time.Hour)
 
 	cases := []struct {
 		name   string
-		server *httptest.Server
+		server testServer
 		token  string
+		origin string
 		status int
 	}{
-		{name: "bad token", server: ready, token: "bogus", status: http.StatusForbidden},
-		{name: "expired token", server: ready, token: mint(t, anna, time.Now().Add(-time.Minute)), status: http.StatusForbidden},
-		{name: "engines not set up", server: unready, token: mint(t, anna, valid), status: http.StatusServiceUnavailable},
+		{name: "bad token", server: ready, token: "bogus", origin: "", status: http.StatusForbidden},
+		{name: "expired token", server: ready, token: expired(t, ready, anna), origin: "", status: http.StatusForbidden},
+		{name: "another process's token", server: ready, token: admit(t, other, anna), origin: "", status: http.StatusForbidden},
+		{name: "foreign origin", server: ready, token: admit(t, ready, anna), origin: "https://elsewhere.example", status: http.StatusForbidden},
+		{name: "engines not set up", server: unready, token: admit(t, unready, anna), origin: "", status: http.StatusServiceUnavailable},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			conn, response, err := websocket.Dial(t.Context(), streamURL(tc.server, tc.token), nil)
+			options := &websocket.DialOptions{HTTPHeader: http.Header{}}
+			if tc.origin != "" {
+				options.HTTPHeader.Set("Origin", tc.origin)
+			}
+
+			conn, response, err := websocket.Dial(t.Context(), streamURL(tc.server, tc.token), options)
 			if response != nil && response.Body != nil {
 				_ = response.Body.Close()
 			}
@@ -353,36 +380,59 @@ func TestStreamRefusals(t *testing.T) {
 	}
 }
 
+func TestShutdownEndsStreams(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+
+	server := start(t, map[string]string{envEngines: enginesFake})
+	conn := dialStream(ctx, t, server, anna)
+
+	done := make(chan struct{})
+
+	go func() {
+		server.speech.Shutdown()
+		close(done)
+	}()
+
+	if code := closeStatus(ctx, conn); code != websocket.StatusGoingAway {
+		t.Fatalf("closed with %v, want going away", code)
+	}
+
+	<-done
+
+	late, response, err := websocket.Dial(ctx, streamURL(server, admit(t, server, sam)), nil)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+
+	if err != nil {
+		t.Fatalf("dial after shutdown: %v", err)
+	}
+
+	defer func() { _ = late.CloseNow() }()
+
+	if code := closeStatus(ctx, late); code != websocket.StatusGoingAway {
+		t.Fatalf("a stream opened after shutdown closed with %v, want going away", code)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	t.Parallel()
 
-	server := start(t, map[string]string{envTranslateModel: "m"})
-
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/v1/status", nil)
-	if err != nil {
-		t.Fatalf("request: %v", err)
+	got := load(t, map[string]string{envTranslateModel: "m"}).Status()
+	if got.Available || !got.External || !strings.Contains(got.Reason, "transcription and voice") ||
+		!strings.Contains(got.Reason, envTranscribeModel) || strings.Contains(got.Reason, envTranslateModel) {
+		t.Fatalf("status %+v, want unavailable, external, transcription and voice missing their models", got)
 	}
 
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("status: %v", err)
+	if got.Languages[0] != (wire.Language{Code: "en", Name: "English"}) {
+		t.Fatalf("languages %+v, want English first", got.Languages)
 	}
 
-	defer func() { _ = response.Body.Close() }()
-
-	var got wire.Status
-
-	err = json.NewDecoder(response.Body).Decode(&got)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	transcribe := got.Engines[string(transcription)]
-	if got.Ready || !got.External || transcribe.Ready || !strings.Contains(transcribe.Problem, envTranscribeModel) {
-		t.Fatalf("status %+v, want not ready, external, transcription missing its model", got)
-	}
-
-	if !got.Engines[string(translation)].Ready || got.Languages[0] != (wire.Language{Code: "en", Name: "English"}) {
-		t.Fatalf("status %+v, want translation ready and English first", got)
+	ready := load(t, map[string]string{envEngines: enginesFake}).Status()
+	if !ready.Available || ready.Reason != "" || ready.External {
+		t.Fatalf("fake engines: status %+v, want available and internal", ready)
 	}
 }

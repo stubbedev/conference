@@ -17,6 +17,7 @@ import (
 	"github.com/stubbe/conference/internal/config"
 	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
+	"github.com/stubbe/conference/internal/speech/service"
 	"github.com/stubbe/conference/internal/store"
 )
 
@@ -46,13 +47,16 @@ func testConfig() *config.Config {
 		SessionTTL:         365 * 24 * time.Hour,
 		MaxRoomMembers:     0,
 		RoomTTL:            0,
-		SpeechURL:          "",
-		SpeechSecret:       "",
-		SpeechStatusURL:    "",
 	}
 }
 
 func newTestAPI(t *testing.T, cfg *config.Config) *api.Server {
+	t.Helper()
+
+	return newTranslatingAPI(t, cfg, speechStatus(t, nil))
+}
+
+func newTranslatingAPI(t *testing.T, cfg *config.Config, translation service.Status) *api.Server {
 	t.Helper()
 
 	storage, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -82,7 +86,7 @@ func newTestAPI(t *testing.T, cfg *config.Config) *api.Server {
 		Speech:         nil,
 	})
 
-	return api.New(storage, hub, cfg)
+	return api.New(storage, hub, cfg, translation)
 }
 
 func routes(server *api.Server) http.Handler {

@@ -29,7 +29,7 @@
   never touches the server, and everyone sees a badge while it runs.
 - 🗣️ **Live translation, if you want it.** Everyone picks their language;
   speech in other languages arrives as subtitles and a translated voice
-  in yours, on a speech service you run yourself. See
+  in yours, on speech engines you choose. See
   [Live translation](#live-translation).
 - 🌐 **Works on tricky networks.** A built-in relay gets people through
   firewalls and corporate networks, including over port 443.
@@ -104,9 +104,7 @@ All settings are environment variables.
 | `TRUSTED_PROXIES`   | —               | Comma-separated IPs or CIDRs of reverse proxies whose `X-Forwarded-For` names the real client, so rate limits apply per visitor instead of per proxy |
 | `ALLOWED_ORIGINS`   | same origin     | Extra origins allowed to connect to the signaling WebSocket                               |
 | `SLACK_SIGNING_SECRET` | —            | Enables the [`/meet` Slack command](#start-meetings-from-slack); requires `BASE_URL`      |
-| `SPEECH_URL`        | —               | WebSocket address of your [speech service](#live-translation), e.g. `wss://speech.example.com/v1/stream`; enables live translation |
-| `SPEECH_SECRET`     | —               | Secret shared with the speech service, which checks the short-lived tokens the server hands each member while translation is on; set together with `SPEECH_URL` |
-| `SPEECH_STATUS_URL` | `SPEECH_URL`'s `/v1/status` | Where the server checks the speech service is ready, e.g. an internal `http://speech:8090/v1/status` |
+| `TRANSCRIBE_*`, `TRANSLATE_*`, `VOICE_*` | none | The [live translation](#live-translation) engines; all three need a model before it turns on. [docs/live-translation.md](docs/live-translation.md) lists every setting |
 
 ### Who can create rooms?
 
@@ -197,26 +195,25 @@ hear them in. A host then turns on **Live translation** in the call:
 - It keeps running when the host who started it leaves, until a host
   switches it off.
 
-It needs a speech service: `cmd/speech`, a single static Go binary that
-detects speech itself and hands transcription, translation and the
-translated voice to engines you choose, on your own machines (whisper.cpp,
-Ollama, an OpenAI-compatible voice server) or any OpenAI-compatible API.
-Run it on a machine you control and point the server at it:
+The conference server runs the speech service itself, at `/ws/speech`
+on its own address and TLS: it detects speech and hands transcription,
+translation and the translated voice to engines you choose, on your own
+machines (whisper.cpp, Ollama, an OpenAI-compatible voice server) or any
+OpenAI-compatible API. Set them on the server, for example with Ollama on
+the Docker host:
 
 ```bash
-cd speech
-SPEECH_SECRET=s3cret TRANSLATE_URL=http://ollama:11434 TRANSLATE_MODEL=<model> … docker compose up -d
+TRANSLATE_URL=http://host.docker.internal:11434 TRANSLATE_MODEL=<model> \
+TRANSCRIBE_URL=… TRANSCRIBE_MODEL=… VOICE_URL=… VOICE_MODEL=… VOICE_NAME=… docker compose up -d
 ```
 
-Then set `SPEECH_URL` (behind TLS, e.g. `wss://speech.example.com/v1/stream`)
-and the same `SPEECH_SECRET` on the conference server.
-[speech/README.md](speech/README.md) covers the engines and their
-settings and where each sends its data. English and the national
+[docs/live-translation.md](docs/live-translation.md) covers the engines
+and their settings and where each sends its data. English and the national
 languages of Europe that Whisper transcribes are included (35), each
 translated with the form of address a business call uses; the app takes
-its list from the speech service.
+its list from the server.
 
-Until the speech service is reachable and all three engines are set up,
+Until all three engines are set up,
 everyone still sees the live-translation settings and hosts the button,
 greyed out, with what is missing (for example "set TRANSLATE_MODEL").
 With an engine on a public service, the app says "Live translation via
@@ -224,8 +221,8 @@ an external service".
 
 > [!NOTE]
 > Each browser translates its own speech, because only it holds its
-> speaker's microphone before encryption: it sends that audio to your
-> speech service and passes the subtitles and translated voice back into
+> speaker's microphone before encryption: it sends that audio to the
+> server's speech service and passes the subtitles and translated voice back into
 > the room, encrypted, as its own tracks. So the speech service handles
 > one connection per person talking, and every translated voice stays
 > its speaker's own.
@@ -246,14 +243,16 @@ an external service".
   send to a server.
 - Joining is authorized separately from the media key, through a session
   issued by `/auth`.
-- **Live translation** sends each speaker's audio from their own browser
-  to *your* speech service, which hears it in the clear: run it on
-  hardware you trust. It keeps audio and text in memory only, for as
-  long as it takes to translate a sentence, and logs neither. The
-  conference server still sees only ciphertext: languages and subtitles
-  travel sealed with the room's chat key, translated voices as encrypted
-  audio tracks. With an OpenAI-compatible engine on a public service,
-  that service gets the audio or text too.
+- **Live translation**, while a host has it on, sends each speaker's
+  audio from their own browser to the conference server's speech
+  service, which hears it in the clear, and on to the engines: so the
+  server, unlike for the call itself, can hear what is translated. Run
+  it and its engines on hardware you trust. It keeps audio and text in
+  memory only, for as long as it takes to translate a sentence, and logs
+  neither. Everything sent back into the room stays end-to-end
+  encrypted: languages and subtitles sealed with the room's chat key,
+  translated voices as encrypted audio tracks. With an OpenAI-compatible
+  engine on a public service, that service gets the audio or text too.
 
 <details>
 <summary>Technical details</summary>
@@ -366,10 +365,10 @@ Galène-style SFU (selective forwarding unit):
   third-party STUN.
 - SQLite storage in pure Go (no CGO), with the web UI embedded.
 
-Live translation has its own optional service, `cmd/speech`, also a single
-static Go binary: voice detection in pure Go, and transcription,
-translation and the translated voice on engines you choose, on your own
-machines or a provider's. See [speech/README.md](speech/README.md).
+Live translation runs in the same binary: voice detection in pure Go,
+and transcription, translation and the translated voice on engines you
+choose, on your own machines or a provider's. See
+[docs/live-translation.md](docs/live-translation.md).
 
 ## Development
 
@@ -377,8 +376,7 @@ machines or a provider's. See [speech/README.md](speech/README.md).
 just check    # vet + test + lint + web build + go build + browser smoke (what CI runs)
 just e2e      # only the browser smoke test
 just run      # local server with a scratch database
-just speech   # the speech service (ENGINES=fake runs it with stand-in engines)
-just speech-test  # the fixtures through a running speech service with real engines
+just speech-test  # the fixtures through the speech service with the engines the environment sets up
 just release-preview
 ```
 
@@ -411,7 +409,7 @@ Without `openai`, both demos use your own engines instead: Ollama at
 `TRANSLATE_URL` (`gemma4:26b-a4b-it-qat` unless `TRANSLATE_MODEL` names
 another model), a transcription server at `TRANSCRIBE_URL` (such as
 whisper.cpp's `whisper-server`) and a voice server at `VOICE_URL` with
-`VOICE_MODEL` and `VOICE_NAME`, from the environment or `speech/.env`.
+`VOICE_MODEL` and `VOICE_NAME`, from the environment.
 `translate-demo` takes `hear` (the guest stays silent so you hear
 yourself translated; wear headphones), `sv` (a Swedish guest) and `male`
 (your translated voice).
@@ -419,7 +417,7 @@ yourself translated; wear headphones), `sv` (a Swedish guest) and `male`
 has to trust the self-signed certificate it offers at `/certificate.pem`
 before it can connect. `SERVER_LOG=path` keeps the meeting server's log.
 
-`openai` (with `OPENAI_API_KEY` in `speech/.env`) has OpenAI transcribe
+`openai` (with `OPENAI_API_KEY` in the environment) has OpenAI transcribe
 (`gpt-transcribe`), translate (`gpt-4o-mini`) and speak (`gpt-4o-mini-tts`).
 That sends the call's audio and text to OpenAI, so it is for test
 conversations only.

@@ -9,13 +9,13 @@ export interface ServerConfig {
 }
 
 export interface TranslationConfig {
-  /** The speech service answers and all its engines are set up. */
+  /** All the speech engines are set up. */
   available: boolean
   /** What has to be set up first, while unavailable. */
   reason?: string
   /** The languages the speech service speaks. */
   languages: Language[]
-  /** Speech or text goes to a service outside the speech service's network. */
+  /** Speech or text goes to a service outside the server's network. */
   external: boolean
 }
 

@@ -1,66 +1,54 @@
-# Speech service
+# Live translation
 
-The engine behind live translation: a small Go service (`cmd/speech`)
-that each speaking member's browser streams its own microphone to while a
-host has live translation switched on. For every finished sentence it
-sends back subtitles in the speaker's language and every listener's
-language, and a translated voice per listener language. The conference
-server never sees any of it; it only hands out the tokens.
+The speech service behind live translation runs inside the conference
+server, at `/ws/speech` on the server's own address and TLS. Each
+speaking member's browser streams its own microphone there while a host
+has live translation switched on. For every finished sentence it sends
+back subtitles in the speaker's language and every listener's language,
+and a translated voice per listener language.
 
 ```
 browser ──16 kHz audio──► voice detection ─► transcription ─► translation ─► voice
         ◄── subtitles, translated voice ──────────────────────────────────────┘
 ```
 
-- **One static binary.** Voice detection runs in the service itself: the
+- **No extra service.** Voice detection runs in the server itself: the
   Silero VAD model in pure Go
   ([go-silerovad](https://github.com/vithnilica/go-silerovad), MIT), so
-  the binary needs no cgo, Python or model download, and the Docker image
-  is about 19 MB on distroless. Transcription, translation and the voice
-  are HTTP engines you choose.
+  the binary still needs no cgo, Python or model download. Transcription,
+  translation and the voice are HTTP engines you choose; they can stay on
+  plain HTTP on the same machine or network, since only the server talks
+  to them.
 - **Nothing kept.** No audio or text is logged or written to disk: it
   lives in memory for as long as it takes to translate a sentence.
 - **One stream per member.** See [Streams](#streams).
 - **35 languages**, each translated with the form of address a business
   call uses. See [Languages](#languages).
 
-## Run it
+## Set it up
+
+Set the engines on the conference server, e.g. with Ollama on the Docker
+host (`docker-compose.yml` maps `host.docker.internal` to it):
 
 ```bash
-SPEECH_SECRET=s3cret TRANSCRIBE_MODEL=… TRANSLATE_MODEL=… VOICE_MODEL=… VOICE_NAME=… just speech
+TRANSLATE_URL=http://host.docker.internal:11434 TRANSLATE_MODEL=… \
+TRANSCRIBE_URL=… TRANSCRIBE_MODEL=… VOICE_URL=… VOICE_MODEL=… VOICE_NAME=… docker compose up -d
 ```
 
-Or in Docker (the build context is the repository root):
-
-```bash
-cd speech
-SPEECH_SECRET=s3cret TRANSLATE_URL=http://ollama:11434 TRANSLATE_MODEL=… docker compose up -d
-```
-
-Then point the conference server at it with the same secret:
-`SPEECH_URL=wss://speech.example.com/v1/stream` (behind TLS, since the
-browsers connect to it directly) and `SPEECH_SECRET=s3cret`. If the server
-can't reach that public address itself, set `SPEECH_STATUS_URL` to an
-internal one, e.g. `http://speech:8090/v1/status`.
-
-`GET /v1/status` says, without a token and without anything secret,
-whether every engine is set up, whether any sends data off this network
-and which languages are available. The conference app shows live
-translation greyed out, with what is missing, until everything is ready.
-The service also logs, at start, every engine that is not set up or that
-leaves the network, and whether interim subtitles are on. Engine URLs are
-checked at start (http or https, with a host) and only ever logged with
-any password hidden.
+The app shows live translation greyed out, with what is missing, until
+all three engines are set up. The server logs, at start, every engine
+that is not set up or that leaves the network, and whether interim
+subtitles are on. Engine URLs are checked at start (http or https, with a
+host) and only ever logged with any password hidden.
 
 ## Settings
 
-`.env.example` lists every setting. No engine has a vendor's model as its
-default.
+The [`.env.example`](../.env.example) in the repository root lists them
+with the rest of the server's settings. No engine has a vendor's model as
+its default.
 
 | Setting | Default | |
 |---|---|---|
-| `SPEECH_SECRET` | (required) | Shared with the conference server, which signs members' tokens with it |
-| `HOST`, `PORT` | `0.0.0.0`, `8090` | Where the service listens |
 | `TRANSCRIBE_URL`, `TRANSCRIBE_API_KEY`, `TRANSCRIBE_MODEL` | OpenAI, `OPENAI_API_KEY`, none | Transcription: an OpenAI-compatible `/audio/transcriptions` |
 | `TRANSCRIBE_RESPONSE_FORMAT` | `json` | `verbose_json` drops what Whisper marks as non-speech (below) |
 | `INTERIM_MS` | 600, or 0 for an external transcription engine | How often to subtitle a sentence still being spoken; 0 turns it off |
@@ -72,7 +60,7 @@ default.
 | `INTERNAL_DOMAINS` | none | Domains on your network, e.g. `corp.example.com`, so their engines don't count as external |
 | `GLOSSARY` | none | Term translations the translator must use, e.g. `Kontainer = Kontainer` |
 | `LANGUAGES_FILE` | built in | Your own language list (below) |
-| `ENGINES` | `real` | `fake` swaps all three engines for stand-ins, for tests |
+| `SPEECH_ENGINES` | `real` | `fake` swaps all three engines for stand-ins, for tests |
 
 OpenAI-compatible means OpenAI itself, Azure OpenAI, Mistral, Groq or
 OpenRouter, or a server of your own:
@@ -111,7 +99,10 @@ latest.
 
 ## Streams
 
-A token admits one member of one room, and a stream carries only that
+The server hands each member a token over the call's signaling
+connection while live translation is on, signed with a key it makes
+fresh at every start; it admits that member of that room for an hour.
+A stream carries only that
 member's speech: audio for any other speaker ends the stream with a
 policy-violation status. A member has one stream at a time: a new
 connection replaces the old one, which is closed the same way, so a lost
@@ -128,7 +119,7 @@ and any sentence still being translated for it is dropped.
 that Whisper transcribes (Irish is not among them). The list is
 [`internal/speech/service/languages.json`](../internal/speech/service/languages.json),
 built into the binary; the conference app takes its language list from
-the service. Each entry has a Whisper language code and, where the
+the server. Each entry has a Whisper language code and, where the
 language has a formal and an informal "you", the form of address the
 translation uses (formal for most; "du" in the Scandinavian languages
 and "sinä" in Finnish, as is usual at work there).
@@ -150,7 +141,7 @@ A language without `voices` uses `VOICE_NAME`.
 
 `go test ./internal/speech/...` covers:
 
-- the settings, and the token format the meeting server mints;
+- the settings, the status the app shows, and the tokens that admit a member;
 - voice detection on the fixtures, and WAV files including streamed ones;
 - the engines' requests against a stand-in API, the non-speech filter,
   and passwords kept out of errors;
@@ -158,19 +149,18 @@ A language without `voices` uses `VOICE_NAME`.
   translation (the listener gets the original and a notice), an interim
   for a sentence that has ended, a full queue holding back audio;
 - whole streams: a German and an English member at once through the real
-  voice detection and protocol with stand-in engines (`ENGINES=fake`:
+  voice detection and protocol with stand-in engines (`SPEECH_ENGINES=fake`:
   numbered transcripts, `[lang] …` translations, a tone for a voice),
   which the browser tests use too, a foreign speaker, and a member's
-  second connection.
+  second connection, refused tokens and origins, and shutdown.
 
 With real engines:
 
 ```bash
-SPEECH_SECRET=dev … just speech &
-SPEECH_SECRET=dev just speech-test
+TRANSCRIBE_MODEL=… TRANSLATE_MODEL=… VOICE_MODEL=… VOICE_NAME=… just speech-test
 ```
 
-`speech-test` (`cmd/speechcheck`) streams `fixtures/german.wav` and
-`fixtures/english.wav` in real time as two members at once, each on its
-own connection, and checks that each comes back as subtitles and voice
-in the other language.
+`speech-test` (`cmd/speechcheck`) runs the speech service on those
+engines, streams `fixtures/german.wav` and `fixtures/english.wav` through
+it in real time as two members at once, each on its own connection, and
+checks that each comes back as subtitles and voice in the other language.

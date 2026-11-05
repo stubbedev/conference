@@ -37,9 +37,6 @@ func testConfig(base string, others ...string) *config.Config {
 		SessionTTL:         0,
 		MaxRoomMembers:     0,
 		RoomTTL:            0,
-		SpeechURL:          "",
-		SpeechSecret:       "",
-		SpeechStatusURL:    "",
 	}
 }
 

@@ -12,15 +12,15 @@
 //
 // `male` or `female` (the default) picks the voice others hear you in.
 // `openai` has OpenAI transcribe, translate and speak, with the key from
-// speech/.env. Testing only: audio and text leave our hardware. Without
+// OPENAI_API_KEY. Testing only: audio and text leave our hardware. Without
 // it, your own engines do: Ollama (TRANSLATE_URL; Gemma unless
 // TRANSLATE_MODEL), a transcription server (TRANSCRIBE_URL, e.g.
 // whisper.cpp's whisper-server) and a voice server (VOICE_URL, VOICE_MODEL,
-// VOICE_NAME), from the environment or speech/.env.
+// VOICE_NAME), from the environment.
 //
 //   TRANSLATE_URL=… TRANSCRIBE_URL=… VOICE_URL=… VOICE_MODEL=… VOICE_NAME=… \
 //     just translate-demo [hear] [de|sv] [male|female]
-//   just translate-demo openai [hear] [de|sv] [male|female]
+//   OPENAI_API_KEY=… just translate-demo openai [hear] [de|sv] [male|female]
 //
 // Ctrl+C stops everything this script started.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -28,10 +28,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createRoom, evalJs, findChrome, joinRoom, launchChrome, sleep } from './browser.mjs'
-import { buildServer, ensureSpeech, repoRoot, shutdown, SPEECH_PORT, startServer, track } from './translate-stack.mjs'
+import { buildServer, repoRoot, shutdown, speechEngines, startServer, track } from './translate-stack.mjs'
 
 const chrome = process.env.CHROME ?? findChrome()
-const secret = process.env.SPEECH_SECRET ?? 'translate-demo'
 const hear = process.argv.includes('hear')
 const openai = process.argv.includes('openai')
 const GUESTS = {
@@ -83,11 +82,7 @@ function silentWav() {
 }
 
 async function main() {
-  await ensureSpeech({ dir, secret, openai })
-  const base = await startServer(buildServer(dir), dir, {
-    speechURL: `ws://127.0.0.1:${SPEECH_PORT}/v1/stream`,
-    secret,
-  })
+  const base = await startServer(buildServer(dir), dir, speechEngines(openai))
   const room = await createRoom(base, 'Live translation demo')
 
   // You: real camera and mic. The guest: a recording, muted so its

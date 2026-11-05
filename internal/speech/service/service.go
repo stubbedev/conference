@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -23,84 +24,67 @@ import (
 const (
 	readLimit = 1 << 16
 	pcmWidth  = 2
+	tokenTTL  = time.Hour
 )
 
 var (
 	errOddPCM         = errors.New("audio frame holds an odd number of bytes")
 	errReplaced       = errors.New("replaced by a newer connection of the same member")
 	errConnectionLost = errors.New("connection lost")
+	errShuttingDown   = errors.New("shutting down")
 )
 
-// Service serves the speech service's HTTP and WebSocket endpoints.
+// Service streams each speaking member's audio to the engines and back.
+// It signs the tokens that admit a member with a key of its own, made
+// fresh for every process.
 type Service struct {
-	settings Settings
-	engines  speechEngines
-	sessions sync.WaitGroup
-	live     liveSessions
-	now      func() time.Time
+	settings       Settings
+	engines        speechEngines
+	key            []byte
+	originPatterns func(*http.Request) []string
+	sessions       sync.WaitGroup
+	live           liveSessions
+	now            func() time.Time
 }
 
-// New builds the service and its engines from settings.
-func New(settings Settings) *Service {
+// New builds the service and its engines from settings. originPatterns
+// names the origins a stream may be opened from.
+func New(settings Settings, originPatterns func(*http.Request) []string) *Service {
 	var engines speechEngines = newHTTPEngines(settings)
 	if settings.transcription.provider == fake {
 		engines = &fakeEngines{utterances: atomic.Int64{}}
 	}
 
 	return &Service{
-		settings: settings,
-		engines:  engines,
-		sessions: sync.WaitGroup{},
-		live:     liveSessions{mu: sync.Mutex{}, sessions: map[liveKey]*liveSession{}},
-		now:      time.Now,
+		settings:       settings,
+		engines:        engines,
+		key:            []byte(rand.Text()),
+		originPatterns: originPatterns,
+		sessions:       sync.WaitGroup{},
+		live:           liveSessions{mu: sync.Mutex{}, sessions: map[liveKey]*liveSession{}, closed: false},
+		now:            time.Now,
 	}
 }
 
-// Handler routes /healthz, /v1/status and /v1/stream.
-func (s *Service) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]bool{"ok": true})
-	})
-	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, s.status())
-	})
-	mux.HandleFunc("GET /v1/stream", s.stream)
+// Token admits member of room to a stream for the next hour.
+func (s *Service) Token(room, member string) (string, error) {
+	minted, err := token.Mint(s.key, token.Claims{Room: room, Member: member, Exp: s.now().Add(tokenTTL).Unix()})
+	if err != nil {
+		return "", fmt.Errorf("speech token for %s in %s: %w", member, room, err)
+	}
 
-	return mux
+	return minted, nil
 }
 
-// Wait blocks until every stream has ended.
-func (s *Service) Wait() {
+// Shutdown ends every stream, refuses new ones and waits until they have closed.
+func (s *Service) Shutdown() {
+	s.live.close()
 	s.sessions.Wait()
 }
 
-func (s *Service) status() wire.Status {
-	named := s.settings.engines()
-
-	engines := make(map[string]wire.EngineStatus, len(named))
-	for _, entry := range named {
-		engines[string(entry.purpose)] = wire.EngineStatus{
-			Provider: string(entry.engine.provider),
-			Model:    entry.engine.model,
-			Ready:    entry.engine.ready(),
-			Problem:  entry.engine.problem,
-			External: entry.engine.external,
-		}
-	}
-
-	all := s.settings.languages.all()
-
-	langs := make([]wire.Language, len(all))
-	for i, lang := range all {
-		langs[i] = wire.Language{Code: lang.Code, Name: lang.Name}
-	}
-
-	return wire.Status{Ready: s.settings.ready(), External: s.settings.external(), Engines: engines, Languages: langs}
-}
-
-func (s *Service) stream(w http.ResponseWriter, r *http.Request) {
-	claims, err := token.Verify(s.settings.secret, r.URL.Query().Get("token"), s.now())
+// ServeHTTP upgrades a member's request, admitted by its token, to a stream.
+func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	claims, err := token.Verify(s.key, r.URL.Query().Get("token"), s.now())
 	if err != nil {
 		http.Error(w, "invalid or expired token", http.StatusForbidden)
 
@@ -113,7 +97,7 @@ func (s *Service) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: s.originPatterns(r)})
 	if err != nil {
 		log.Printf("accept the stream: %v", err)
 
@@ -128,10 +112,10 @@ func (s *Service) stream(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancelCause(r.Context())
 	defer cancel(nil)
 
-	defer s.live.claim(liveKey{room: claims.Room, member: claims.Member}, func() {
-		cancel(errReplaced)
+	defer s.live.claim(liveKey{room: claims.Room, member: claims.Member}, func(cause error) {
+		cancel(cause)
 
-		s.sessions.Go(func() { _ = conn.Close(websocket.StatusPolicyViolation, errReplaced.Error()) })
+		s.sessions.Go(func() { _ = conn.Close(kickStatus(cause), cause.Error()) })
 	})()
 
 	current, err := newSession(ctx, s.settings, s.engines, claims.Member, func(ctx context.Context, message any) error {
@@ -162,8 +146,8 @@ func (s *Service) stream(w http.ResponseWriter, r *http.Request) {
 
 func closeStream(conn *websocket.Conn, err, cause error) {
 	switch {
-	case errors.Is(cause, errReplaced):
-		log.Print("session replaced by a newer connection")
+	case errors.Is(cause, errReplaced), errors.Is(cause, errShuttingDown):
+		log.Printf("session closed: %v", cause)
 	case errors.Is(cause, errConnectionLost):
 		log.Printf("session closed: %v", cause)
 
@@ -192,25 +176,46 @@ type liveKey struct {
 	member string
 }
 
+// kickStatus is the close status of a stream ended for cause: a policy
+// violation for a replaced one, going away when the service shuts down.
+func kickStatus(cause error) websocket.StatusCode {
+	if errors.Is(cause, errReplaced) {
+		return websocket.StatusPolicyViolation
+	}
+
+	return websocket.StatusGoingAway
+}
+
 type liveSession struct {
-	kick func()
+	kick func(cause error)
 }
 
 type liveSessions struct {
 	mu       sync.Mutex
 	sessions map[liveKey]*liveSession
+	closed   bool
 }
 
-func (l *liveSessions) claim(key liveKey, kick func()) func() {
+// claim makes kick's stream the member's only one, ending the one it
+// replaces; once the service is closed, it ends kick's at once. The
+// returned func gives the claim up.
+func (l *liveSessions) claim(key liveKey, kick func(cause error)) func() {
 	claimed := &liveSession{kick: kick}
 
 	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.closed {
+		kick(errShuttingDown)
+
+		return func() {}
+	}
+
 	if previous, ok := l.sessions[key]; ok {
-		previous.kick()
+		previous.kick(errReplaced)
 	}
 
 	l.sessions[key] = claimed
-	l.mu.Unlock()
 
 	return func() {
 		l.mu.Lock()
@@ -219,6 +224,18 @@ func (l *liveSessions) claim(key liveKey, kick func()) func() {
 		if l.sessions[key] == claimed {
 			delete(l.sessions, key)
 		}
+	}
+}
+
+// close ends every stream and refuses later claims.
+func (l *liveSessions) close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.closed = true
+
+	for _, session := range l.sessions {
+		session.kick(errShuttingDown)
 	}
 }
 
@@ -318,13 +335,4 @@ func isClosed(err error) bool {
 	code := websocket.CloseStatus(err)
 
 	return code == websocket.StatusNormalClosure || code == websocket.StatusGoingAway || code == websocket.StatusNoStatusRcvd
-}
-
-func writeJSON(w http.ResponseWriter, body any) {
-	w.Header().Set("Content-Type", "application/json")
-
-	err := json.NewEncoder(w).Encode(body)
-	if err != nil {
-		log.Printf("write a reply: %v", err)
-	}
 }

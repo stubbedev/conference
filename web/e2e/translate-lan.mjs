@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 // Live translation between computers on the same network (office or home
-// Wi-Fi). This machine runs everything: the speech service, a meeting
-// server with live translation, and an HTTPS front door on LAN_PORT
-// (8443) with a self-signed certificate. Browsers only allow camera and
-// mic on HTTPS, and a secure page may only reach the speech service over
-// wss, so both sit behind the one address: /speech/ goes to the speech
-// service, everything else to the meeting server.
+// Wi-Fi). This machine runs everything: a meeting server with live
+// translation, and an HTTPS front door on LAN_PORT (8443) with a
+// self-signed certificate in front of it, since browsers only allow
+// camera and mic on HTTPS.
 //
 // It opens the host link here and prints the guest link for the other
 // computer, which accepts the certificate warning once. Safari also has
@@ -14,7 +12,7 @@
 // address changes) and offered at /certificate.pem. The room lives in a
 // temporary database: Ctrl+C closes it for good.
 //
-//   just translate-lan openai   (OpenAI transcribes, translates and speaks; key in speech/.env)
+//   OPENAI_API_KEY=… just translate-lan openai   (OpenAI transcribes, translates and speaks)
 //   TRANSLATE_URL=… TRANSCRIBE_URL=… VOICE_URL=… VOICE_MODEL=… VOICE_NAME=… just translate-lan
 //     (your own engines: Ollama, Gemma unless TRANSLATE_MODEL; see translate-demo.mjs)
 import { spawn, spawnSync } from 'node:child_process'
@@ -26,13 +24,11 @@ import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createRoom } from './browser.mjs'
-import { buildServer, ensureSpeech, repoRoot, shutdown, SPEECH_PORT, startServer, track } from './translate-stack.mjs'
+import { buildServer, repoRoot, shutdown, speechEngines, startServer, track } from './translate-stack.mjs'
 
 const LAN_PORT = Number(process.env.LAN_PORT ?? 8443)
-const SPEECH_PREFIX = '/speech/'
 const CERTIFICATE_PATH = '/certificate.pem'
 const CERT_DIR = join(repoRoot, 'tmp/translate-lan')
-const secret = process.env.SPEECH_SECRET ?? 'translate-lan'
 const openai = process.argv.includes('openai')
 
 const dir = mkdtempSync(join(tmpdir(), 'translate-lan-'))
@@ -64,12 +60,6 @@ function selfSignedCert(ip) {
   return { key: readFileSync(key), cert: readFileSync(cert) }
 }
 
-function target(url, meetingPort) {
-  return url.startsWith(SPEECH_PREFIX)
-    ? { port: SPEECH_PORT, path: url.slice(SPEECH_PREFIX.length - 1) }
-    : { port: meetingPort, path: url }
-}
-
 // HTTPS in front, plain HTTP behind; the Host header is passed on as is,
 // so the meeting server's same-origin WebSocket check still holds.
 function frontDoor(tls, meetingPort) {
@@ -78,8 +68,7 @@ function frontDoor(tls, meetingPort) {
       res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert' }).end(tls.cert)
       return
     }
-    const { port, path } = target(req.url ?? '/', meetingPort)
-    const upstream = request({ host: '127.0.0.1', port, path, method: req.method, headers: req.headers }, (back) => {
+    const upstream = request({ host: '127.0.0.1', port: meetingPort, path: req.url, method: req.method, headers: req.headers }, (back) => {
       res.writeHead(back.statusCode ?? 502, back.headers)
       back.pipe(res)
     })
@@ -87,12 +76,11 @@ function frontDoor(tls, meetingPort) {
     req.pipe(upstream)
   })
   server.on('upgrade', (req, socket, head) => {
-    const { port, path } = target(req.url ?? '/', meetingPort)
-    const upstream = connect(port, '127.0.0.1', () => {
+    const upstream = connect(meetingPort, '127.0.0.1', () => {
       const headers = Object.entries(req.headers).flatMap(([name, value]) =>
         [].concat(value).map((v) => `${name}: ${v}`),
       )
-      upstream.write(`${req.method} ${path} HTTP/1.1\r\n${headers.join('\r\n')}\r\n\r\n`)
+      upstream.write(`${req.method} ${req.url} HTTP/1.1\r\n${headers.join('\r\n')}\r\n\r\n`)
       upstream.write(head)
       socket.pipe(upstream).pipe(socket)
     })
@@ -112,13 +100,7 @@ function frontDoor(tls, meetingPort) {
 async function main() {
   const ip = lanAddress()
   const lanBase = `https://${ip}:${LAN_PORT}`
-  await ensureSpeech({ dir, secret, openai })
-  const base = await startServer(buildServer(dir), dir, {
-    speechURL: `wss://${ip}:${LAN_PORT}${SPEECH_PREFIX}v1/stream`,
-    // Directly: the front door's self-signed certificate is trusted by the browsers, not this server.
-    statusURL: `http://127.0.0.1:${SPEECH_PORT}/v1/status`,
-    secret,
-  })
+  const base = await startServer(buildServer(dir), dir, speechEngines(openai))
   track(await frontDoor(selfSignedCert(ip), Number(new URL(base).port)))
 
   const room = await createRoom(base, 'Live translation')

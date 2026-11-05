@@ -72,8 +72,8 @@ jobs:
         env:
           CHROME: google-chrome
 
-  # Live translation end to end: the speech service runs with stand-in
-  # models (no downloads, no translation service), everything else is real.
+  # Live translation end to end: the server's speech engines are stand-ins
+  # (no downloads, no translation service), everything else is real.
   e2e-translate:
     runs-on: ubuntu-latest
     needs: [backend, web]
@@ -108,10 +108,3 @@ jobs:
           context: .
           push: false
           tags: conference:ci
-      - name: build speech image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: speech/Dockerfile
-          push: false
-          tags: conference-speech:ci

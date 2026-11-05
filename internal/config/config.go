@@ -80,16 +80,6 @@ type Config struct {
 	SessionTTL     time.Duration // authenticated room sessions
 	MaxRoomMembers int           // 0 means unlimited
 	RoomTTL        time.Duration // rooms older than this are reaped; 0 = keep forever
-
-	// SpeechURL and SpeechSecret point live translation at our own speech
-	// service (WebSocket URL + the HMAC secret it shares with us). Both
-	// empty turns the feature off.
-	SpeechURL    string
-	SpeechSecret string
-	// SpeechStatusURL, optional, is where this server asks the speech
-	// service whether it is ready, e.g. an internal address when
-	// SpeechURL is the public one; by default it follows SpeechURL.
-	SpeechStatusURL string
 }
 
 func env(key, def string) string {
@@ -162,7 +152,6 @@ var (
 	errJoinOnlyNeedsKey  = errors.New("JOIN_ONLY requires API_KEYS; without a key, room creation stays open to everyone")
 	errOriginsNeedBase   = errors.New("PUBLIC_ORIGINS requires BASE_URL, the origin used when a request matches none of them")
 	errSlackNeedsBaseURL = errors.New("SLACK_SIGNING_SECRET requires BASE_URL; Slack messages need absolute room links")
-	errSpeechHalfSet     = errors.New("SPEECH_URL and SPEECH_SECRET must be set together")
 )
 
 // FromEnv builds a Config from the process environment.
@@ -185,9 +174,6 @@ func FromEnv() (*Config, error) {
 		SessionTTL:         defaultSessionDays * hoursPerDay * time.Hour,
 		MaxRoomMembers:     defaultMaxRoomMembers,
 		RoomTTL:            0,
-		SpeechURL:          "",
-		SpeechSecret:       "",
-		SpeechStatusURL:    "",
 	}
 
 	err := applyHTTPConfig(cfg)
@@ -397,22 +383,6 @@ func applyRoomConfig(cfg *Config) error {
 
 	if roomTTLDays > 0 {
 		cfg.RoomTTL = time.Duration(roomTTLDays) * hoursPerDay * time.Hour
-	}
-
-	// Live translation is a room feature: its speech service settings
-	// are read last.
-	return applySpeechConfig(cfg)
-}
-
-// applySpeechConfig points live translation at the speech service; both
-// settings or neither.
-func applySpeechConfig(cfg *Config) error {
-	cfg.SpeechURL = strings.TrimRight(env("SPEECH_URL", ""), "/")
-	cfg.SpeechSecret = env("SPEECH_SECRET", "")
-	cfg.SpeechStatusURL = env("SPEECH_STATUS_URL", "")
-
-	if (cfg.SpeechURL == "") != (cfg.SpeechSecret == "") {
-		return errSpeechHalfSet
 	}
 
 	return nil

@@ -85,6 +85,8 @@ async function serverEnv(dir, port) {
     ICE_UDP_PORT: String(await freeUdpPort()),
     TURN_PORT: String(await freePort()),
     DB_PATH: join(dir, 'smoke.db'),
+    SPEECH_ENGINES: 'real',
+    TRANSLATE_MODEL: '',
     GORACE: 'halt_on_error=1',
   }
 }
@@ -327,7 +329,7 @@ async function main() {
     await checkCall(failures, browsers, ['server restart 0', 'server restart 1'], { seconds })
     await checkStillInRoom(failures, 'server restart', browsers)
 
-    // No speech service here: live translation shows, greyed out with
+    // No translation model here: live translation shows, greyed out with
     // what has to be set up, and does nothing when clicked.
     const translateButton = `(() => {
       const b = document.querySelector('[aria-label="Start live translation"]')
@@ -335,7 +337,7 @@ async function main() {
     })()`
     const blocked = await waitFor(browsers[0], translateButton, (b) => b?.disabled === 'true', 10_000)
     check(failures, 'translation', blocked.ok, `translate button not greyed out: ${JSON.stringify(blocked.value)}`)
-    check(failures, 'translation', blocked.value?.reason.includes('SPEECH_URL'), `no setup hint: ${JSON.stringify(blocked.value)}`)
+    check(failures, 'translation', blocked.value?.reason.includes('TRANSLATE_MODEL'), `no setup hint: ${JSON.stringify(blocked.value)}`)
     check(failures, 'translation', !(await evalJs(browsers[1], translateButton)), 'translate button visible on the unprivileged browser')
     await evalJs(browsers[0], `document.querySelector('[aria-label="Start live translation"]')?.click()`)
     await sleep(500)

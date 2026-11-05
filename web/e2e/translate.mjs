@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Live-translation end-to-end test: a server built with the race
-// detector, the speech service with stand-in models (ENGINES=fake: real
-// voice detection, sessions and protocol; numbered "transcripts",
+// detector, its speech service on stand-in engines (SPEECH_ENGINES=fake:
+// real voice detection, sessions and protocol; numbered "transcripts",
 // "[lang] …" translations and a tone for a voice), and two headless
 // Chromes whose microphones play an English and a German recording.
 // The host turns translation on, each browser then translates its own
@@ -12,7 +12,7 @@
 // the host: after the host leaves, a joiner still gets the guest's
 // speech in its own language.
 //
-// Needs Chrome (CHROME=…) and Go, which builds both servers.
+// Needs Chrome (CHROME=…) and Go, which builds the server.
 //
 //   node web/e2e/translate.mjs
 import { spawn, spawnSync } from 'node:child_process'
@@ -25,7 +25,6 @@ import { createRoom, evalJs, findChrome, freePort, joinRoom, launchChrome, sleep
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const chrome = process.env.CHROME ?? findChrome()
-const secret = 'translate-e2e'
 const TIMEOUT_MS = 45_000
 
 const failures = []
@@ -48,30 +47,18 @@ async function waitHealthy(url, what) {
   throw new Error(`${what} did not start on ${url}`)
 }
 
-function build(name) {
-  const bin = join(dir, name)
-  const res = spawnSync('go', ['build', '-race', '-o', bin, `./cmd/${name}`], {
+function buildServer() {
+  const bin = join(dir, 'server')
+  const res = spawnSync('go', ['build', '-race', '-o', bin, './cmd/server'], {
     cwd: repoRoot,
     stdio: 'inherit',
     env: { ...process.env, CGO_ENABLED: '1' },
   })
-  if (res.status !== 0) throw new Error(`go build ./cmd/${name} failed`)
+  if (res.status !== 0) throw new Error('go build ./cmd/server failed')
   return bin
 }
 
-async function startSpeech(bin) {
-  const port = await freePort()
-  procs.push(
-    spawn(bin, [], {
-      env: { ...process.env, ENGINES: 'fake', SPEECH_SECRET: secret, PORT: String(port), HOST: '127.0.0.1' },
-      stdio: 'inherit',
-    }),
-  )
-  await waitHealthy(`http://127.0.0.1:${port}/healthz`, 'the speech service')
-  return `ws://127.0.0.1:${port}/v1/stream`
-}
-
-async function startServer(bin, speechURL) {
+async function startServer(bin) {
   const port = await freePort()
   procs.push(
     spawn(bin, [], {
@@ -82,8 +69,7 @@ async function startServer(bin, speechURL) {
         ICE_UDP_PORT: String(await freePort()),
         TURN_PORT: String(await freePort()),
         DB_PATH: join(dir, 'translate.db'),
-        SPEECH_URL: speechURL,
-        SPEECH_SECRET: secret,
+        SPEECH_ENGINES: 'fake',
         GORACE: 'halt_on_error=1',
       },
       stdio: 'inherit',
@@ -120,7 +106,7 @@ const translationAudio = `[...document.querySelectorAll('audio')]
   .map((a) => ({ tracks: a.srcObject?.getAudioTracks().filter((t) => t.readyState === 'live').length ?? 0, paused: a.paused }))`
 
 async function main() {
-  const base = await startServer(build('server'), await startSpeech(build('speech')))
+  const base = await startServer(buildServer())
   const room = await createRoom(base, 'translate-e2e')
 
   const fixtures = join(repoRoot, 'fixtures')
@@ -132,7 +118,7 @@ async function main() {
 
   await joinRoom(host, room.privUrl)
   await joinRoom(guest, room.url)
-  // Enabled once /api/config reports the speech service ready.
+  // Enabled once /api/config reports the speech engines ready.
   const button = await waitFor(host, `document.querySelector('[aria-label="Start live translation"]')?.getAttribute('aria-disabled')`, (v) => v === 'false', 15_000)
   check('start', button.ok, `no enabled "Start live translation" button for the host: ${JSON.stringify(button.value)}`)
   // One click: a second one would toggle translation off again.

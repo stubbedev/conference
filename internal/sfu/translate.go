@@ -3,14 +3,11 @@ package sfu
 import (
 	"errors"
 	"strings"
-	"time"
-
-	"github.com/stubbe/conference/internal/speech/token"
 )
 
 // Live translation: while a host has it switched on, every member's
-// browser streams its own speech to our own speech service and feeds its
-// own subtitles and translated voice back into the room. As with
+// browser streams its own speech to the server's speech service and feeds
+// its own subtitles and translated voice back into the room. As with
 // recording, the SFU never sees plaintext — language choices and
 // captions are sealed with the room key, and translated voices are
 // ordinary E2EE audio tracks — so the server only relays ciphertext,
@@ -23,24 +20,15 @@ const KindTranslationPrefix = "translation-"
 const (
 	maxLangCiphertext    = 1 << 10
 	maxCaptionCiphertext = 4 << 10
-	speechTokenTTL       = time.Hour
 )
 
-// ErrTranslationUnavailable rejects translation when no speech service
-// is configured or its engines are not set up.
+// ErrTranslationUnavailable rejects translation when the speech engines
+// are not set up.
 var ErrTranslationUnavailable = errors.New("sfu: live translation is not available")
 
-// SpeechConfig points the hub at the speech service. Secret is shared
-// with that service, which verifies the tokens minted here. Ready, when
-// set, reports whether the service's engines are set up.
-type SpeechConfig struct {
-	URL    string
-	Secret []byte
-	Ready  func() bool
-}
-
-func (c *SpeechConfig) available() bool {
-	return c != nil && (c.Ready == nil || c.Ready())
+// SpeechTokens admits a member of a room to the speech stream.
+type SpeechTokens interface {
+	Token(room, member string) (string, error)
 }
 
 // isAudioKind reports whether a track kind carries audio.
@@ -93,7 +81,7 @@ func (m *Member) handleTranslate(msg Message) {
 		return
 	}
 
-	if msg.On && !m.room.cfg.Speech.available() {
+	if msg.On && m.room.cfg.Speech == nil {
 		m.fail("translate-unavailable", ErrTranslationUnavailable)
 
 		return
@@ -126,18 +114,14 @@ func (m *Member) sendSpeechToken() {
 		return
 	}
 
-	minted, err := token.Mint(speech.Secret, token.Claims{
-		Room:   m.room.slug,
-		Member: m.ID,
-		Exp:    time.Now().Add(speechTokenTTL).Unix(),
-	})
+	minted, err := speech.Token(m.room.slug, m.ID)
 	if err != nil {
 		m.fail("translate-token", err)
 
 		return
 	}
 
-	m.send(Message{Type: "translate-token", URL: speech.URL, Token: minted})
+	m.send(Message{Type: "translate-token", Token: minted})
 }
 
 // setTranslating turns the mode on (remembering who started it) or off,
