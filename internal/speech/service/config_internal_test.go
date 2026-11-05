@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ const (
 	enginesFake        = "fake"
 	modelTTS           = "tts"
 	voiceAlloy         = "alloy"
+	whisperURL         = "http://whisper:8080/v1"
 )
 
 func load(t *testing.T, values map[string]string) Settings {
@@ -41,7 +43,7 @@ func TestDefaultsNeedModels(t *testing.T) {
 
 	settings := load(t, nil)
 
-	if settings.translation.provider != ollama || settings.translation.url != defaultOllamaURL {
+	if settings.translation.provider != ollama || settings.translation.endpoint.String() != defaultOllamaURL {
 		t.Fatalf("translation %+v, want Ollama on localhost", settings.translation)
 	}
 
@@ -61,8 +63,8 @@ func TestTuningDefaults(t *testing.T) {
 
 	settings := load(t, nil)
 
-	got := []any{settings.Addr, settings.silence, settings.maxSegment, settings.interim, settings.voiceRate}
-	want := []any{"0.0.0.0:8090", 400 * time.Millisecond, 12 * time.Second, 600 * time.Millisecond, 24000}
+	got := []any{settings.Addr, settings.silence, settings.maxSegment, settings.voiceRate}
+	want := []any{"0.0.0.0:8090", 400 * time.Millisecond, 12 * time.Second, 24000}
 
 	for i := range want {
 		if got[i] != want[i] {
@@ -75,7 +77,7 @@ func TestEverythingLocalIsReadyAndInternal(t *testing.T) {
 	t.Parallel()
 
 	settings := load(t, map[string]string{
-		prefixTranscribe + "_URL": "http://whisper:8080/v1",
+		prefixTranscribe + "_URL": whisperURL,
 		envTranscribeModel:        "whisper-1",
 		envTranslateURL:           "http://10.0.0.5:11434/",
 		envTranslateModel:         "some-model",
@@ -88,8 +90,8 @@ func TestEverythingLocalIsReadyAndInternal(t *testing.T) {
 		t.Fatalf("ready %v external %v, want ready and internal", settings.ready(), settings.external())
 	}
 
-	if settings.translation.url != "http://10.0.0.5:11434" {
-		t.Fatalf("translation URL %q keeps its trailing slash", settings.translation.url)
+	if settings.translation.endpoint.String() != "http://10.0.0.5:11434" {
+		t.Fatalf("translation URL %q keeps its trailing slash", settings.translation.endpoint)
 	}
 }
 
@@ -111,7 +113,7 @@ func TestOpenAIForEverything(t *testing.T) {
 
 	for _, entry := range settings.engines() {
 		use := entry.engine
-		if use.provider != openAICompatible || use.url != openAIURL || use.apiKey != "k" || !use.external {
+		if use.provider != openAICompatible || use.endpoint.String() != openAIURL || use.apiKey != "k" || !use.external {
 			t.Fatalf("%s: %+v, want OpenAI with the shared key, external", entry.purpose, use)
 		}
 	}
@@ -228,6 +230,17 @@ func TestShippedLanguagesParse(t *testing.T) {
 	}
 }
 
+func externalByURL(t *testing.T, address string) bool {
+	t.Helper()
+
+	parsed, err := url.Parse(address)
+	if err != nil {
+		t.Fatalf("parse %s: %v", address, err)
+	}
+
+	return isExternal(parsed)
+}
+
 func TestIsExternal(t *testing.T) {
 	t.Parallel()
 
@@ -236,14 +249,72 @@ func TestIsExternal(t *testing.T) {
 		"http://gpu", "http://box.local", "http://llm.internal", "http://nas.lan", "http://169.254.1.1",
 	}
 	for _, address := range internal {
-		if isExternal(address) {
+		if externalByURL(t, address) {
 			t.Errorf("%s counted as external", address)
 		}
 	}
 
 	for _, address := range []string{openAIURL, "http://8.8.8.8", "https://llm.example.com", "http://[2001:db8::1]"} {
-		if !isExternal(address) {
+		if !externalByURL(t, address) {
 			t.Errorf("%s counted as internal", address)
 		}
 	}
+}
+
+func TestEngineURLsMustBeHTTP(t *testing.T) {
+	t.Parallel()
+
+	for _, address := range []string{"ftp://files.example.com", "localhost:11434", "http://", "::"} {
+		_, err := FromEnv(lookup(map[string]string{envSecret: "s", envTranslateURL: address}))
+		if err == nil {
+			t.Errorf("%s=%q loaded, want an error", envTranslateURL, address)
+		}
+	}
+}
+
+func TestInterimDefaultFollowsWhereTranscriptionRuns(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		values map[string]string
+		want   time.Duration
+	}{
+		{name: "external", values: map[string]string{}, want: 0},
+		{name: "internal", values: map[string]string{prefixTranscribe + "_URL": whisperURL}, want: defaultInterim},
+		{name: "fake", values: map[string]string{envEngines: enginesFake}, want: defaultInterim},
+		{name: "explicit", values: map[string]string{envInterim: "250"}, want: 250 * time.Millisecond},
+		{name: "explicitly off", values: map[string]string{prefixTranscribe + "_URL": whisperURL, envInterim: "0"}, want: 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := load(t, tc.values).interim; got != tc.want {
+				t.Fatalf("interim %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTranscribeResponseFormat(t *testing.T) {
+	t.Parallel()
+
+	if got := load(t, nil).transcribeFormat; got != formatJSON {
+		t.Fatalf("default format %q, want json", got)
+	}
+
+	if got := load(t, map[string]string{envTranscribeFormat: "verbose_json"}).transcribeFormat; got != formatVerbose {
+		t.Fatalf("format %q, want verbose_json", got)
+	}
+
+	_, err := FromEnv(lookup(map[string]string{envSecret: "s", envTranscribeFormat: "srt"}))
+	if err == nil {
+		t.Fatal("srt loaded, want an error")
+	}
+}
+
+func lookup(values map[string]string) func(string) string {
+	return func(name string) string { return values[name] }
 }

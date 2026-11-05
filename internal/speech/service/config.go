@@ -32,6 +32,13 @@ const (
 	voice         purpose = "voice"
 )
 
+type responseFormat string
+
+const (
+	formatJSON    responseFormat = "json"
+	formatVerbose responseFormat = "verbose_json"
+)
+
 const (
 	openAIURL         = "https://api.openai.com/v1"
 	defaultOllamaURL  = "http://localhost:11434"
@@ -48,7 +55,9 @@ const (
 	envOpenAIURL         = "OPENAI_URL"
 	envOpenAIKey         = "OPENAI_API_KEY"
 	envTranslateProvider = "TRANSLATE_PROVIDER"
+	envTranscribeFormat  = "TRANSCRIBE_RESPONSE_FORMAT"
 	envVoiceName         = "VOICE_NAME"
+	envInterim           = "INTERIM_MS"
 	prefixTranscribe     = "TRANSCRIBE"
 	prefixTranslate      = "TRANSLATE"
 	prefixVoice          = "VOICE"
@@ -56,7 +65,7 @@ const (
 
 type engine struct {
 	provider provider
-	url      string
+	endpoint *url.URL
 	apiKey   string
 	model    string
 	problem  string
@@ -74,22 +83,23 @@ type namedEngine struct {
 
 // Settings configure the speech service; FromEnv reads them.
 type Settings struct {
-	Addr          string
-	secret        []byte
-	transcription engine
-	translation   engine
-	voice         engine
-	voiceName     string
-	voiceRate     int
-	silence       time.Duration
-	maxSegment    time.Duration
-	interim       time.Duration
-	glossary      string
-	languages     languages
+	Addr             string
+	secret           []byte
+	transcription    engine
+	transcribeFormat responseFormat
+	translation      engine
+	voice            engine
+	voiceName        string
+	voiceRate        int
+	silence          time.Duration
+	maxSegment       time.Duration
+	interim          time.Duration
+	glossary         string
+	languages        languages
 }
 
-// LogEngines says which engines are not set up yet and which send audio
-// or text off this network.
+// LogEngines says which engines are not set up yet, which send audio or
+// text off this network, and whether interim subtitles are on.
 func (s Settings) LogEngines() {
 	for _, entry := range s.engines() {
 		switch {
@@ -97,10 +107,14 @@ func (s Settings) LogEngines() {
 			log.Printf("%s is not set up (%s): live translation is unavailable", entry.purpose, entry.engine.problem)
 		case entry.engine.external:
 			log.Printf("%s goes to an external service (%s at %s): audio or text leaves this network",
-				entry.purpose, entry.engine.provider, entry.engine.url)
+				entry.purpose, entry.engine.provider, entry.engine.endpoint.Redacted())
 		default:
 			log.Printf("%s: %s %s", entry.purpose, entry.engine.provider, entry.engine.model)
 		}
+	}
+
+	if s.interim == 0 {
+		log.Printf("interim subtitles are off (%s=0, the default for an external transcription engine)", envInterim)
 	}
 }
 
@@ -125,7 +139,9 @@ var (
 	errEnginesMode    = errors.New(envEngines + " must be real or fake")
 	errExternalValue  = errors.New("must be true or false")
 	errTranslateValue = errors.New(envTranslateProvider + " must be ollama or openai-compatible")
+	errFormatValue    = errors.New(envTranscribeFormat + " must be json or verbose_json")
 	errNegative       = errors.New("must not be negative")
+	errEngineURL      = errors.New("must be an http:// or https:// URL with a host")
 )
 
 // FromEnv reads the settings from the environment that getenv looks up.
@@ -149,15 +165,28 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 
 	switch env.or(envEngines, "real") {
 	case "fake":
-		stand := engine{provider: fake, url: "", apiKey: "", model: "", problem: "", external: false}
+		stand := engine{provider: fake, endpoint: nil, apiKey: "", model: "", problem: "", external: false}
 		settings.transcription, settings.translation, settings.voice = stand, stand, stand
-
-		return settings, nil
 	case "real":
-		return env.realEngines(settings)
+		settings, err = env.realEngines(settings)
+		if err != nil {
+			return Settings{}, err
+		}
 	default:
 		return Settings{}, errEnginesMode
 	}
+
+	interimDefault := defaultInterim
+	if settings.transcription.external {
+		interimDefault = 0
+	}
+
+	settings.interim, err = env.duration(envInterim, time.Millisecond, interimDefault)
+	if err != nil {
+		return Settings{}, err
+	}
+
+	return settings, nil
 }
 
 func (env environment) tuning() (Settings, error) {
@@ -181,24 +210,25 @@ func (env environment) tuning() (Settings, error) {
 		return Settings{}, err
 	}
 
-	interim, err := env.duration("INTERIM_MS", time.Millisecond, defaultInterim)
-	if err != nil {
-		return Settings{}, err
+	format := responseFormat(env.or(envTranscribeFormat, string(formatJSON)))
+	if format != formatJSON && format != formatVerbose {
+		return Settings{}, fmt.Errorf("%w, not %q", errFormatValue, format)
 	}
 
 	return Settings{
-		Addr:          "",
-		secret:        nil,
-		transcription: engine{provider: "", url: "", apiKey: "", model: "", problem: "", external: false},
-		translation:   engine{provider: "", url: "", apiKey: "", model: "", problem: "", external: false},
-		voice:         engine{provider: "", url: "", apiKey: "", model: "", problem: "", external: false},
-		voiceName:     "",
-		voiceRate:     voiceRate,
-		silence:       silence,
-		maxSegment:    maxSegment,
-		interim:       interim,
-		glossary:      "",
-		languages:     langs,
+		Addr:             "",
+		secret:           nil,
+		transcription:    engine{provider: "", endpoint: nil, apiKey: "", model: "", problem: "", external: false},
+		transcribeFormat: format,
+		translation:      engine{provider: "", endpoint: nil, apiKey: "", model: "", problem: "", external: false},
+		voice:            engine{provider: "", endpoint: nil, apiKey: "", model: "", problem: "", external: false},
+		voiceName:        "",
+		voiceRate:        voiceRate,
+		silence:          silence,
+		maxSegment:       maxSegment,
+		interim:          0,
+		glossary:         "",
+		languages:        langs,
 	}, nil
 }
 
@@ -308,10 +338,29 @@ func (env environment) languages() (languages, error) {
 	return langs, nil
 }
 
-func (env environment) openAICompatible(prefix string, use purpose) (engine, error) {
-	address := strings.TrimRight(env.or(prefix+"_URL", env.or(envOpenAIURL, openAIURL)), "/")
+func (env environment) endpoint(prefix, fallback string) (*url.URL, bool, error) {
+	name := prefix + "_URL"
+	raw := env.or(name, fallback)
 
-	external, err := env.external(prefix, address)
+	parsed, err := url.Parse(strings.TrimRight(raw, "/"))
+	if err != nil {
+		return nil, false, fmt.Errorf("%s: %w", name, err)
+	}
+
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return nil, false, fmt.Errorf("%s=%q %w", name, parsed.Redacted(), errEngineURL)
+	}
+
+	external, err := env.external(prefix, parsed)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return parsed, external, nil
+}
+
+func (env environment) openAICompatible(prefix string, use purpose) (engine, error) {
+	endpoint, external, err := env.endpoint(prefix, env.or(envOpenAIURL, openAIURL))
 	if err != nil {
 		return engine{}, err
 	}
@@ -325,7 +374,7 @@ func (env environment) openAICompatible(prefix string, use purpose) (engine, err
 
 	return engine{
 		provider: openAICompatible,
-		url:      address,
+		endpoint: endpoint,
 		apiKey:   env.or(prefix+"_API_KEY", env(envOpenAIKey)),
 		model:    model,
 		problem:  problem,
@@ -343,9 +392,7 @@ func (env environment) translationEngine() (engine, error) {
 		return engine{}, fmt.Errorf("%w, not %q", errTranslateValue, chosen)
 	}
 
-	address := strings.TrimRight(env.or(prefixTranslate+"_URL", defaultOllamaURL), "/")
-
-	external, err := env.external(prefixTranslate, address)
+	endpoint, external, err := env.endpoint(prefixTranslate, defaultOllamaURL)
 	if err != nil {
 		return engine{}, err
 	}
@@ -357,15 +404,15 @@ func (env environment) translationEngine() (engine, error) {
 		problem = "set " + prefixTranslate + "_MODEL to the Ollama model to translate with"
 	}
 
-	return engine{provider: ollama, url: address, apiKey: "", model: model, problem: problem, external: external}, nil
+	return engine{provider: ollama, endpoint: endpoint, apiKey: "", model: model, problem: problem, external: external}, nil
 }
 
-func (env environment) external(prefix, address string) (bool, error) {
+func (env environment) external(prefix string, endpoint *url.URL) (bool, error) {
 	name := prefix + "_EXTERNAL"
 
 	switch value := strings.ToLower(env(name)); value {
 	case "":
-		return isExternal(address), nil
+		return isExternal(endpoint), nil
 	case "true":
 		return true, nil
 	case "false":
@@ -375,16 +422,8 @@ func (env environment) external(prefix, address string) (bool, error) {
 	}
 }
 
-func isExternal(address string) bool {
-	parsed, err := url.Parse(address)
-	if err != nil {
-		return true
-	}
-
-	host := strings.ToLower(parsed.Hostname())
-	if host == "" {
-		return false
-	}
+func isExternal(endpoint *url.URL) bool {
+	host := strings.ToLower(endpoint.Hostname())
 
 	ip, err := netip.ParseAddr(host)
 	if err == nil {

@@ -70,8 +70,26 @@ Mistral, Groq or OpenRouter, or a server of your own:
   rate (OpenAI's is 24000).
 
 Interim subtitles, shown while someone is still talking, transcribe the
-growing sentence every `INTERIM_MS` (600 ms). Against a paid API that is
-a call per interim; `INTERIM_MS=0` turns them off.
+growing sentence every `INTERIM_MS`. Each is a call that resends the whole
+sentence so far, so they are on (600 ms) when transcription runs on your
+network and off when it goes to an external service, where every call is
+billed. Set `INTERIM_MS` to choose either way.
+
+Whisper sometimes invents a sentence ("Thank you for watching.") for
+noise it mistakes for speech. With `TRANSCRIBE_RESPONSE_FORMAT=verbose_json`
+the service drops every segment Whisper itself marks as non-speech
+(no-speech probability above 0.6 and average log-probability below −1,
+Whisper's own rule). whisper.cpp's `whisper-server` and OpenAI's
+`whisper-1` support it; OpenAI's gpt-4o transcription models accept only
+`json`, the default.
+
+## Streams
+
+A token admits one member of one room, and a stream carries only that
+member's speech: audio for any other speaker ends the stream. A member
+has one stream at a time; a new connection replaces the old one, which
+is closed with a policy-violation status, so a lost connection's
+replacement takes over at once and a leaked token cannot open more.
 
 `<ENGINE>_EXTERNAL=true|false` overrides the guess whether an engine is
 outside your network (anything but loopback, private and link-local
@@ -105,10 +123,13 @@ A language without `voices` uses `VOICE_NAME`.
 
 `go test ./internal/speech/...` covers the settings, the token format the
 meeting server mints, voice detection on the fixtures, the engines'
-requests against a stand-in API, and the whole stream: German and English
-speakers at once through the real voice detection and protocol with
-stand-in engines (`ENGINES=fake`: numbered transcripts, `[lang] …`
-translations, a tone for a voice), which the browser tests use too.
+requests against a stand-in API, a session's edge cases (a speaker
+switching language, `end`, a failed translation, an interim for a sentence
+that has ended, a full queue), and whole streams: a German and an English
+member at once through the real voice detection and protocol with stand-in
+engines (`ENGINES=fake`: numbered transcripts, `[lang] …` translations, a
+tone for a voice), which the browser tests use too, plus a foreign speaker
+and a member's second connection.
 
 With real engines:
 
@@ -118,5 +139,5 @@ SPEECH_SECRET=dev just speech-test
 ```
 
 `speech-test` streams `fixtures/german.wav` and `fixtures/english.wav` in
-real time as two speakers at once and checks that each comes back as
-subtitles and voice in the other language.
+real time as two members at once, each on its own connection, and checks
+that each comes back as subtitles and voice in the other language.

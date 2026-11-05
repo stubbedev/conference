@@ -24,9 +24,14 @@ import (
 
 const (
 	testSecret  = "s"
+	testRoom    = "room"
 	chunk       = 320
 	testTimeout = 30 * time.Second
+	anna        = "anna"
+	sam         = "sam"
 )
+
+var errUnexpectedRate = errors.New("fixture is not at the VAD rate")
 
 type speakerCase struct {
 	id      string
@@ -37,8 +42,8 @@ type speakerCase struct {
 
 func testSpeakers() []speakerCase {
 	return []speakerCase{
-		{id: "anna", lang: "de", fixture: "german.wav", target: "en"},
-		{id: "sam", lang: "en", fixture: "english.wav", target: "de"},
+		{id: anna, lang: "de", fixture: "german.wav", target: "en"},
+		{id: sam, lang: "en", fixture: "english.wav", target: "de"},
 	}
 }
 
@@ -60,10 +65,10 @@ func streamURL(server *httptest.Server, tok string) string {
 	return "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/stream?token=" + tok
 }
 
-func mint(t *testing.T, exp time.Time) string {
+func mint(t *testing.T, member string, exp time.Time) string {
 	t.Helper()
 
-	tok, err := token.Mint([]byte(testSecret), token.Claims{Room: "room", Member: "host", Exp: exp.Unix()})
+	tok, err := token.Mint([]byte(testSecret), token.Claims{Room: testRoom, Member: member, Exp: exp.Unix()})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -71,7 +76,7 @@ func mint(t *testing.T, exp time.Time) string {
 	return tok
 }
 
-func fixturePCM(name string) ([]byte, error) {
+func fixtureSamples(name string) ([]int16, error) {
 	data, err := fs.ReadFile(os.DirFS("../../../fixtures"), name)
 	if err != nil {
 		return nil, fmt.Errorf("read fixture %s: %w", name, err)
@@ -86,12 +91,7 @@ func fixturePCM(name string) ([]byte, error) {
 		return nil, fmt.Errorf("%s is %d Hz: %w", name, rate, errUnexpectedRate)
 	}
 
-	pcm, err := binary.Append(nil, binary.LittleEndian, append(samples, make([]int16, vad.Rate)...))
-	if err != nil {
-		return nil, fmt.Errorf("encode %s: %w", name, err)
-	}
-
-	return pcm, nil
+	return samples, nil
 }
 
 func writeJSONMessage(ctx context.Context, conn *websocket.Conn, message any) error {
@@ -108,31 +108,48 @@ func writeJSONMessage(ctx context.Context, conn *websocket.Conn, message any) er
 	return nil
 }
 
+func sendAudio(ctx context.Context, conn *websocket.Conn, header wire.AudioHeader, samples []int16) error {
+	pcm, err := binary.Append(nil, binary.LittleEndian, samples)
+	if err != nil {
+		return fmt.Errorf("encode audio: %w", err)
+	}
+
+	frame, err := wire.Pack(header, pcm)
+	if err != nil {
+		return fmt.Errorf("pack audio: %w", err)
+	}
+
+	err = conn.Write(ctx, websocket.MessageBinary, frame)
+	if err != nil {
+		return fmt.Errorf("write audio: %w", err)
+	}
+
+	return nil
+}
+
 func speak(ctx context.Context, conn *websocket.Conn, who speakerCase) error {
-	audio, err := fixturePCM(who.fixture)
+	samples, err := fixtureSamples(who.fixture)
 	if err != nil {
 		return err
 	}
 
-	for offset := 0; offset < len(audio); offset += 2 * chunk {
-		frame, err := wire.Pack(wire.AudioHeader{Speaker: who.id, Lang: who.lang, Voice: "male"}, audio[offset:min(offset+2*chunk, len(audio))])
-		if err != nil {
-			return fmt.Errorf("pack audio: %w", err)
-		}
+	samples = append(samples, make([]int16, vad.Rate)...)
+	header := wire.AudioHeader{Speaker: who.id, Lang: who.lang, Voice: string(voiceMale)}
 
-		err = conn.Write(ctx, websocket.MessageBinary, frame)
+	for offset := 0; offset < len(samples); offset += chunk {
+		err = sendAudio(ctx, conn, header, samples[offset:min(offset+chunk, len(samples))])
 		if err != nil {
-			return fmt.Errorf("write audio: %w", err)
+			return err
 		}
 	}
 
-	return writeJSONMessage(ctx, conn, map[string]string{"type": "end", "speaker": who.id})
+	return writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, Speaker: who.id})
 }
 
-func dialStream(ctx context.Context, t *testing.T, server *httptest.Server) *websocket.Conn {
+func dialStream(ctx context.Context, t *testing.T, server *httptest.Server, member string) *websocket.Conn {
 	t.Helper()
 
-	conn, response, err := websocket.Dial(ctx, streamURL(server, mint(t, time.Now().Add(time.Hour))), nil)
+	conn, response, err := websocket.Dial(ctx, streamURL(server, mint(t, member, time.Now().Add(time.Hour))), nil)
 	if response != nil && response.Body != nil {
 		_ = response.Body.Close()
 	}
@@ -144,71 +161,67 @@ func dialStream(ctx context.Context, t *testing.T, server *httptest.Server) *web
 	t.Cleanup(func() { _ = conn.CloseNow() })
 
 	conn.SetReadLimit(-1)
-
-	err = writeJSONMessage(ctx, conn, map[string]any{"type": "hello", "targets": []string{"en", "de", "xx"}})
-	if err != nil {
-		t.Fatalf("hello: %v", err)
-	}
-
-	var ready struct {
-		Type string `json:"type"`
-	}
-
-	_, data, err := conn.Read(ctx)
-	if err != nil || json.Unmarshal(data, &ready) != nil || ready.Type != "ready" {
-		t.Fatalf("first reply %q (%v), want ready", data, err)
-	}
+	hello(ctx, t, conn)
 
 	return conn
 }
 
-type streamResults struct {
-	translated map[string]bool
-	voiced     map[string]bool
-}
+func hello(ctx context.Context, t *testing.T, conn *websocket.Conn) {
+	t.Helper()
 
-func (r streamResults) done(speakers int) bool {
-	return len(r.translated) == speakers && len(r.voiced) == speakers
+	err := writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de", "xx"}, Speaker: ""})
+	if err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+
+	var ready wire.Command
+
+	_, data, err := conn.Read(ctx)
+	if err != nil || json.Unmarshal(data, &ready) != nil || ready.Type != wire.TypeReady {
+		t.Fatalf("reply to hello %q (%v), want ready", data, err)
+	}
 }
 
 func TestStreamTranslatesBothWays(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
-	defer cancel()
+	server := start(t, map[string]string{envEngines: enginesFake})
 
-	conn := dialStream(ctx, t, start(t, map[string]string{envEngines: enginesFake}))
-	speakers := testSpeakers()
-	spoke := make(chan error, len(speakers))
+	for _, who := range testSpeakers() {
+		t.Run(who.id, func(t *testing.T) {
+			t.Parallel()
 
-	for _, who := range speakers {
-		go func() { spoke <- speak(ctx, conn, who) }()
-	}
+			ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+			defer cancel()
 
-	results := streamResults{translated: map[string]bool{}, voiced: map[string]bool{}}
+			conn := dialStream(ctx, t, server, who.id)
+			spoke := make(chan error, 1)
 
-	for !results.done(len(speakers)) {
-		kind, data, err := conn.Read(ctx)
-		if err != nil {
-			t.Fatalf("read: %v (results %+v)", err, results)
-		}
+			go func() { spoke <- speak(ctx, conn, who) }()
 
-		if kind == websocket.MessageBinary {
-			checkVoice(t, data, results)
-		} else {
-			checkCaption(t, data, results)
-		}
-	}
+			translated, voiced := false, false
+			for !translated || !voiced {
+				kind, data, err := conn.Read(ctx)
+				if err != nil {
+					t.Fatalf("read: %v (translated %v, voiced %v)", err, translated, voiced)
+				}
 
-	for range speakers {
-		err := <-spoke
-		if err != nil {
-			t.Fatalf("speak: %v", err)
-		}
+				if kind == websocket.MessageBinary {
+					voiced = voiced || isVoiceFor(t, data, who)
+				} else {
+					translated = translated || isTranslationFor(t, data, who)
+				}
+			}
+
+			err := <-spoke
+			if err != nil {
+				t.Fatalf("speak: %v", err)
+			}
+		})
 	}
 }
 
-func checkVoice(t *testing.T, data []byte, results streamResults) {
+func isVoiceFor(t *testing.T, data []byte, who speakerCase) bool {
 	t.Helper()
 
 	var header wire.VoiceHeader
@@ -218,12 +231,14 @@ func checkVoice(t *testing.T, data []byte, results streamResults) {
 		t.Fatalf("voice frame %+v with %d bytes: %v", header, len(pcm), err)
 	}
 
-	checkTarget(t, header.Speaker, header.Lang)
+	if header.Speaker != who.id || header.Lang != who.target {
+		t.Fatalf("voice of %s in %s, want %s in %s", header.Speaker, header.Lang, who.id, who.target)
+	}
 
-	results.voiced[header.Speaker] = true
+	return true
 }
 
-func checkCaption(t *testing.T, data []byte, results streamResults) {
+func isTranslationFor(t *testing.T, data []byte, who speakerCase) bool {
 	t.Helper()
 
 	var got wire.Caption
@@ -234,10 +249,12 @@ func checkCaption(t *testing.T, data []byte, results streamResults) {
 	}
 
 	if got.Type != wire.TypeCaption || !got.Final || got.Lang == got.SourceLang {
-		return
+		return false
 	}
 
-	checkTarget(t, got.Speaker, got.Lang)
+	if got.Speaker != who.id || got.SourceLang != who.lang || got.Lang != who.target {
+		t.Fatalf("caption %+v, want %s from %s into %s", got, who.id, who.lang, who.target)
+	}
 
 	if want := "[" + got.Lang + "] " + got.SourceLang + " utterance"; !strings.HasPrefix(got.Text, want) {
 		t.Fatalf("caption %q, want it to start with %q", got.Text, want)
@@ -247,19 +264,53 @@ func checkCaption(t *testing.T, data []byte, results streamResults) {
 		t.Fatalf("segment id %q does not belong to %s", got.SegID, got.Speaker)
 	}
 
-	results.translated[got.Speaker] = true
+	return true
 }
 
-func checkTarget(t *testing.T, speaker, lang string) {
-	t.Helper()
-
-	for _, who := range testSpeakers() {
-		if who.id == speaker && who.target == lang {
-			return
+func closeStatus(ctx context.Context, conn *websocket.Conn) websocket.StatusCode {
+	for {
+		_, _, err := conn.Read(ctx)
+		if err != nil {
+			return websocket.CloseStatus(err)
 		}
 	}
+}
 
-	t.Fatalf("%s translated into %s, which is not the other speaker's language", speaker, lang)
+func TestForeignSpeakerEndsTheStream(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+
+	conn := dialStream(ctx, t, start(t, map[string]string{envEngines: enginesFake}), anna)
+
+	err := sendAudio(ctx, conn, wire.AudioHeader{Speaker: sam, Lang: "en", Voice: ""}, make([]int16, chunk))
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	if code := closeStatus(ctx, conn); code != websocket.StatusPolicyViolation {
+		t.Fatalf("closed with %v, want a policy violation", code)
+	}
+}
+
+func TestNewConnectionReplacesTheMembersOld(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+
+	server := start(t, map[string]string{envEngines: enginesFake})
+	first := dialStream(ctx, t, server, anna)
+	other := dialStream(ctx, t, server, sam)
+	second := dialStream(ctx, t, server, anna)
+
+	if code := closeStatus(ctx, first); code != websocket.StatusPolicyViolation {
+		t.Fatalf("the replaced stream closed with %v, want a policy violation", code)
+	}
+
+	hello(ctx, t, second)
+	hello(ctx, t, other)
 }
 
 func TestStreamRefusals(t *testing.T) {
@@ -267,6 +318,7 @@ func TestStreamRefusals(t *testing.T) {
 
 	ready := start(t, map[string]string{envEngines: enginesFake})
 	unready := start(t, nil)
+	valid := time.Now().Add(time.Hour)
 
 	cases := []struct {
 		name   string
@@ -275,8 +327,8 @@ func TestStreamRefusals(t *testing.T) {
 		status int
 	}{
 		{name: "bad token", server: ready, token: "bogus", status: http.StatusForbidden},
-		{name: "expired token", server: ready, token: mint(t, time.Now().Add(-time.Minute)), status: http.StatusForbidden},
-		{name: "engines not set up", server: unready, token: mint(t, time.Now().Add(time.Hour)), status: http.StatusServiceUnavailable},
+		{name: "expired token", server: ready, token: mint(t, anna, time.Now().Add(-time.Minute)), status: http.StatusForbidden},
+		{name: "engines not set up", server: unready, token: mint(t, anna, valid), status: http.StatusServiceUnavailable},
 	}
 
 	for _, tc := range cases {
@@ -334,5 +386,3 @@ func TestStatus(t *testing.T) {
 		t.Fatalf("status %+v, want translation ready and English first", got)
 	}
 }
-
-var errUnexpectedRate = errors.New("fixture is not at the VAD rate")

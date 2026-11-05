@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -55,23 +56,41 @@ type session struct {
 	send     sender
 	tasks    sync.WaitGroup
 	targets  atomic.Pointer[[]language]
-	speakers map[string]*speaker
+	speaker  *speaker
 	pending  atomic.Int64
 }
 
-func newSession(settings Settings, engines speechEngines, send sender) *session {
+var errForeignSpeaker = errors.New("speaker is not the member the token was minted for")
+
+func newSession(ctx context.Context, settings Settings, engines speechEngines, member string, send sender) (*session, error) {
+	utterances, err := vad.New(settings.silence, settings.maxSegment)
+	if err != nil {
+		return nil, fmt.Errorf("speaker %s: %w", member, err)
+	}
+
 	created := &session{
 		settings: settings,
 		engines:  engines,
 		send:     send,
 		tasks:    sync.WaitGroup{},
 		targets:  atomic.Pointer[[]language]{},
-		speakers: map[string]*speaker{},
-		pending:  atomic.Int64{},
+		speaker: &speaker{
+			id:             member,
+			lang:           language{Code: "", Name: "", Whisper: "", Address: "", Voices: nil},
+			voice:          defaultVoice,
+			utterances:     utterances,
+			seg:            atomic.Int64{},
+			finals:         make(chan final, queuedFinals),
+			interimBusy:    atomic.Bool{},
+			interimSamples: 0,
+			context:        nil,
+		},
+		pending: atomic.Int64{},
 	}
 	created.targets.Store(&[]language{})
+	created.tasks.Go(func() { created.work(ctx, created.speaker) })
 
-	return created
+	return created, nil
 }
 
 func (s *session) setTargets(codes []string) []string {
@@ -94,18 +113,18 @@ func (s *session) setTargets(codes []string) []string {
 }
 
 func (s *session) audio(ctx context.Context, header wire.AudioHeader, pcm []int16) error {
+	current := s.speaker
+	if header.Speaker != current.id {
+		return fmt.Errorf("%w: %q", errForeignSpeaker, header.Speaker)
+	}
+
 	lang, ok := s.settings.languages.get(header.Lang)
-	if !ok || header.Speaker == "" {
+	if !ok {
 		return nil
 	}
 
-	current, err := s.speaker(ctx, header.Speaker)
-	if err != nil {
-		return err
-	}
-
 	if current.lang.Code != "" && current.lang.Code != lang.Code {
-		err = s.finish(ctx, current, current.utterances.Flush())
+		err := s.finish(ctx, current, current.utterances.Flush())
 		if err != nil {
 			return err
 		}
@@ -132,48 +151,16 @@ func (s *session) audio(ctx context.Context, header wire.AudioHeader, pcm []int1
 }
 
 func (s *session) end(ctx context.Context, speakerID string) error {
-	current, ok := s.speakers[speakerID]
-	if !ok {
-		return nil
+	if speakerID != s.speaker.id {
+		return fmt.Errorf("%w: %q", errForeignSpeaker, speakerID)
 	}
 
-	return s.finish(ctx, current, current.utterances.Flush())
+	return s.finish(ctx, s.speaker, s.speaker.utterances.Flush())
 }
 
 func (s *session) close() {
-	for _, current := range s.speakers {
-		close(current.finals)
-	}
-
+	close(s.speaker.finals)
 	s.tasks.Wait()
-}
-
-func (s *session) speaker(ctx context.Context, id string) (*speaker, error) {
-	if current, ok := s.speakers[id]; ok {
-		return current, nil
-	}
-
-	utterances, err := vad.New(s.settings.silence, s.settings.maxSegment)
-	if err != nil {
-		return nil, fmt.Errorf("speaker %s: %w", id, err)
-	}
-
-	current := &speaker{
-		id:             id,
-		lang:           language{Code: "", Name: "", Whisper: "", Address: "", Voices: nil},
-		voice:          defaultVoice,
-		utterances:     utterances,
-		seg:            atomic.Int64{},
-		finals:         make(chan final, queuedFinals),
-		interimBusy:    atomic.Bool{},
-		interimSamples: 0,
-		context:        nil,
-	}
-	s.speakers[id] = current
-
-	s.tasks.Go(func() { s.work(ctx, current) })
-
-	return current, nil
 }
 
 func (s *session) finish(ctx context.Context, current *speaker, audio []int16) error {
