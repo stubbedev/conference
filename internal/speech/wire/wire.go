@@ -103,3 +103,39 @@ func Unpack(frame []byte, header any) ([]byte, error) {
 
 	return frame[end:], nil
 }
+
+// What each engine does, as Status.Engines names them.
+const (
+	PurposeTranscription = "transcription"
+	PurposeTranslation   = "translation"
+	PurposeVoice         = "voice"
+)
+
+// Purposes lists every engine's purpose, in pipeline order.
+func Purposes() []string {
+	return []string{PurposeTranscription, PurposeTranslation, PurposeVoice}
+}
+
+// Language is one language the service speaks.
+type Language struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
+// EngineStatus says whether one engine is set up, and where it runs.
+type EngineStatus struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Ready    bool   `json:"ready"`
+	Problem  string `json:"problem"`
+	External bool   `json:"external"`
+}
+
+// Status is the reply to GET /v1/status: whether every engine is set up,
+// whether any sends data off the service's network, and the languages.
+type Status struct {
+	Ready     bool                    `json:"ready"`
+	External  bool                    `json:"external"`
+	Engines   map[string]EngineStatus `json:"engines"`
+	Languages []Language              `json:"languages"`
+}

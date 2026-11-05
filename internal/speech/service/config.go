@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/stubbe/conference/internal/speech/wire"
 )
 
 type provider string
@@ -27,9 +29,9 @@ const (
 type purpose string
 
 const (
-	transcription purpose = "transcription"
-	translation   purpose = "translation"
-	voice         purpose = "voice"
+	transcription purpose = wire.PurposeTranscription
+	translation   purpose = wire.PurposeTranslation
+	voice         purpose = wire.PurposeVoice
 )
 
 type responseFormat string

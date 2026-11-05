@@ -1,13 +1,11 @@
 package sfu
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/stubbe/conference/internal/speech/token"
 )
 
 // Live translation: while a host has it switched on, every member's
@@ -128,11 +126,18 @@ func (m *Member) sendSpeechToken() {
 		return
 	}
 
-	m.send(Message{
-		Type:  "translate-token",
-		URL:   speech.URL,
-		Token: mintSpeechToken(speech.Secret, m.room.slug, m.ID, time.Now()),
+	minted, err := token.Mint(speech.Secret, token.Claims{
+		Room:   m.room.slug,
+		Member: m.ID,
+		Exp:    time.Now().Add(speechTokenTTL).Unix(),
 	})
+	if err != nil {
+		m.fail("translate-token", err)
+
+		return
+	}
+
+	m.send(Message{Type: "translate-token", URL: speech.URL, Token: minted})
 }
 
 // setTranslating turns the mode on (remembering who started it) or off,
@@ -159,26 +164,4 @@ func (r *Room) isTranslating() bool {
 	defer r.mu.Unlock()
 
 	return r.translatingBy != ""
-}
-
-type speechClaims struct {
-	Room   string `json:"room"`
-	Member string `json:"member"`
-	Exp    int64  `json:"exp"`
-}
-
-// mintSpeechToken signs {room, member, exp} for the speech service as
-// "<payload>.<signature>", both unpadded base64url, the signature an
-// HMAC-SHA256 over the encoded payload.
-func mintSpeechToken(secret []byte, room, member string, now time.Time) string {
-	claims, err := json.Marshal(speechClaims{Room: room, Member: member, Exp: now.Add(speechTokenTTL).Unix()})
-	if err != nil {
-		panic(err) // a struct of strings and an int always marshals
-	}
-
-	payload := base64.RawURLEncoding.EncodeToString(claims)
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(payload))
-
-	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }

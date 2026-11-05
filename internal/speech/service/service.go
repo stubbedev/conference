@@ -25,26 +25,6 @@ const (
 	pcmWidth  = 2
 )
 
-type engineStatus struct {
-	Provider provider `json:"provider"`
-	Model    string   `json:"model"`
-	Ready    bool     `json:"ready"`
-	Problem  string   `json:"problem"`
-	External bool     `json:"external"`
-}
-
-type languageStatus struct {
-	Code string `json:"code"`
-	Name string `json:"name"`
-}
-
-type status struct {
-	Ready     bool                     `json:"ready"`
-	External  bool                     `json:"external"`
-	Engines   map[purpose]engineStatus `json:"engines"`
-	Languages []languageStatus         `json:"languages"`
-}
-
 var (
 	errOddPCM         = errors.New("audio frame holds an odd number of bytes")
 	errReplaced       = errors.New("replaced by a newer connection of the same member")
@@ -95,13 +75,13 @@ func (s *Service) Wait() {
 	s.sessions.Wait()
 }
 
-func (s *Service) status() status {
+func (s *Service) status() wire.Status {
 	named := s.settings.engines()
 
-	engines := make(map[purpose]engineStatus, len(named))
+	engines := make(map[string]wire.EngineStatus, len(named))
 	for _, entry := range named {
-		engines[entry.purpose] = engineStatus{
-			Provider: entry.engine.provider,
+		engines[string(entry.purpose)] = wire.EngineStatus{
+			Provider: string(entry.engine.provider),
 			Model:    entry.engine.model,
 			Ready:    entry.engine.ready(),
 			Problem:  entry.engine.problem,
@@ -111,12 +91,12 @@ func (s *Service) status() status {
 
 	all := s.settings.languages.all()
 
-	langs := make([]languageStatus, len(all))
+	langs := make([]wire.Language, len(all))
 	for i, lang := range all {
-		langs[i] = languageStatus{Code: lang.Code, Name: lang.Name}
+		langs[i] = wire.Language{Code: lang.Code, Name: lang.Name}
 	}
 
-	return status{Ready: s.settings.ready(), External: s.settings.external(), Engines: engines, Languages: langs}
+	return wire.Status{Ready: s.settings.ready(), External: s.settings.external(), Engines: engines, Languages: langs}
 }
 
 func (s *Service) stream(w http.ResponseWriter, r *http.Request) {

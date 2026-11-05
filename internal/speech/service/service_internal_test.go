@@ -370,19 +370,19 @@ func TestStatus(t *testing.T) {
 
 	defer func() { _ = response.Body.Close() }()
 
-	var got status
+	var got wire.Status
 
 	err = json.NewDecoder(response.Body).Decode(&got)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 
-	transcribe := got.Engines[transcription]
+	transcribe := got.Engines[string(transcription)]
 	if got.Ready || !got.External || transcribe.Ready || !strings.Contains(transcribe.Problem, envTranscribeModel) {
 		t.Fatalf("status %+v, want not ready, external, transcription missing its model", got)
 	}
 
-	if !got.Engines[translation].Ready || got.Languages[0] != (languageStatus{Code: "en", Name: "English"}) {
+	if !got.Engines[string(translation)].Ready || got.Languages[0] != (wire.Language{Code: "en", Name: "English"}) {
 		t.Fatalf("status %+v, want translation ready and English first", got)
 	}
 }

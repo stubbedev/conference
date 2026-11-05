@@ -1,16 +1,13 @@
 package sfu_test
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
+	"github.com/stubbe/conference/internal/speech/token"
 )
 
 const (
@@ -73,35 +70,12 @@ func expectToken(t *testing.T, peer *testPeer) {
 		t.Fatalf("token URL %q, want %q", msg.URL, speechURL)
 	}
 
-	payload, signature, ok := strings.Cut(msg.Token, ".")
-	if !ok {
-		t.Fatalf("malformed token %q", msg.Token)
-	}
-
-	mac := hmac.New(sha256.New, []byte(speechSecret))
-	mac.Write([]byte(payload))
-
-	if base64.RawURLEncoding.EncodeToString(mac.Sum(nil)) != signature {
-		t.Fatal("token signature does not verify")
-	}
-
-	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	claims, err := token.Verify([]byte(speechSecret), msg.Token, time.Now())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("token does not verify: %v", err)
 	}
 
-	var claims struct {
-		Room   string `json:"room"`
-		Member string `json:"member"`
-		Exp    int64  `json:"exp"`
-	}
-
-	err = json.Unmarshal(raw, &claims)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if claims.Room != testSlug || claims.Member != peer.member.ID || claims.Exp <= time.Now().Unix() {
+	if claims.Room != testSlug || claims.Member != peer.member.ID {
 		t.Fatalf("unexpected claims %+v", claims)
 	}
 }
