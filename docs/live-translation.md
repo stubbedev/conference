@@ -56,6 +56,7 @@ its default.
 | `TRANSLATE_URL`, `TRANSLATE_API_KEY`, `TRANSLATE_MODEL` | `http://localhost:11434` (Ollama) or OpenAI, `OPENAI_API_KEY` (OpenAI-compatible only), none | The translation engine |
 | `VOICE_URL`, `VOICE_API_KEY`, `VOICE_MODEL` | OpenAI, `OPENAI_API_KEY`, none | The voice: an OpenAI-compatible `/audio/speech` that returns WAV |
 | `VOICE_NAME` | none | The voice for languages without their own `voices` |
+| `VOICE_CLONING` | `false` | `true` if the voice engine clones voices from a recording; speakers can then choose their own voice (below) |
 | `OPENAI_API_KEY` | none | The key for every OpenAI-compatible engine without its own |
 | `INTERNAL_DOMAINS` | none | Domains on your network, e.g. `corp.example.com`, so their engines don't count as external |
 | `GLOSSARY` | none | Term translations the translator must use, e.g. `Kontainer = Kontainer` |
@@ -96,6 +97,46 @@ transcription models accept only `json`, the default.
 **Sentences** end after 400 ms of silence (160 ms once someone has spoken
 for 3 s, so fast talkers are cut at their pauses) and at 12 s at the
 latest.
+
+## Own voice
+
+With `VOICE_CLONING=true`, a speaker can choose **My own voice** instead
+of the female or male one; without it the app doesn't offer the option. The speech service learns it from what they
+say in the call: once 12 s of their finished sentences in one language
+are collected (filler under 1 s doesn't count, at most 20 s is kept), it
+sends that recording and its transcript with every voice request for
+them. Until then, and whenever a cloned request fails, they are heard in
+the female voice. The speaker sees "Learning your voice…" and then "Your
+own voice is in use"; listeners see "AI voice (cloned)" on the tile while
+it plays, so nobody mistakes it for the person speaking that language.
+
+**Nothing is kept.** The recording lives in the speech service's memory
+for that member's stream and goes with it; the voice engine gets it
+inline with each request, so nothing has to be stored or deleted there.
+It comes only from the speaker's own microphone.
+
+The voice engine must accept audio.cpp's request fields:
+
+```json
+{
+  "model": "…", "input": "Guten Morgen …", "response_format": "wav",
+  "voice_ref": { "type": "base64", "data": "<WAV, 16 kHz mono>" },
+  "reference_text": "what the recording says",
+  "language": "de"
+}
+```
+
+[audio.cpp](https://github.com/0xShug0/audio.cpp)'s `audiocpp_server`
+(C++, Apache-2.0) serves voice-cloning models such as VoxCPM2 (Apache-2.0)
+and Chatterbox Multilingual (MIT), both covering, among others, Danish,
+German, English and Swedish. Cloning is heavier than a stock voice: it
+needs a GPU to keep up with a live call.
+
+**Voices only where someone listens.** Each speaker's browser tells the
+service which languages someone wants a translated voice in; others get
+subtitles only, so no voice is synthesized for nobody. A voice that would
+start more than 3 s behind is skipped (its subtitle still shows), so a
+slow voice engine can't build up an ever growing delay.
 
 ## Streams
 

@@ -61,7 +61,7 @@ func fakeAPI(t *testing.T) (*httptest.Server, *apiSeen) {
 		transcription: transcriptionSeen{model: "", language: "", format: "", samples: 0, rate: 0},
 		chat:          chatRequest{Model: "", Messages: nil},
 		ollama:        ollamaRequest{Model: "", Stream: false, Think: false, Options: ollamaOptions{Temperature: 0}, Messages: nil},
-		speech:        speechRequest{Model: "", Voice: "", Input: "", ResponseFormat: ""},
+		speech:        speechRequest{Model: "", Voice: "", Input: "", ResponseFormat: "", VoiceRef: nil, ReferenceText: "", Language: ""},
 	}
 	mux := http.NewServeMux()
 
@@ -173,12 +173,15 @@ func TestOpenAIVoice(t *testing.T) {
 	api, seen := fakeAPI(t)
 	settings := openAISettings(t, api)
 
-	spoken, err := newHTTPEngines(settings).speak(t.Context(), "hello world", mustLanguage(t, settings, "en"), voiceMale)
+	spoken, err := newHTTPEngines(settings).speak(t.Context(), "hello world", mustLanguage(t, settings, "en"), voiceMale, nil)
 	if err != nil || len(spoken.pcm) != 4 || spoken.rate != voiceTestRate {
 		t.Fatalf("speak: %+v, %v", spoken, err)
 	}
 
-	want := speechRequest{Model: modelTTS, Voice: voiceAlloy, Input: "hello world", ResponseFormat: "wav"}
+	want := speechRequest{
+		Model: modelTTS, Voice: voiceAlloy, Input: "hello world", ResponseFormat: "wav",
+		VoiceRef: nil, ReferenceText: "", Language: "",
+	}
 	if seen.speech != want || seen.auth["/v1/audio/speech"] != bearer {
 		t.Fatalf("speech request %+v with %q, want %+v with the key", seen.speech, seen.auth, want)
 	}

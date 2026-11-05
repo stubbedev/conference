@@ -1,9 +1,10 @@
 // What members exchange about live translation. Both travel sealed with
 // the room's chat key, so the SFU only relays ciphertext.
 
-export type VoiceChoice = 'female' | 'male'
+/** 'own' is the speaker's own voice, cloned from what they say in the call. */
+export type VoiceChoice = 'female' | 'male' | 'own'
 
-export const VOICE_CHOICES: readonly VoiceChoice[] = ['female', 'male']
+export const VOICE_CHOICES: readonly VoiceChoice[] = ['female', 'male', 'own']
 
 /** A member's language settings, announced to the room. */
 export interface LangPrefs {
@@ -38,6 +39,8 @@ export interface VoiceCue {
   lang: string
   startInMs: number
   durationMs: number
+  /** The speaker's own, cloned voice rather than a stock one. */
+  cloned?: boolean
 }
 
 export type RoomCaption = CaptionLine | VoiceCue
@@ -51,6 +54,12 @@ export interface TranslatorStatus {
   sameLanguage: boolean
   /** Sentences the speech service could not translate and sent as said. */
   failedTranslations: number
+  /** This member's own voice: being learned from what they say, or in use. */
+  ownVoice: 'off' | 'learning' | 'ready'
+  /** Seconds of speech collected for the own voice so far. */
+  ownVoiceSeconds: number
+  /** Translated voices skipped because they would have played too late. */
+  droppedVoices: number
 }
 
 export function isRoomCaption(value: unknown): value is RoomCaption {

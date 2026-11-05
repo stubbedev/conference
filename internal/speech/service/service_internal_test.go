@@ -162,7 +162,7 @@ func speak(ctx context.Context, conn *websocket.Conn, who speakerCase) error {
 		}
 	}
 
-	return writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, Speaker: who.id})
+	return writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, VoiceTargets: nil, Speaker: who.id})
 }
 
 func dialStream(ctx context.Context, t *testing.T, server testServer, member string) *websocket.Conn {
@@ -188,7 +188,7 @@ func dialStream(ctx context.Context, t *testing.T, server testServer, member str
 func hello(ctx context.Context, t *testing.T, conn *websocket.Conn) {
 	t.Helper()
 
-	err := writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de", "xx"}, Speaker: ""})
+	err := writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de", "xx"}, VoiceTargets: nil, Speaker: ""})
 	if err != nil {
 		t.Fatalf("hello: %v", err)
 	}

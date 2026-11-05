@@ -29,7 +29,7 @@ func (s stubEngines) translate(_ context.Context, text string, _, target languag
 	return s.translateFn(text, target)
 }
 
-func (stubEngines) speak(context.Context, string, language, voiceChoice) (speech, error) {
+func (stubEngines) speak(context.Context, string, language, voiceChoice, *reference) (speech, error) {
 	return speech{pcm: []byte{0, 0}, rate: vad.Rate}, nil
 }
 

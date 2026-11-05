@@ -21,6 +21,10 @@ const MAX_REFUSED_CONNECTS = 3
 const RECONNECT_DELAY_MS = 2_000
 // How long start() waits for the token the server sends on its own before asking.
 const TOKEN_GRACE_MS = 1_500
+// A translated voice that would start later than this behind the speaker
+// is skipped (its subtitle still shows), so a slow voice engine can't
+// build up an ever growing delay.
+const MAX_VOICE_LAG_S = 3
 
 interface Voice {
   output: MediaStreamAudioDestinationNode
@@ -32,6 +36,7 @@ interface VoiceHeader {
   segId: string
   lang: string
   rate: number
+  cloned?: boolean
 }
 
 export interface TranslatorEvents {
@@ -66,12 +71,20 @@ export class Translator {
   private playbackContext: AudioContext | null = null
   private workletReady: Promise<void> | null = null
   private capture: { source: MediaStreamAudioSourceNode; node: AudioWorkletNode } | null = null
-  /** The other members' announced languages: what this speech is translated into. */
-  private otherLangs = new Map<string, string>()
+  /** The other members' announced languages, and whether they listen to a translated voice. */
+  private others = new Map<string, { lang: string; voice: boolean }>()
   private voices = new Map<string, Voice>()
   private localMic: MediaStreamTrack | null = null
   private refusedConnects = 0
-  private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0 }
+  private status: TranslatorStatus = {
+    state: 'claiming',
+    detail: '',
+    sameLanguage: false,
+    failedTranslations: 0,
+    ownVoice: 'off',
+    ownVoiceSeconds: 0,
+    droppedVoices: 0,
+  }
   private selfPrefs: LangPrefs
   private stopped = false
   private readonly events: TranslatorEvents
@@ -94,7 +107,9 @@ export class Translator {
 
     // Members announce their language once, on joining, so the ones that
     // arrived before this bridge started come from the client's record.
-    for (const [memberId, prefs] of client.memberLangPrefs) this.otherLangs.set(memberId, prefs.lang)
+    for (const [memberId, prefs] of client.memberLangPrefs) {
+      this.others.set(memberId, { lang: prefs.lang, voice: prefs.voice })
+    }
 
     this.unsubscribe = [
       client.on('translate-token', ({ token }) => {
@@ -102,11 +117,11 @@ export class Translator {
         this.openSpeech(token)
       }),
       client.on('lang', ({ from, prefs }) => {
-        this.otherLangs.set(from, prefs.lang)
+        this.others.set(from, { lang: prefs.lang, voice: prefs.voice })
         this.sendTargets()
       }),
       client.on('member-left', ({ id }) => {
-        this.otherLangs.delete(id)
+        this.others.delete(id)
         this.sendTargets()
       }),
     ]
@@ -206,7 +221,13 @@ export class Translator {
 
   /** The languages this speech goes out in: its own (as subtitles) and every other member's. */
   private targets(): string[] {
-    return [...new Set([this.selfPrefs.lang, ...this.otherLangs.values()])]
+    return [...new Set([this.selfPrefs.lang, ...[...this.others.values()].map((other) => other.lang)])]
+  }
+
+  /** The other languages someone in the room wants to hear a translated voice in. */
+  private voiceTargets(): string[] {
+    const wanted = [...this.others.values()].filter((other) => other.voice && other.lang !== this.selfPrefs.lang)
+    return [...new Set(wanted.map((other) => other.lang))]
   }
 
   private sendTargets(): void {
@@ -214,7 +235,7 @@ export class Translator {
     if (sameLanguage !== this.status.sameLanguage) this.setStatus({ sameLanguage })
     if (this.speech?.readyState !== WebSocket.OPEN) return
     const targets = this.targets()
-    this.speech.send(JSON.stringify({ type: 'hello', targets }))
+    this.speech.send(JSON.stringify({ type: 'hello', targets, voiceTargets: this.voiceTargets() }))
     for (const lang of targets) if (lang !== this.selfPrefs.lang) void this.ensureVoice(lang)
   }
 
@@ -262,14 +283,20 @@ export class Translator {
   }
 
   private onSpeechText(data: string): void {
-    let message: { type?: string; code?: string } & Partial<CaptionLine>
+    let message: { type?: string; code?: string; seconds?: number } & Partial<CaptionLine>
     try {
       message = JSON.parse(data) as typeof message
     } catch {
       return
     }
-    if (message.type === 'notice' && message.code === 'translation-failed') {
-      this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
+    if (message.type === 'notice') {
+      if (message.code === 'translation-failed') {
+        this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
+      } else if (message.code === 'own-voice-learning') {
+        this.setStatus({ ownVoice: 'learning', ownVoiceSeconds: message.seconds ?? 0 })
+      } else if (message.code === 'own-voice-ready') {
+        this.setStatus({ ownVoice: 'ready' })
+      }
       return
     }
     if (message.type !== 'caption') return
@@ -297,6 +324,11 @@ export class Translator {
     const channel = buffer.getChannelData(0)
     for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 0x8000
 
+    if (voice.nextStart - context.currentTime > MAX_VOICE_LAG_S) {
+      this.setStatus({ droppedVoices: this.status.droppedVoices + 1 })
+      return
+    }
+
     const start = Math.max(context.currentTime, voice.nextStart)
     voice.nextStart = start + buffer.duration
     const node = context.createBufferSource()
@@ -311,6 +343,7 @@ export class Translator {
       lang: header.lang,
       startInMs: Math.round((start - context.currentTime) * 1000),
       durationMs: Math.round(buffer.duration * 1000),
+      cloned: header.cloned === true,
     })
   }
 

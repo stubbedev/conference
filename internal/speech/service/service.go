@@ -291,8 +291,9 @@ func handle(ctx context.Context, conn *websocket.Conn, current *session, data []
 	switch message.Type {
 	case wire.TypeHello:
 		log.Printf("targets: %s", strings.Join(current.setTargets(message.Targets), ","))
+		current.setVoiceTargets(message.VoiceTargets)
 
-		return write(ctx, conn, wire.Command{Type: wire.TypeReady, Targets: nil, Speaker: ""})
+		return write(ctx, conn, wire.Command{Type: wire.TypeReady, Targets: nil, VoiceTargets: nil, Speaker: ""})
 	case wire.TypeEnd:
 		return current.end(ctx, message.Speaker)
 	default:

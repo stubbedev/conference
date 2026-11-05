@@ -22,6 +22,10 @@ const (
 	TypeCaption           = "caption"
 	TypeNotice            = "notice"
 	NoticeTranslateFailed = "translation-failed"
+	// NoticeOwnVoiceLearning reports how many seconds of the speaker's
+	// own voice have been collected; NoticeOwnVoiceReady that it is in use.
+	NoticeOwnVoiceLearning = "own-voice-learning"
+	NoticeOwnVoiceReady    = "own-voice-ready"
 )
 
 var (
@@ -42,14 +46,19 @@ type VoiceHeader struct {
 	SegID   string `json:"segId"`
 	Lang    string `json:"lang"`
 	Rate    int    `json:"rate"`
+	// Cloned is true when the voice is the speaker's own, cloned one.
+	Cloned bool `json:"cloned,omitempty"`
 }
 
 // Command is a client's text message: hello with its target languages,
-// or end when a speaker's stream stops.
+// or end when a speaker's stream stops. VoiceTargets, when present, are
+// the targets someone wants to hear a translated voice in; without it
+// every target gets one.
 type Command struct {
-	Type    string   `json:"type"`
-	Targets []string `json:"targets,omitempty"`
-	Speaker string   `json:"speaker,omitempty"`
+	Type         string   `json:"type"`
+	Targets      []string `json:"targets,omitempty"`
+	VoiceTargets []string `json:"voiceTargets,omitempty"`
+	Speaker      string   `json:"speaker,omitempty"`
 }
 
 // Caption is a subtitle in one language; Final is false while the
@@ -64,10 +73,12 @@ type Caption struct {
 	Final      bool   `json:"final"`
 }
 
-// Notice tells the client something went wrong without ending the stream.
+// Notice tells the client about its stream without ending it: a
+// sentence sent untranslated, or how far its own voice has been learned.
 type Notice struct {
-	Type string `json:"type"`
-	Code string `json:"code"`
+	Type    string  `json:"type"`
+	Code    string  `json:"code"`
+	Seconds float64 `json:"seconds,omitempty"`
 }
 
 // Pack builds a binary frame from a header and PCM16 samples.

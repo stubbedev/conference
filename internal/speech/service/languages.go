@@ -10,17 +10,33 @@ import (
 type voiceChoice string
 
 const (
-	voiceFemale  voiceChoice = "female"
-	voiceMale    voiceChoice = "male"
+	voiceFemale voiceChoice = "female"
+	voiceMale   voiceChoice = "male"
+	// voiceOwn is the speaker's own voice, cloned from what they say in
+	// the call (see voiceSample); until it is learned, or without a
+	// cloning voice engine, they are heard in the default voice.
+	voiceOwn     voiceChoice = "own"
 	defaultVoice             = voiceFemale
 )
 
 func parseVoiceChoice(s string) voiceChoice {
-	if voiceChoice(s) == voiceMale {
-		return voiceMale
+	switch choice := voiceChoice(s); choice {
+	case voiceMale, voiceOwn:
+		return choice
+	case voiceFemale:
+		return voiceFemale
+	default:
+		return defaultVoice
+	}
+}
+
+// stock is the voice from the languages file that a choice speaks in.
+func (c voiceChoice) stock() voiceChoice {
+	if c == voiceOwn {
+		return defaultVoice
 	}
 
-	return defaultVoice
+	return c
 }
 
 type language struct {

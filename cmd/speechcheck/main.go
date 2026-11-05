@@ -188,7 +188,7 @@ func connect(ctx context.Context, address string) (*websocket.Conn, error) {
 
 	conn.SetReadLimit(-1)
 
-	err = send(ctx, conn, wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de"}, Speaker: ""})
+	err = send(ctx, conn, wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de"}, VoiceTargets: nil, Speaker: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func speak(ctx context.Context, conn *websocket.Conn, who speakerSpec) error {
 		return err
 	}
 
-	return send(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, Speaker: who.id})
+	return send(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, VoiceTargets: nil, Speaker: who.id})
 }
 
 func stream(ctx context.Context, conn *websocket.Conn, who speakerSpec, pcm []byte) error {

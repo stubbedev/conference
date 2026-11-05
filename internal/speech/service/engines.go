@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ const (
 	maxResponseBytes  = 32 << 20
 	fakeToneSeconds   = 0.4
 	fakeToneHz        = 440
+	fakeOwnToneHz     = 660
 	fakeToneLevel     = 0.2
 	noSpeechThreshold = 0.6
 	logprobThreshold  = -1.0
@@ -38,7 +40,21 @@ type speech struct {
 type speechEngines interface {
 	transcribe(ctx context.Context, audio []int16, lang language) (string, error)
 	translate(ctx context.Context, text string, source, target language, earlier []string) (string, error)
-	speak(ctx context.Context, text string, lang language, choice voiceChoice) (speech, error)
+	speak(ctx context.Context, text string, lang language, choice voiceChoice, own *reference) (speech, error)
+}
+
+// reference is a speaker's own voice for a cloning voice engine: a WAV
+// of what they said in the call and its transcript.
+type reference struct {
+	wav  []byte
+	text string
+}
+
+// voiceRef is how the voice engine takes a reference recording inline
+// (audio.cpp's voice_ref), so nothing is stored there between requests.
+type voiceRef struct {
+	Type string `json:"type"`
+	Data string `json:"data"`
 }
 
 func newHTTPEngines(settings Settings) *httpEngines {
@@ -84,10 +100,13 @@ type ollamaReply struct {
 }
 
 type speechRequest struct {
-	Model          string `json:"model"`
-	Voice          string `json:"voice"`
-	Input          string `json:"input"`
-	ResponseFormat string `json:"response_format"` //nolint:tagliatelle // OpenAI's wire format.
+	Model          string    `json:"model"`
+	Voice          string    `json:"voice,omitempty"`
+	Input          string    `json:"input"`
+	ResponseFormat string    `json:"response_format"`          //nolint:tagliatelle // OpenAI's wire format.
+	VoiceRef       *voiceRef `json:"voice_ref,omitempty"`      //nolint:tagliatelle // the voice engine's wire format.
+	ReferenceText  string    `json:"reference_text,omitempty"` //nolint:tagliatelle // the voice engine's wire format.
+	Language       string    `json:"language,omitempty"`
 }
 
 type transcriptionSegment struct {
@@ -239,21 +258,26 @@ func translationPrompt(source, target language, glossary string, earlier []strin
 	return prompt.String()
 }
 
-func (e *httpEngines) speak(ctx context.Context, text string, lang language, choice voiceChoice) (speech, error) {
-	name := lang.Voices[choice]
-	if name == "" {
-		name = lang.Voices[defaultVoice]
+func (e *httpEngines) speak(ctx context.Context, text string, lang language, choice voiceChoice, own *reference) (speech, error) {
+	request := speechRequest{
+		Model: e.settings.voice.model, Voice: "", Input: text, ResponseFormat: "wav",
+		VoiceRef: nil, ReferenceText: "", Language: "",
 	}
 
-	if name == "" {
-		name = e.settings.voiceName
+	if own != nil {
+		request.VoiceRef = &voiceRef{Type: "base64", Data: base64.StdEncoding.EncodeToString(own.wav)}
+		request.ReferenceText = own.text
+		request.Language = lang.Code
+	} else {
+		name, err := e.stockVoice(lang, choice)
+		if err != nil {
+			return speech{}, err
+		}
+
+		request.Voice = name
 	}
 
-	if name == "" {
-		return speech{}, fmt.Errorf("%s: %w for %s", voice, errNoVoiceName, lang.Code)
-	}
-
-	payload, err := json.Marshal(speechRequest{Model: e.settings.voice.model, Voice: name, Input: text, ResponseFormat: "wav"})
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return speech{}, fmt.Errorf("%s: encode the request: %w", voice, err)
 	}
@@ -276,6 +300,23 @@ func (e *httpEngines) speak(ctx context.Context, text string, lang language, cho
 	}
 
 	return speech{pcm: pcm, rate: int(rate)}, nil
+}
+
+func (e *httpEngines) stockVoice(lang language, choice voiceChoice) (string, error) {
+	name := lang.Voices[choice.stock()]
+	if name == "" {
+		name = lang.Voices[defaultVoice]
+	}
+
+	if name == "" {
+		name = e.settings.voiceName
+	}
+
+	if name == "" {
+		return "", fmt.Errorf("%s: %w for %s", voice, errNoVoiceName, lang.Code)
+	}
+
+	return name, nil
 }
 
 func (e *httpEngines) callJSON(ctx context.Context, use purpose, target engine, path string, request, reply any) error {
@@ -344,10 +385,17 @@ func (f *fakeEngines) translate(_ context.Context, text string, _, target langua
 	return fmt.Sprintf("[%s] %s", target.Code, text), nil
 }
 
-func (f *fakeEngines) speak(context.Context, string, language, voiceChoice) (speech, error) {
+// speak is a tone: a higher one in a speaker's own voice, so a test can
+// tell the two apart.
+func (f *fakeEngines) speak(_ context.Context, _ string, _ language, _ voiceChoice, own *reference) (speech, error) {
+	frequency := float64(fakeToneHz)
+	if own != nil {
+		frequency = float64(fakeOwnToneHz)
+	}
+
 	tone := make([]int16, int(fakeToneSeconds*vad.Rate))
 	for i := range tone {
-		tone[i] = int16(fakeToneLevel * math.MaxInt16 * math.Sin(2*math.Pi*fakeToneHz*float64(i)/vad.Rate))
+		tone[i] = int16(fakeToneLevel * math.MaxInt16 * math.Sin(2*math.Pi*frequency*float64(i)/vad.Rate))
 	}
 
 	pcm, err := binary.Append(nil, binary.LittleEndian, tone)

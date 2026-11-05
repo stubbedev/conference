@@ -77,8 +77,15 @@ export function TranslationSettings({ config, prefs, onChange }: TranslationSett
             <SelectContent>
               <SelectItem value="female">Female voice</SelectItem>
               <SelectItem value="male">Male voice</SelectItem>
+              {config.ownVoice && <SelectItem value="own">My own voice</SelectItem>}
             </SelectContent>
           </Select>
+          {prefs.voiceChoice === 'own' && config.ownVoice && (
+            <p className="text-xs text-muted-foreground">
+              Learned from what you say in this call and kept only for this call. Until it's ready, others hear the
+              female voice.
+            </p>
+          )}
         </div>
         <div className="flex items-center justify-between gap-3">
           <Label htmlFor="translated-voice" className="text-xs text-muted-foreground">
