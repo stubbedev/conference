@@ -127,24 +127,12 @@ release level:
     git push origin "$next"
     echo "released $next"
 
-# Speech service (live translation), run natively: on a Mac this is far
-# faster than the CPU container. Needs SPEECH_SECRET and a translation
-# engine, e.g. TRANSLATE_URL and TRANSLATE_MODEL (see speech/README.md).
-
-# Create the speech venv, install Piper (GPL-3.0, kept out of
-# requirements.txt) and download its voices.
-speech-setup:
-    cd speech && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt piper-tts==1.8.0
-    cd speech && .venv/bin/python -m piper.download_voices --data-dir voices $(.venv/bin/python -c "import yaml; print(' '.join(v for l in yaml.safe_load(open('languages.yaml'))['languages'].values() for v in l['voices'].values()))")
-
-# Run the speech service on :8090.
+# Speech service (live translation) on :8090. Needs SPEECH_SECRET and the
+# engines (see speech/README.md); ENGINES=fake runs it with stand-ins.
 speech:
-    cd speech && .venv/bin/python -m app
+    go run ./cmd/speech
 
-# Check the speech service's engine settings (no models needed).
-speech-unit:
-    cd speech && .venv/bin/python -m tests.test_config
-
-# Stream the fixtures through a running speech service and check the translations.
+# Stream the fixtures through a running speech service with real engines
+# and check the translations both ways.
 speech-test url="ws://localhost:8090":
-    cd speech && .venv/bin/python -m tests.stream_sample {{url}}
+    go run ./cmd/speechcheck {{url}}

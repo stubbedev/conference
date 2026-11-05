@@ -1,0 +1,317 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"mime/multipart"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/stubbe/conference/internal/speech/vad"
+	"github.com/stubbe/conference/internal/speech/wav"
+)
+
+const (
+	engineTimeout    = 15 * time.Second
+	contextSentences = 3
+	maxResponseBytes = 32 << 20
+	fakeToneSeconds  = 0.4
+	fakeToneHz       = 440
+	fakeToneLevel    = 0.2
+)
+
+type speech struct {
+	pcm  []byte
+	rate int
+}
+
+type speechEngines interface {
+	transcribe(ctx context.Context, audio []int16, lang language) (string, error)
+	translate(ctx context.Context, text string, source, target language, earlier []string) (string, error)
+	speak(ctx context.Context, text string, lang language, choice voiceChoice) (speech, error)
+}
+
+func newHTTPEngines(settings Settings) *httpEngines {
+	return &httpEngines{settings: settings, client: &http.Client{Timeout: engineTimeout}}
+}
+
+var (
+	errStatus      = errors.New("unexpected status")
+	errNoChoice    = errors.New("no choices in the reply")
+	errNoVoiceName = errors.New("no voice name")
+)
+
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+}
+
+type chatReply struct {
+	Choices []struct {
+		Message chatMessage `json:"message"`
+	} `json:"choices"`
+}
+
+type ollamaOptions struct {
+	Temperature float64 `json:"temperature"`
+}
+
+type ollamaRequest struct {
+	Model    string        `json:"model"`
+	Stream   bool          `json:"stream"`
+	Think    bool          `json:"think"`
+	Options  ollamaOptions `json:"options"`
+	Messages []chatMessage `json:"messages"`
+}
+
+type ollamaReply struct {
+	Message chatMessage `json:"message"`
+}
+
+type speechRequest struct {
+	Model          string `json:"model"`
+	Voice          string `json:"voice"`
+	Input          string `json:"input"`
+	ResponseFormat string `json:"response_format"` //nolint:tagliatelle // OpenAI's wire format.
+}
+
+type transcriptionReply struct {
+	Text string `json:"text"`
+}
+
+type httpEngines struct {
+	settings Settings
+	client   *http.Client
+}
+
+func (e *httpEngines) transcribe(ctx context.Context, audio []int16, lang language) (string, error) {
+	body, contentType, err := transcriptionForm(audio, e.settings.transcription.model, lang.Whisper)
+	if err != nil {
+		return "", fmt.Errorf("%s: build the form: %w", transcription, err)
+	}
+
+	var reply transcriptionReply
+
+	err = e.call(ctx, transcription, e.settings.transcription, "/audio/transcriptions", contentType, body, &reply)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(reply.Text), nil
+}
+
+func transcriptionForm(audio []int16, model, lang string) (*bytes.Buffer, string, error) {
+	encoded, err := wav.Encode(audio, vad.Rate)
+	if err != nil {
+		return nil, "", fmt.Errorf("encode audio: %w", err)
+	}
+
+	var body bytes.Buffer
+
+	form := multipart.NewWriter(&body)
+
+	part, err := form.CreateFormFile("file", "speech.wav")
+	if err != nil {
+		return nil, "", fmt.Errorf("add the audio: %w", err)
+	}
+
+	_, err = part.Write(encoded)
+	if err != nil {
+		return nil, "", fmt.Errorf("add the audio: %w", err)
+	}
+
+	for _, field := range [][2]string{{"model", model}, {"language", lang}, {"response_format", "json"}} {
+		err = form.WriteField(field[0], field[1])
+		if err != nil {
+			return nil, "", fmt.Errorf("add %s: %w", field[0], err)
+		}
+	}
+
+	err = form.Close()
+	if err != nil {
+		return nil, "", fmt.Errorf("close the form: %w", err)
+	}
+
+	return &body, form.FormDataContentType(), nil
+}
+
+func (e *httpEngines) translate(ctx context.Context, text string, source, target language, earlier []string) (string, error) {
+	messages := []chatMessage{
+		{Role: "system", Content: translationPrompt(source, target, e.settings.glossary, earlier)},
+		{Role: "user", Content: text},
+	}
+
+	use := e.settings.translation
+	if use.provider == openAICompatible {
+		var reply chatReply
+
+		err := e.callJSON(ctx, translation, use, "/chat/completions", chatRequest{Model: use.model, Messages: messages}, &reply)
+		if err != nil {
+			return "", err
+		}
+
+		if len(reply.Choices) == 0 {
+			return "", fmt.Errorf("%s: %w", translation, errNoChoice)
+		}
+
+		return strings.TrimSpace(reply.Choices[0].Message.Content), nil
+	}
+
+	var reply ollamaReply
+
+	err := e.callJSON(ctx, translation, use, "/api/chat", ollamaRequest{
+		Model:    use.model,
+		Stream:   false,
+		Think:    false,
+		Options:  ollamaOptions{Temperature: 0},
+		Messages: messages,
+	}, &reply)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(reply.Message.Content), nil
+}
+
+func translationPrompt(source, target language, glossary string, earlier []string) string {
+	var prompt strings.Builder
+
+	fmt.Fprintf(&prompt, "You translate spoken %s from a business video call into natural spoken %s. Reply with the translation only.",
+		source.Name, target.Name)
+
+	if target.Address != "" {
+		fmt.Fprintf(&prompt, " %s.", target.Address)
+	}
+
+	if glossary != "" {
+		fmt.Fprintf(&prompt, " Use these term translations: %s.", glossary)
+	}
+
+	if len(earlier) > 0 {
+		prompt.WriteString(" Earlier sentences, for context only: ")
+		prompt.WriteString(strings.Join(earlier[max(0, len(earlier)-contextSentences):], " "))
+	}
+
+	return prompt.String()
+}
+
+func (e *httpEngines) speak(ctx context.Context, text string, lang language, choice voiceChoice) (speech, error) {
+	name := lang.Voices[choice]
+	if name == "" {
+		name = lang.Voices[defaultVoice]
+	}
+
+	if name == "" {
+		name = e.settings.voiceName
+	}
+
+	if name == "" {
+		return speech{}, fmt.Errorf("%s: %w for %s", voice, errNoVoiceName, lang.Code)
+	}
+
+	payload, err := json.Marshal(speechRequest{Model: e.settings.voice.model, Voice: name, Input: text, ResponseFormat: "pcm"})
+	if err != nil {
+		return speech{}, fmt.Errorf("%s: encode the request: %w", voice, err)
+	}
+
+	var pcm bytes.Buffer
+
+	err = e.call(ctx, voice, e.settings.voice, "/audio/speech", "application/json", bytes.NewReader(payload), &pcm)
+	if err != nil {
+		return speech{}, err
+	}
+
+	return speech{pcm: pcm.Bytes(), rate: e.settings.voiceRate}, nil
+}
+
+func (e *httpEngines) callJSON(ctx context.Context, use purpose, target engine, path string, request, reply any) error {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("%s: encode the request: %w", use, err)
+	}
+
+	return e.call(ctx, use, target, path, "application/json", bytes.NewReader(payload), reply)
+}
+
+func (e *httpEngines) call(ctx context.Context, use purpose, target engine, path, contentType string, body io.Reader, reply any) error {
+	endpoint := target.url + path
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	if err != nil {
+		return fmt.Errorf("%s: build the request to %s: %w", use, endpoint, err)
+	}
+
+	request.Header.Set("Content-Type", contentType)
+
+	if target.apiKey != "" {
+		request.Header.Set("Authorization", "Bearer "+target.apiKey)
+	}
+
+	response, err := e.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("%s: %w", use, err)
+	}
+
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %w %d from %s", use, errStatus, response.StatusCode, endpoint)
+	}
+
+	limited := io.LimitReader(response.Body, maxResponseBytes)
+
+	if raw, ok := reply.(*bytes.Buffer); ok {
+		_, err = raw.ReadFrom(limited)
+		if err != nil {
+			return fmt.Errorf("%s: read the reply from %s: %w", use, endpoint, err)
+		}
+
+		return nil
+	}
+
+	err = json.NewDecoder(limited).Decode(reply)
+	if err != nil {
+		return fmt.Errorf("%s: decode the reply from %s: %w", use, endpoint, err)
+	}
+
+	return nil
+}
+
+type fakeEngines struct {
+	utterances atomic.Int64
+}
+
+func (f *fakeEngines) transcribe(_ context.Context, _ []int16, lang language) (string, error) {
+	return fmt.Sprintf("%s utterance %d", lang.Code, f.utterances.Add(1)), nil
+}
+
+func (f *fakeEngines) translate(_ context.Context, text string, _, target language, _ []string) (string, error) {
+	return fmt.Sprintf("[%s] %s", target.Code, text), nil
+}
+
+func (f *fakeEngines) speak(context.Context, string, language, voiceChoice) (speech, error) {
+	tone := make([]int16, int(fakeToneSeconds*vad.Rate))
+	for i := range tone {
+		tone[i] = int16(fakeToneLevel * math.MaxInt16 * math.Sin(2*math.Pi*fakeToneHz*float64(i)/vad.Rate))
+	}
+
+	pcm, err := binary.Append(nil, binary.LittleEndian, tone)
+	if err != nil {
+		return speech{}, fmt.Errorf("fake voice: %w", err)
+	}
+
+	return speech{pcm: pcm, rate: vad.Rate}, nil
+}
