@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/stubbe/conference/internal/speech/wire"
 )
 
 const (
@@ -34,30 +36,12 @@ var (
 	errStatusCode        = errors.New("speech: unexpected status code")
 )
 
-// Language is one language the speech service speaks.
-type Language struct {
-	Code string `json:"code"`
-	Name string `json:"name"`
-}
-
 // Status is what the web app needs to know about live translation.
 type Status struct {
-	Available bool       `json:"available"`
-	Reason    string     `json:"reason,omitempty"`
-	Languages []Language `json:"languages"`
-	External  bool       `json:"external"`
-}
-
-type engineStatus struct {
-	Ready   bool   `json:"ready"`
-	Problem string `json:"problem"`
-}
-
-type serviceStatus struct {
-	Ready     bool                    `json:"ready"`
-	External  bool                    `json:"external"`
-	Engines   map[string]engineStatus `json:"engines"`
-	Languages []Language              `json:"languages"`
+	Available bool            `json:"available"`
+	Reason    string          `json:"reason,omitempty"`
+	Languages []wire.Language `json:"languages"`
+	External  bool            `json:"external"`
 }
 
 // Checker fetches and caches the speech service's status.
@@ -120,7 +104,7 @@ func NewChecker(streamURL, statusURL string, client *http.Client) (*Checker, err
 // no speech service is configured.
 func (c *Checker) Status(ctx context.Context) Status {
 	if c == nil {
-		return Status{Available: false, Reason: ReasonNotConfigured, Languages: []Language{}, External: false}
+		return Status{Available: false, Reason: ReasonNotConfigured, Languages: []wire.Language{}, External: false}
 	}
 
 	c.mu.Lock()
@@ -148,7 +132,7 @@ func (c *Checker) Ready() bool {
 }
 
 func (c *Checker) fetch(ctx context.Context) Status {
-	unreachable := Status{Available: false, Reason: ReasonUnreachable, Languages: []Language{}, External: false}
+	unreachable := Status{Available: false, Reason: ReasonUnreachable, Languages: []wire.Language{}, External: false}
 
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
@@ -160,7 +144,7 @@ func (c *Checker) fetch(ctx context.Context) Status {
 
 	languages := service.Languages
 	if languages == nil {
-		languages = []Language{}
+		languages = []wire.Language{}
 	}
 
 	return Status{
@@ -171,8 +155,8 @@ func (c *Checker) fetch(ctx context.Context) Status {
 	}
 }
 
-func (c *Checker) get(ctx context.Context) (serviceStatus, error) {
-	var service serviceStatus
+func (c *Checker) get(ctx context.Context) (wire.Status, error) {
+	var service wire.Status
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.statusURL, http.NoBody)
 	if err != nil {
@@ -201,14 +185,14 @@ func (c *Checker) get(ctx context.Context) (serviceStatus, error) {
 // notReadyReason names what the speech service still needs, e.g. "Live
 // translation needs a translation model to be set up on the speech
 // service: set TRANSLATE_MODEL to the Ollama model to translate with."
-func notReadyReason(service serviceStatus) string {
+func notReadyReason(service wire.Status) string {
 	if service.Ready {
 		return ""
 	}
 
 	var purposes, problems []string
 
-	for _, purpose := range []string{"transcription", "translation", "voice"} {
+	for _, purpose := range wire.Purposes() {
 		engine, ok := service.Engines[purpose]
 		if !ok || engine.Ready {
 			continue
