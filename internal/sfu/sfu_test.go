@@ -323,7 +323,6 @@ func publishAudioOnly(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStati
 	return audio
 }
 
-// addVideoTrack renegotiates the publisher's upstream with a video track.
 // addAudioTrack publishes a second Opus track on a live upstream, the
 // way a translated voice joins the call.
 func addAudioTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSample {
@@ -346,6 +345,7 @@ func addAudioTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSa
 	return audio
 }
 
+// addVideoTrack renegotiates the publisher's upstream with a video track.
 func addVideoTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSample {
 	t.Helper()
 
@@ -546,11 +546,6 @@ func TestMediaLoopback(t *testing.T) {
 	}
 }
 
-// TestLateVideoTrack publishes audio first and adds video through an
-// upstream renegotiation afterwards — the same shape as tracks
-// registering one by one on slow machines. The later downstream offer
-// must still reach the viewer; CI failed exactly here while the suite
-// stayed green on fast machines.
 // TestLateAudioTrack checks that an audio track added after the first
 // negotiation reaches viewers as audio even when a renegotiation
 // registers it from the SDP before its first packet, codec still unknown.
@@ -608,6 +603,11 @@ func TestLateAudioTrack(t *testing.T) {
 	}
 }
 
+// TestLateVideoTrack publishes audio first and adds video through an
+// upstream renegotiation afterwards — the same shape as tracks
+// registering one by one on slow machines. The later downstream offer
+// must still reach the viewer; CI failed exactly here while the suite
+// stayed green on fast machines.
 func TestLateVideoTrack(t *testing.T) {
 	t.Parallel()
 
