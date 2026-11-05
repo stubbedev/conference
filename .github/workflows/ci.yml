@@ -42,6 +42,7 @@ jobs:
       - run: npm ci
       - run: node brand/brand.mjs --check
       - run: npm run lint
+      - run: npm test
       - run: npm run build
 
   # Real browsers, real media: the pipeline has failed silently before

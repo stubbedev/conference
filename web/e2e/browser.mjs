@@ -118,8 +118,9 @@ export async function launchChrome(chrome, idx, dir, extraArgs = []) {
   return { proc, cdp, sessionId, browser: product }
 }
 
-// Injected before the app loads: records peer connections and the
-// E2EE worker's stats so the probe can read them from page context.
+// Injected before the app loads: records peer connections, the E2EE
+// worker's stats and the audio worklets built, so the probe can read
+// them from page context.
 export const hook = (relayTransport) => `
 (() => {
   window.__pcs = [];
@@ -159,6 +160,14 @@ export const hook = (relayTransport) => `
     return w;
   };
   window.Worker.prototype = OrigWorker.prototype;
+  window.__worklets = [];
+  const OrigWorkletNode = window.AudioWorkletNode;
+  window.AudioWorkletNode = class extends OrigWorkletNode {
+    constructor(context, name, options) {
+      super(context, name, options);
+      window.__worklets.push(name);
+    }
+  };
   window.__sockets = [];
   const OrigWS = window.WebSocket;
   window.WebSocket = function (...a) {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import noiseGateWorkletUrl from '@/lib/noise-gate.worklet.ts?worker&url'
 
 export interface DeviceGroups {
   mics: MediaDeviceInfo[]
@@ -505,7 +506,7 @@ export function resumeAudio(): void {
 }
 
 // The microphone is routed through a Web Audio graph before it reaches
-// the sender: raw capture track -> GainNode ->
+// the sender: raw capture track -> noise gate -> GainNode ->
 // MediaStreamAudioDestinationNode, and the destination's track is what
 // gets published and previewed, so the gain slider applies live without
 // re-acquiring the mic. The browser's own processing (echo
@@ -524,18 +525,31 @@ export interface MicPipeline {
   dispose(): void
 }
 
-export function createMicPipeline(rawTrack: MediaStreamTrack, gain: number): MicPipeline | null {
+let noiseGateModule: Promise<void> | null = null
+
+function loadNoiseGate(ctx: AudioContext): Promise<void> {
+  noiseGateModule ??= ctx.audioWorklet.addModule(noiseGateWorkletUrl).catch((err: unknown) => {
+    noiseGateModule = null
+    throw new Error(`loading the noise gate worklet from ${noiseGateWorkletUrl}`, { cause: err })
+  })
+  return noiseGateModule
+}
+
+export async function createMicPipeline(rawTrack: MediaStreamTrack, gain: number): Promise<MicPipeline | null> {
   const ctx = audioContext()
   if (!ctx) return null
 
   try {
+    await loadNoiseGate(ctx)
     let input = rawTrack
     let source = ctx.createMediaStreamSource(new MediaStream([input]))
 
+    const gate = new AudioWorkletNode(ctx, 'noise-gate')
     const gainNode = ctx.createGain()
     const destination = ctx.createMediaStreamDestination()
+    gate.connect(gainNode)
     gainNode.connect(destination)
-    source.connect(gainNode)
+    source.connect(gate)
 
     const pipeline: MicPipeline = {
       track: destination.stream.getAudioTracks()[0],
@@ -550,7 +564,7 @@ export function createMicPipeline(rawTrack: MediaStreamTrack, gain: number): Mic
         const nextSource = ctx.createMediaStreamSource(new MediaStream([next]))
         const oldSource = source
         source = nextSource
-        source.connect(gainNode)
+        source.connect(gate)
         try {
           oldSource.disconnect()
         } catch {
@@ -565,6 +579,7 @@ export function createMicPipeline(rawTrack: MediaStreamTrack, gain: number): Mic
         } catch {
           // already detached
         }
+        gate.disconnect()
         gainNode.disconnect()
         input.stop()
       },
@@ -573,7 +588,8 @@ export function createMicPipeline(rawTrack: MediaStreamTrack, gain: number): Mic
     pipeline.setGain(gain)
     if (ctx.state === 'suspended') installGestureRetry()
     return pipeline
-  } catch {
+  } catch (err) {
+    console.error('media: building the microphone pipeline (gate and gain), sending the raw capture track', err)
     return null
   }
 }
