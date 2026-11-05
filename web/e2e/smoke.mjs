@@ -295,6 +295,10 @@ async function main() {
     await sleep(stagger)
 
     await checkCall(failures, browsers, ['browser 0', 'browser 1'], { seconds })
+    for (const [i, browser] of browsers.entries()) {
+      const worklets = await evalJs(browser, 'window.__worklets')
+      check(failures, `browser ${i}`, worklets.includes('noise-gate'), `microphone is not routed through the noise gate (worklets: ${worklets.join(', ') || 'none'})`)
+    }
 
     for (const [i, browser] of browsers.entries()) {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)

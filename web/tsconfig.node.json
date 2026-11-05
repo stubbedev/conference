@@ -20,5 +20,5 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts", "brand/site.json"]
+  "include": ["vite.config.ts", "brand/site.json", "src/**/*.test.ts"]
 }

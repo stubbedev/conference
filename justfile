@@ -5,9 +5,9 @@
 default:
     @just --list
 
-# vet + test + lint + web build + go build + browser smoke test (what
-# ci.yml runs).
-check: vet test lint brand web web-lint build e2e
+# vet + test + lint + web build, lint and tests + go build + browser
+# smoke test (what ci.yml runs).
+check: vet test lint brand web web-lint web-test build e2e
 
 vet:
     go vet ./...
@@ -25,6 +25,10 @@ web:
 # oxlint over the web UI; any warning fails.
 web-lint:
     cd web && npm run lint
+
+# Unit tests for the web UI's pure modules (node --test).
+web-test:
+    cd web && npm test
 
 build:
     CGO_ENABLED=0 go build -o /dev/null ./cmd/server

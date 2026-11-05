@@ -338,7 +338,7 @@ export default function Room() {
       micPipelineRef.current = null
       let outboundMic: MediaStreamTrack | null = micTrack
       if (micTrack) {
-        const pipeline = createMicPipeline(micTrack, prefs.micGain)
+        const pipeline = await createMicPipeline(micTrack, prefs.micGain)
         if (pipeline) {
           micPipelineRef.current = pipeline
           outboundMic = pipeline.track
@@ -867,7 +867,7 @@ export default function Room() {
           pipeline.rewire(track)
           outbound = pipeline.track
         } else {
-          const created = createMicPipeline(track, prefsRef.current.micGain)
+          const created = await createMicPipeline(track, prefsRef.current.micGain)
           if (created) {
             micPipelineRef.current = created
             outbound = created.track
