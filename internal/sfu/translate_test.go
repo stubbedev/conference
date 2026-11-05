@@ -30,7 +30,7 @@ func (roomTokens) Token(room, member string) (string, error) {
 func newTranslateHub(t *testing.T) (*sfu.Hub, *sfu.Engine) {
 	t.Helper()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -85,7 +85,7 @@ func expectNo(t *testing.T, peer *testPeer, msgType string) {
 func TestTranslationUnavailableWithoutSpeechEngines(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}

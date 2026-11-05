@@ -124,7 +124,7 @@ func receiverParams(t *testing.T, peerConn *webrtc.PeerConnection, track *webrtc
 func TestForwardRewritesHeaderExtensionIDs(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestForwardRewritesHeaderExtensionIDs(t *testing.T) {
 func TestForwardStripsMidExtension(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}

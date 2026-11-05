@@ -513,7 +513,7 @@ func viewerSubscribe(
 func TestMediaLoopback(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestMediaLoopback(t *testing.T) {
 func TestLateAudioTrack(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestLateAudioTrack(t *testing.T) {
 func TestLateVideoTrack(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -663,7 +663,7 @@ func TestModeration(t *testing.T) {
 
 	const moderate = "moderate"
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -728,7 +728,7 @@ func TestRecordingAnnouncement(t *testing.T) {
 
 	const record = "record"
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -774,7 +774,7 @@ func TestRecordingLifecycle(t *testing.T) {
 
 	const record = "record"
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -850,7 +850,7 @@ func watchKeyframeOnPublisher(sender *webrtc.RTPSender, keyframe chan struct{}) 
 func TestKeyframeRequestForwarding(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -924,7 +924,7 @@ func watchRembOnPublisher(sender *webrtc.RTPSender, rembCap float64, capped chan
 func TestViewerRembCapsPublisher(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -979,7 +979,7 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 func TestWelcomeCarriesRelayCredentials(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -1028,7 +1028,7 @@ func TestLeaveAlwaysTearsDown(t *testing.T) {
 
 	const rounds = 50
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -1059,7 +1059,7 @@ func TestLeaveAlwaysTearsDown(t *testing.T) {
 func TestRecordingSurvivesOtherLeaves(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -1094,7 +1094,7 @@ func TestRecordingSurvivesOtherLeaves(t *testing.T) {
 func TestResumeReplacesStaleMember(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
@@ -1136,7 +1136,7 @@ func TestResumeReplacesStaleMember(t *testing.T) {
 func TestResumeIgnoresUnknownTokens(t *testing.T) {
 	t.Parallel()
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}

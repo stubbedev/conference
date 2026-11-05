@@ -42,18 +42,27 @@ func NewEngine(udpPort int, externalIPs []netip.Addr) (*Engine, func(), error) {
 		return nil, nil, err
 	}
 
-	mediaEngine, err := newMediaEngine()
+	engine, err := newEngine(settingEngine, mediaAddrs)
 	if err != nil {
 		closeMux()
 
 		return nil, nil, err
 	}
 
+	return engine, closeMux, nil
+}
+
+// newEngine builds the engine on settingEngine with the SFU's codecs
+// and interceptors.
+func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr) (*Engine, error) {
+	mediaEngine, err := newMediaEngine()
+	if err != nil {
+		return nil, err
+	}
+
 	registry, err := newInterceptors()
 	if err != nil {
-		closeMux()
-
-		return nil, nil, err
+		return nil, err
 	}
 
 	api := webrtc.NewAPI(
@@ -62,7 +71,7 @@ func NewEngine(udpPort int, externalIPs []netip.Addr) (*Engine, func(), error) {
 		webrtc.WithInterceptorRegistry(registry),
 	)
 
-	return &Engine{API: api, mediaAddrs: mediaAddrs}, closeMux, nil
+	return &Engine{API: api, mediaAddrs: mediaAddrs}, nil
 }
 
 // MediaAddrs lists the addresses the SFU announces on its UDP mux and
