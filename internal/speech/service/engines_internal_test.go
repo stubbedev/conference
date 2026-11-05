@@ -13,7 +13,10 @@ import (
 	"github.com/stubbe/conference/internal/speech/wav"
 )
 
-const bearer = "Bearer key"
+const (
+	bearer      = "Bearer key"
+	helloGerman = "hallo welt"
+)
 
 type transcriptionSeen struct {
 	model, language, format string
@@ -143,7 +146,7 @@ func TestOpenAITranscription(t *testing.T) {
 	settings := openAISettings(t, api)
 
 	text, err := newHTTPEngines(settings).transcribe(t.Context(), make([]int16, vad.Rate/10), mustLanguage(t, settings, "de"))
-	if err != nil || text != "hallo welt" {
+	if err != nil || text != helloGerman {
 		t.Fatalf("transcribe: %q, %v", text, err)
 	}
 
@@ -159,13 +162,13 @@ func TestOpenAITranslation(t *testing.T) {
 	api, seen := fakeAPI(t)
 	settings := openAISettings(t, api)
 
-	text, err := newHTTPEngines(settings).translate(t.Context(), "hallo welt",
+	text, err := newHTTPEngines(settings).translate(t.Context(), helloGerman,
 		mustLanguage(t, settings, "de"), mustLanguage(t, settings, "fr"), []string{"a", "b", "c", "d"})
 	if err != nil || text != "hello world" {
 		t.Fatalf("translate: %q, %v", text, err)
 	}
 
-	if seen.chat.Model != "chat" || len(seen.chat.Messages) != 2 || seen.chat.Messages[1].Content != "hallo welt" {
+	if seen.chat.Model != "chat" || len(seen.chat.Messages) != 2 || seen.chat.Messages[1].Content != helloGerman {
 		t.Fatalf("chat request %+v", seen.chat)
 	}
 
@@ -232,5 +235,56 @@ func TestEngineErrorsCarryStatus(t *testing.T) {
 	_, err := newHTTPEngines(settings).translate(t.Context(), "hi", english, english, nil)
 	if err == nil || !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), string(translation)) {
 		t.Fatalf("error %v, want the purpose and status 429", err)
+	}
+}
+
+func TestVerboseTranscriptionDropsNonSpeech(t *testing.T) {
+	t.Parallel()
+
+	reply := `{"text":"hallo thank you for watching","segments":[` +
+		`{"text":" hallo ","no_speech_prob":0.1,"avg_logprob":-0.3},` +
+		`{"text":"thank you for watching","no_speech_prob":0.9,"avg_logprob":-1.4},` +
+		`{"text":"welt","no_speech_prob":0.8,"avg_logprob":-0.2}]}`
+
+	var format string
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		format = r.FormValue("response_format")
+
+		_, _ = io.WriteString(w, reply)
+	}))
+	t.Cleanup(api.Close)
+
+	settings := load(t, map[string]string{
+		prefixTranscribe + "_URL": api.URL + "/v1",
+		envTranscribeModel:        "whisper-1",
+		envTranscribeFormat:       string(formatVerbose),
+	})
+
+	text, err := newHTTPEngines(settings).transcribe(t.Context(), make([]int16, vad.Rate/10), mustLanguage(t, settings, "de"))
+	if err != nil || text != helloGerman {
+		t.Fatalf("transcribe: %q, %v; want the segments Whisper does not mark as silence", text, err)
+	}
+
+	if format != string(formatVerbose) {
+		t.Fatalf("response_format %q, want verbose_json", format)
+	}
+}
+
+func TestEngineErrorsHideURLPasswords(t *testing.T) {
+	t.Parallel()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusBadGateway)
+	}))
+	t.Cleanup(api.Close)
+
+	withPassword := strings.Replace(api.URL, "http://", "http://user:hunter2@", 1)
+	settings := load(t, map[string]string{envTranslateURL: withPassword, envTranslateModel: "m"})
+	english := mustLanguage(t, settings, "en")
+
+	_, err := newHTTPEngines(settings).translate(t.Context(), "hi", english, english, nil)
+	if err == nil || strings.Contains(err.Error(), "hunter2") || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("error %v, want status 502 without the password", err)
 	}
 }

@@ -45,13 +45,18 @@ type status struct {
 	Languages []languageStatus         `json:"languages"`
 }
 
-var errOddPCM = errors.New("audio frame holds an odd number of bytes")
+var (
+	errOddPCM         = errors.New("audio frame holds an odd number of bytes")
+	errReplaced       = errors.New("replaced by a newer connection of the same member")
+	errConnectionLost = errors.New("connection lost")
+)
 
 // Service serves the speech service's HTTP and WebSocket endpoints.
 type Service struct {
 	settings Settings
 	engines  speechEngines
 	sessions sync.WaitGroup
+	live     liveSessions
 	now      func() time.Time
 }
 
@@ -62,7 +67,13 @@ func New(settings Settings) *Service {
 		engines = &fakeEngines{utterances: atomic.Int64{}}
 	}
 
-	return &Service{settings: settings, engines: engines, sessions: sync.WaitGroup{}, now: time.Now}
+	return &Service{
+		settings: settings,
+		engines:  engines,
+		sessions: sync.WaitGroup{},
+		live:     liveSessions{mu: sync.Mutex{}, sessions: map[liveKey]*liveSession{}},
+		now:      time.Now,
+	}
 }
 
 // Handler routes /healthz, /v1/status and /v1/stream.
@@ -109,7 +120,7 @@ func (s *Service) status() status {
 }
 
 func (s *Service) stream(w http.ResponseWriter, r *http.Request) {
-	_, err := token.Verify(s.settings.secret, r.URL.Query().Get("token"), s.now())
+	claims, err := token.Verify(s.settings.secret, r.URL.Query().Get("token"), s.now())
 	if err != nil {
 		http.Error(w, "invalid or expired token", http.StatusForbidden)
 
@@ -134,36 +145,106 @@ func (s *Service) stream(w http.ResponseWriter, r *http.Request) {
 	s.sessions.Add(1)
 	defer s.sessions.Done()
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(r.Context())
+	defer cancel(nil)
 
-	current := newSession(s.settings, s.engines, func(ctx context.Context, message any) error {
-		return write(ctx, conn, message)
+	defer s.live.claim(liveKey{room: claims.Room, member: claims.Member}, func() {
+		cancel(errReplaced)
+
+		s.sessions.Go(func() { _ = conn.Close(websocket.StatusPolicyViolation, errReplaced.Error()) })
+	})()
+
+	current, err := newSession(ctx, s.settings, s.engines, claims.Member, func(ctx context.Context, message any) error {
+		err := write(ctx, conn, message)
+		if err != nil {
+			cancel(fmt.Errorf("%w: %w", errConnectionLost, err))
+		}
+
+		return err
 	})
-
-	log.Print("session opened")
-
-	err = s.serve(ctx, conn, current)
-
-	cancel()
-	current.close()
-
-	if ctx.Err() == nil && !isClosed(err) {
-		log.Printf("session closed: %v", err)
+	if err != nil {
+		log.Printf("open a session: %v", err)
 
 		_ = conn.Close(websocket.StatusInternalError, "")
 
 		return
 	}
 
-	log.Print("session closed")
+	log.Print("session opened")
 
-	_ = conn.Close(websocket.StatusNormalClosure, "")
+	err = s.serve(r.Context(), ctx, conn, current)
+	cause := context.Cause(ctx)
+
+	cancel(nil)
+	current.close()
+	closeStream(conn, err, cause)
 }
 
-func (s *Service) serve(ctx context.Context, conn *websocket.Conn, current *session) error {
+func closeStream(conn *websocket.Conn, err, cause error) {
+	switch {
+	case errors.Is(cause, errReplaced):
+		log.Print("session replaced by a newer connection")
+	case errors.Is(cause, errConnectionLost):
+		log.Printf("session closed: %v", cause)
+
+		_ = conn.CloseNow()
+	case cause != nil:
+		log.Print("session closed: shutting down")
+
+		_ = conn.Close(websocket.StatusGoingAway, "")
+	case isClosed(err):
+		log.Print("session closed")
+
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	case errors.Is(err, errForeignSpeaker):
+		log.Printf("session closed: %v", err)
+
+		_ = conn.Close(websocket.StatusPolicyViolation, errForeignSpeaker.Error())
+	default:
+		log.Printf("session closed: %v", err)
+
+		_ = conn.Close(websocket.StatusInternalError, "")
+	}
+}
+
+type liveKey struct {
+	room   string
+	member string
+}
+
+type liveSession struct {
+	kick func()
+}
+
+type liveSessions struct {
+	mu       sync.Mutex
+	sessions map[liveKey]*liveSession
+}
+
+func (l *liveSessions) claim(key liveKey, kick func()) func() {
+	claimed := &liveSession{kick: kick}
+
+	l.mu.Lock()
+	if previous, ok := l.sessions[key]; ok {
+		previous.kick()
+	}
+
+	l.sessions[key] = claimed
+	l.mu.Unlock()
+
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+
+		if l.sessions[key] == claimed {
+			delete(l.sessions, key)
+		}
+	}
+}
+
+func (s *Service) serve(readCtx, ctx context.Context, conn *websocket.Conn, current *session) error {
 	for {
-		kind, data, err := conn.Read(ctx)
+		kind, data, err := conn.Read(readCtx)
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
@@ -250,7 +331,7 @@ func write(ctx context.Context, conn *websocket.Conn, message any) error {
 }
 
 func isClosed(err error) bool {
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 

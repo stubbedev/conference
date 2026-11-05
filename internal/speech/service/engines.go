@@ -20,12 +20,14 @@ import (
 )
 
 const (
-	engineTimeout    = 15 * time.Second
-	contextSentences = 3
-	maxResponseBytes = 32 << 20
-	fakeToneSeconds  = 0.4
-	fakeToneHz       = 440
-	fakeToneLevel    = 0.2
+	engineTimeout     = 15 * time.Second
+	contextSentences  = 3
+	maxResponseBytes  = 32 << 20
+	fakeToneSeconds   = 0.4
+	fakeToneHz        = 440
+	fakeToneLevel     = 0.2
+	noSpeechThreshold = 0.6
+	logprobThreshold  = -1.0
 )
 
 type speech struct {
@@ -88,8 +90,35 @@ type speechRequest struct {
 	ResponseFormat string `json:"response_format"` //nolint:tagliatelle // OpenAI's wire format.
 }
 
+type transcriptionSegment struct {
+	Text         string  `json:"text"`
+	NoSpeechProb float64 `json:"no_speech_prob"` //nolint:tagliatelle // OpenAI's wire format.
+	AvgLogprob   float64 `json:"avg_logprob"`    //nolint:tagliatelle // OpenAI's wire format.
+}
+
 type transcriptionReply struct {
-	Text string `json:"text"`
+	Text     string                 `json:"text"`
+	Segments []transcriptionSegment `json:"segments"`
+}
+
+func (r transcriptionReply) speech(format responseFormat) string {
+	if format != formatVerbose {
+		return strings.TrimSpace(r.Text)
+	}
+
+	kept := make([]string, 0, len(r.Segments))
+
+	for _, segment := range r.Segments {
+		if segment.NoSpeechProb > noSpeechThreshold && segment.AvgLogprob < logprobThreshold {
+			continue
+		}
+
+		if text := strings.TrimSpace(segment.Text); text != "" {
+			kept = append(kept, text)
+		}
+	}
+
+	return strings.Join(kept, " ")
 }
 
 type httpEngines struct {
@@ -98,7 +127,9 @@ type httpEngines struct {
 }
 
 func (e *httpEngines) transcribe(ctx context.Context, audio []int16, lang language) (string, error) {
-	body, contentType, err := transcriptionForm(audio, e.settings.transcription.model, lang.Whisper)
+	format := e.settings.transcribeFormat
+
+	body, contentType, err := transcriptionForm(audio, e.settings.transcription.model, lang.Whisper, format)
 	if err != nil {
 		return "", fmt.Errorf("%s: build the form: %w", transcription, err)
 	}
@@ -110,10 +141,10 @@ func (e *httpEngines) transcribe(ctx context.Context, audio []int16, lang langua
 		return "", err
 	}
 
-	return strings.TrimSpace(reply.Text), nil
+	return reply.speech(format), nil
 }
 
-func transcriptionForm(audio []int16, model, lang string) (*bytes.Buffer, string, error) {
+func transcriptionForm(audio []int16, model, lang string, format responseFormat) (*bytes.Buffer, string, error) {
 	encoded, err := wav.Encode(audio, vad.Rate)
 	if err != nil {
 		return nil, "", fmt.Errorf("encode audio: %w", err)
@@ -133,7 +164,7 @@ func transcriptionForm(audio []int16, model, lang string) (*bytes.Buffer, string
 		return nil, "", fmt.Errorf("add the audio: %w", err)
 	}
 
-	for _, field := range [][2]string{{"model", model}, {"language", lang}, {"response_format", "json"}} {
+	for _, field := range [][2]string{{"model", model}, {"language", lang}, {"response_format", string(format)}} {
 		err = form.WriteField(field[0], field[1])
 		if err != nil {
 			return nil, "", fmt.Errorf("add %s: %w", field[0], err)
@@ -247,9 +278,10 @@ func (e *httpEngines) callJSON(ctx context.Context, use purpose, target engine, 
 }
 
 func (e *httpEngines) call(ctx context.Context, use purpose, target engine, path, contentType string, body io.Reader, reply any) error {
-	endpoint := target.url + path
+	address := target.endpoint.JoinPath(path)
+	endpoint := address.Redacted()
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, address.String(), body)
 	if err != nil {
 		return fmt.Errorf("%s: build the request to %s: %w", use, endpoint, err)
 	}

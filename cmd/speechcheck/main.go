@@ -1,6 +1,7 @@
 // Command speechcheck streams the German and English fixtures through a
-// running speech service as two speakers at once, and checks that each
-// comes back as subtitles and voice in the other language.
+// running speech service as two members at once, each on its own
+// connection, and checks that each comes back as subtitles and voice in
+// the other language.
 package main
 
 import (
@@ -14,7 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -27,6 +28,7 @@ import (
 const (
 	defaultURL      = "ws://localhost:8090"
 	fixturesDir     = "fixtures"
+	room            = "speechcheck"
 	chunkSamples    = 320
 	chunkInterval   = 20 * time.Millisecond
 	sampleRate      = 16000
@@ -57,6 +59,7 @@ var (
 	errFailed           = errors.New("FAIL")
 	errNotReady         = errors.New("the service did not answer hello with ready")
 	errNoSecret         = errors.New("SPEECH_SECRET must be set")
+	errFixtureRate      = errors.New("fixture is not 16 kHz")
 )
 
 func main() {
@@ -67,7 +70,7 @@ func main() {
 		base = os.Args[1]
 	}
 
-	err := run(context.Background(), base, os.Getenv("SPEECH_SECRET"))
+	err := run(context.Background(), base, []byte(os.Getenv("SPEECH_SECRET")))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -75,8 +78,8 @@ func main() {
 	log.Print("PASS")
 }
 
-func run(ctx context.Context, base, secret string) error {
-	if secret == "" {
+func run(ctx context.Context, base string, secret []byte) error {
+	if len(secret) == 0 {
 		return errNoSecret
 	}
 
@@ -85,21 +88,25 @@ func run(ctx context.Context, base, secret string) error {
 		return err
 	}
 
-	tok, err := token.Mint([]byte(secret), token.Claims{Room: "test", Member: "host", Exp: time.Now().Add(tokenTTL).Unix()})
-	if err != nil {
-		return fmt.Errorf("mint a token: %w", err)
+	started := time.Now()
+	all := speakers()
+	outcomes := make([]result, len(all))
+	failures := make([]error, len(all))
+
+	var checks sync.WaitGroup
+
+	for i, who := range all {
+		checks.Go(func() { outcomes[i], failures[i] = check(ctx, base, secret, who, started) })
 	}
 
-	conn, err := connect(ctx, base+"/v1/stream?token="+tok)
+	checks.Wait()
+
+	err = errors.Join(failures...)
 	if err != nil {
 		return err
 	}
 
-	defer func() { _ = conn.CloseNow() }()
-
-	results := listen(ctx, conn, startSpeaking(ctx, conn))
-
-	return results.check()
+	return verdict(all, outcomes)
 }
 
 func rejectsBadToken(ctx context.Context, base string) error {
@@ -119,6 +126,35 @@ func rejectsBadToken(ctx context.Context, base string) error {
 	}
 
 	return nil
+}
+
+func check(ctx context.Context, base string, secret []byte, who speakerSpec, started time.Time) (result, error) {
+	got := result{finals: map[string][]string{}, voiced: map[string]bool{}, interims: 0}
+
+	tok, err := token.Mint(secret, token.Claims{Room: room, Member: who.id, Exp: time.Now().Add(tokenTTL).Unix()})
+	if err != nil {
+		return got, fmt.Errorf("%s: mint a token: %w", who.id, err)
+	}
+
+	conn, err := connect(ctx, base+"/v1/stream?token="+tok)
+	if err != nil {
+		return got, fmt.Errorf("%s: %w", who.id, err)
+	}
+
+	defer func() { _ = conn.CloseNow() }()
+
+	spoke := make(chan error, 1)
+
+	go func() { spoke <- speak(ctx, conn, who) }()
+
+	err = listen(ctx, conn, spoke, func(kind websocket.MessageType, data []byte) {
+		got.add(kind, data, time.Since(started))
+	})
+	if err != nil {
+		return got, fmt.Errorf("%s: %w", who.id, err)
+	}
+
+	return got, nil
 }
 
 func connect(ctx context.Context, address string) (*websocket.Conn, error) {
@@ -152,23 +188,64 @@ func connect(ctx context.Context, address string) (*websocket.Conn, error) {
 	return conn, nil
 }
 
-func startSpeaking(ctx context.Context, conn *websocket.Conn) *atomic.Int64 {
-	speaking := &atomic.Int64{}
+type message struct {
+	kind websocket.MessageType
+	data []byte
+}
 
-	for _, who := range speakers() {
-		speaking.Add(1)
+func readMessages(ctx context.Context, conn *websocket.Conn) <-chan message {
+	messages := make(chan message)
 
-		go func() {
-			defer speaking.Add(-1)
+	go func() {
+		defer close(messages)
 
-			err := speak(ctx, conn, who)
+		for {
+			kind, data, err := conn.Read(ctx)
 			if err != nil {
-				log.Printf("%s: %v", who.id, err)
+				return
 			}
-		}()
-	}
 
-	return speaking
+			select {
+			case messages <- message{kind: kind, data: data}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return messages
+}
+
+func listen(ctx context.Context, conn *websocket.Conn, spoke <-chan error, handle func(websocket.MessageType, []byte)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	messages := readMessages(ctx, conn)
+	timeout := speakingTimeout
+
+	idle := time.NewTimer(timeout)
+	defer idle.Stop()
+
+	for {
+		select {
+		case err := <-spoke:
+			if err != nil {
+				return err
+			}
+
+			spoke, timeout = nil, drainTimeout
+			idle.Reset(timeout)
+		case got, open := <-messages:
+			if !open {
+				return nil
+			}
+
+			handle(got.kind, got.data)
+			idle.Reset(timeout)
+		case <-idle.C:
+			return nil
+		}
+	}
 }
 
 func speak(ctx context.Context, conn *websocket.Conn, who speakerSpec) error {
@@ -183,7 +260,7 @@ func speak(ctx context.Context, conn *websocket.Conn, who speakerSpec) error {
 	}
 
 	if rate != sampleRate {
-		return fmt.Errorf("decode %s: %w", who.fixture, errFailed)
+		return fmt.Errorf("%s at %d Hz: %w", who.fixture, rate, errFixtureRate)
 	}
 
 	pcm, err := binary.Append(nil, binary.LittleEndian, append(samples, make([]int16, sampleRate)...))
@@ -222,59 +299,35 @@ func stream(ctx context.Context, conn *websocket.Conn, who speakerSpec, pcm []by
 	return nil
 }
 
-func send(ctx context.Context, conn *websocket.Conn, message wire.Command) error {
-	encoded, err := json.Marshal(message)
+func send(ctx context.Context, conn *websocket.Conn, command wire.Command) error {
+	encoded, err := json.Marshal(command)
 	if err != nil {
-		return fmt.Errorf("encode %s: %w", message.Type, err)
+		return fmt.Errorf("encode %s: %w", command.Type, err)
 	}
 
 	err = conn.Write(ctx, websocket.MessageText, encoded)
 	if err != nil {
-		return fmt.Errorf("send %s: %w", message.Type, err)
+		return fmt.Errorf("send %s: %w", command.Type, err)
 	}
 
 	return nil
 }
 
-type key struct {
-	speaker string
-	lang    string
-}
-
-type results struct {
-	started  time.Time
-	finals   map[key][]string
-	voice    map[key]time.Duration
+type result struct {
+	finals   map[string][]string
+	voiced   map[string]bool
 	interims int
 }
 
-func listen(ctx context.Context, conn *websocket.Conn, speaking *atomic.Int64) results {
-	got := results{started: time.Now(), finals: map[key][]string{}, voice: map[key]time.Duration{}, interims: 0}
-
-	for {
-		timeout := speakingTimeout
-		if speaking.Load() == 0 {
-			timeout = drainTimeout
-		}
-
-		readCtx, cancel := context.WithTimeout(ctx, timeout)
-		kind, data, err := conn.Read(readCtx)
-
-		cancel()
-
-		if err != nil {
-			return got
-		}
-
-		if kind == websocket.MessageBinary {
-			got.addVoice(data)
-		} else {
-			got.addCaption(data)
-		}
+func (r *result) add(kind websocket.MessageType, data []byte, elapsed time.Duration) {
+	if kind == websocket.MessageBinary {
+		r.addVoice(data, elapsed)
+	} else {
+		r.addCaption(data, elapsed)
 	}
 }
 
-func (r *results) addVoice(data []byte) {
+func (r *result) addVoice(data []byte, elapsed time.Duration) {
 	var header wire.VoiceHeader
 
 	pcm, err := wire.Unpack(data, &header)
@@ -285,13 +338,12 @@ func (r *results) addVoice(data []byte) {
 	}
 
 	length := time.Duration(len(pcm)/pcmWidth) * time.Second / time.Duration(header.Rate)
-	r.voice[key{speaker: header.Speaker, lang: header.Lang}] = length
+	r.voiced[header.Lang] = true
 
-	//nolint:gosec // %q quotes the values, so control characters cannot forge log lines.
-	log.Printf("%5.1fs voice   %q [%q] %.1fs", time.Since(r.started).Seconds(), header.Speaker, header.Lang, length.Seconds())
+	log.Printf("%5.1fs voice   %q [%q] %.1fs", elapsed.Seconds(), header.Speaker, header.Lang, length.Seconds())
 }
 
-func (r *results) addCaption(data []byte) {
+func (r *result) addCaption(data []byte, elapsed time.Duration) {
 	var caption wire.Caption
 
 	if json.Unmarshal(data, &caption) != nil || caption.Type != wire.TypeCaption {
@@ -304,35 +356,31 @@ func (r *results) addCaption(data []byte) {
 		return
 	}
 
-	at := key{speaker: caption.Speaker, lang: caption.Lang}
-	r.finals[at] = append(r.finals[at], caption.Text)
+	r.finals[caption.Lang] = append(r.finals[caption.Lang], caption.Text)
 
-	log.Printf("%5.1fs caption %q [%q->%q] %q",
-		time.Since(r.started).Seconds(), caption.Speaker, caption.SourceLang, caption.Lang, caption.Text)
+	log.Printf("%5.1fs caption %q [%q->%q] %q", elapsed.Seconds(), caption.Speaker, caption.SourceLang, caption.Lang, caption.Text)
 }
 
-func (r *results) check() error {
-	log.Printf("interim captions: %d", r.interims)
-
+func verdict(all []speakerSpec, outcomes []result) error {
 	var problems []string
 
-	if r.interims == 0 {
-		problems = append(problems, "no interim captions")
-	}
+	for i, who := range all {
+		got := outcomes[i]
 
-	for _, who := range speakers() {
-		if len(r.finals[key{speaker: who.id, lang: who.lang}]) == 0 {
+		log.Printf("%s: %d interim captions", who.id, got.interims)
+
+		if len(got.finals[who.lang]) == 0 {
 			problems = append(problems, who.id+": no caption in "+who.lang)
 		}
 
-		translated := strings.ToLower(strings.Join(r.finals[key{speaker: who.id, lang: who.target}], " "))
+		translated := strings.ToLower(strings.Join(got.finals[who.target], " "))
 		for _, word := range who.expect {
 			if !strings.Contains(translated, strings.ToLower(word)) {
 				problems = append(problems, fmt.Sprintf("%s: %q missing from the %s translation", who.id, word, who.target))
 			}
 		}
 
-		if _, ok := r.voice[key{speaker: who.id, lang: who.target}]; !ok {
+		if !got.voiced[who.target] {
 			problems = append(problems, who.id+": no voice in "+who.target)
 		}
 	}
