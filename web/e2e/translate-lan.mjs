@@ -14,8 +14,9 @@
 // address changes) and offered at /certificate.pem. The room lives in a
 // temporary database: Ctrl+C closes it for good.
 //
-//   just translate-lan openai        (OpenAI translates; key in speech/.env)
-//   TRANSLATE_URL=http://… just translate-lan   (Ollama, Gemma unless TRANSLATE_MODEL)
+//   just translate-lan openai   (OpenAI transcribes, translates and speaks; key in speech/.env)
+//   TRANSLATE_URL=… TRANSCRIBE_URL=… VOICE_URL=… VOICE_MODEL=… VOICE_NAME=… just translate-lan
+//     (your own engines: Ollama, Gemma unless TRANSLATE_MODEL; see translate-demo.mjs)
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { request } from 'node:http'
@@ -111,7 +112,7 @@ function frontDoor(tls, meetingPort) {
 async function main() {
   const ip = lanAddress()
   const lanBase = `https://${ip}:${LAN_PORT}`
-  await ensureSpeech({ secret, openai })
+  await ensureSpeech({ dir, secret, openai })
   const base = await startServer(buildServer(dir), dir, {
     speechURL: `wss://${ip}:${LAN_PORT}${SPEECH_PREFIX}v1/stream`,
     // Directly: the front door's self-signed certificate is trusted by the browsers, not this server.
@@ -126,7 +127,7 @@ async function main() {
   spawn('open', [hostLink], { stdio: 'ignore' })
 
   console.log(`
-Live translation over the local network is running (${openai ? 'OpenAI' : 'Gemma + local Whisper'}).
+Live translation over the local network is running (${openai ? 'OpenAI' : 'your local engines'}).
 
   You (host), opened here:   ${hostLink}
   Other computer (guest):    ${guestLink}

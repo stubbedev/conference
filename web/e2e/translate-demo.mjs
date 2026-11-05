@@ -11,12 +11,15 @@
 // separate Chrome, so your mic would pick up its German otherwise.
 //
 // `male` or `female` (the default) picks the voice others hear you in.
-// `openai` has OpenAI translate and transcribe instead of Gemma and the
-// local Whisper, with the key from speech/.env. Testing only: audio and
-// text leave our hardware.
+// `openai` has OpenAI transcribe, translate and speak, with the key from
+// speech/.env. Testing only: audio and text leave our hardware. Without
+// it, your own engines do: Ollama (TRANSLATE_URL; Gemma unless
+// TRANSLATE_MODEL), a transcription server (TRANSCRIBE_URL, e.g.
+// whisper.cpp's whisper-server) and a voice server (VOICE_URL, VOICE_MODEL,
+// VOICE_NAME), from the environment or speech/.env.
 //
-//   TRANSLATE_URL=http://… just translate-demo [hear] [de|sv] [male|female]
-//   (Ollama; TRANSLATE_MODEL picks another model than Gemma)
+//   TRANSLATE_URL=… TRANSCRIBE_URL=… VOICE_URL=… VOICE_MODEL=… VOICE_NAME=… \
+//     just translate-demo [hear] [de|sv] [male|female]
 //   just translate-demo openai [hear] [de|sv] [male|female]
 //
 // Ctrl+C stops everything this script started.
@@ -80,7 +83,7 @@ function silentWav() {
 }
 
 async function main() {
-  await ensureSpeech({ secret, openai })
+  await ensureSpeech({ dir, secret, openai })
   const base = await startServer(buildServer(dir), dir, {
     speechURL: `ws://127.0.0.1:${SPEECH_PORT}/v1/stream`,
     secret,

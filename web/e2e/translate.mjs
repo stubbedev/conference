@@ -12,12 +12,11 @@
 // the host: after the host leaves, a joiner still gets the guest's
 // speech in its own language.
 //
-// Needs Chrome (CHROME=…) and a Python with speech/requirements.txt
-// (SPEECH_PYTHON=…, default speech/.venv/bin/python).
+// Needs Chrome (CHROME=…) and Go, which builds both servers.
 //
 //   node web/e2e/translate.mjs
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,8 +25,6 @@ import { createRoom, evalJs, findChrome, freePort, joinRoom, launchChrome, sleep
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const chrome = process.env.CHROME ?? findChrome()
-const venvPython = join(repoRoot, 'speech/.venv/bin/python')
-const python = process.env.SPEECH_PYTHON ?? (existsSync(venvPython) ? venvPython : 'python3')
 const secret = 'translate-e2e'
 const TIMEOUT_MS = 45_000
 
@@ -51,22 +48,21 @@ async function waitHealthy(url, what) {
   throw new Error(`${what} did not start on ${url}`)
 }
 
-function buildServer() {
-  const bin = join(dir, 'server')
-  const res = spawnSync('go', ['build', '-race', '-o', bin, './cmd/server'], {
+function build(name) {
+  const bin = join(dir, name)
+  const res = spawnSync('go', ['build', '-race', '-o', bin, `./cmd/${name}`], {
     cwd: repoRoot,
     stdio: 'inherit',
     env: { ...process.env, CGO_ENABLED: '1' },
   })
-  if (res.status !== 0) throw new Error('go build failed')
+  if (res.status !== 0) throw new Error(`go build ./cmd/${name} failed`)
   return bin
 }
 
-async function startSpeech() {
+async function startSpeech(bin) {
   const port = await freePort()
   procs.push(
-    spawn(python, ['-m', 'app'], {
-      cwd: join(repoRoot, 'speech'),
+    spawn(bin, [], {
       env: { ...process.env, ENGINES: 'fake', SPEECH_SECRET: secret, PORT: String(port), HOST: '127.0.0.1' },
       stdio: 'inherit',
     }),
@@ -124,8 +120,7 @@ const translationAudio = `[...document.querySelectorAll('audio')]
   .map((a) => ({ tracks: a.srcObject?.getAudioTracks().filter((t) => t.readyState === 'live').length ?? 0, paused: a.paused }))`
 
 async function main() {
-  const bin = buildServer()
-  const base = await startServer(bin, await startSpeech())
+  const base = await startServer(build('server'), await startSpeech(build('speech')))
   const room = await createRoom(base, 'translate-e2e')
 
   const fixtures = join(repoRoot, 'fixtures')

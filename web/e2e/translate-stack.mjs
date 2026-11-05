@@ -57,47 +57,58 @@ function speechEnvFile() {
   )
 }
 
-// The models these demos use unless the environment names others; the
-// speech service itself has no default model.
-const DEMO_MODELS = {
-  ollama: { TRANSLATE_MODEL: 'gemma4:26b-a4b-it-qat' },
-  openai: { TRANSLATE_MODEL: 'gpt-4o-mini', TRANSCRIBE_MODEL: 'gpt-transcribe' },
+// The engines these demos use unless the environment names others; the
+// speech service itself has no default model. A local stack also needs
+// the addresses of its transcription and voice servers, and a voice.
+const DEMO_ENGINES = {
+  openai: {
+    TRANSLATE_PROVIDER: 'openai-compatible',
+    TRANSLATE_MODEL: 'gpt-4o-mini',
+    TRANSCRIBE_MODEL: 'gpt-transcribe',
+    VOICE_MODEL: 'gpt-4o-mini-tts',
+    VOICE_NAME: 'alloy',
+  },
+  local: { TRANSLATE_PROVIDER: 'ollama', TRANSLATE_MODEL: 'gemma4:26b-a4b-it-qat', TRANSCRIBE_MODEL: 'whisper' },
 }
+const LOCAL_SETTINGS = ['TRANSLATE_URL', 'TRANSCRIBE_URL', 'VOICE_URL', 'VOICE_MODEL', 'VOICE_NAME']
 
 /**
- * Starts the speech service unless one already answers on SPEECH_PORT
- * (which then must use the same secret). With openai, OpenAI translates
- * and transcribes, the key coming from speech/.env; testing only.
+ * Builds and starts the speech service unless one already answers on
+ * SPEECH_PORT (which then must use the same secret). With openai, OpenAI
+ * transcribes, translates and speaks, the key coming from speech/.env;
+ * testing only. Otherwise Ollama translates and the environment names
+ * the local transcription and voice servers.
  */
-export async function ensureSpeech({ secret, openai }) {
+export async function ensureSpeech({ dir, secret, openai }) {
   const health = `http://127.0.0.1:${SPEECH_PORT}/healthz`
   if (await healthy(health)) {
     console.log(`speech service already running on :${SPEECH_PORT} (it must use the same SPEECH_SECRET as this run)`)
     return
   }
-  const python = join(repoRoot, 'speech/.venv/bin/python')
-  if (!existsSync(python)) throw new Error('no speech venv: run `just speech-setup` first')
-  const engines = openai
-    ? { TRANSLATE_PROVIDER: 'openai-compatible', TRANSCRIBE_PROVIDER: 'openai-compatible', ...DEMO_MODELS.openai }
-    : { TRANSLATE_PROVIDER: 'ollama', ...DEMO_MODELS.ollama }
+  const engines = { ...(openai ? DEMO_ENGINES.openai : DEMO_ENGINES.local) }
   for (const name of Object.keys(engines)) if (process.env[name]) engines[name] = process.env[name]
-  const fileEnv = openai ? speechEnvFile() : {}
+  const fileEnv = speechEnvFile()
   if (openai && !(process.env.OPENAI_API_KEY ?? fileEnv.OPENAI_API_KEY)) {
     throw new Error('put OPENAI_API_KEY=… in speech/.env (or the environment)')
   }
-  if (!openai && !(process.env.TRANSLATE_URL ?? process.env.OLLAMA_URL)) {
-    throw new Error('set TRANSLATE_URL (or OLLAMA_URL) to the Ollama endpoint that runs the translation model')
+  const missing = openai ? [] : LOCAL_SETTINGS.filter((name) => !(process.env[name] ?? fileEnv[name]))
+  if (missing.length > 0) {
+    throw new Error(
+      `set ${missing.join(', ')}: the local demo needs Ollama, a transcription server ` +
+        "(e.g. whisper.cpp's whisper-server) and an OpenAI-compatible voice server",
+    )
   }
 
-  console.log(`starting the speech service with ${openai ? 'OpenAI' : 'Ollama + local Whisper'}…`)
+  const bin = join(dir, 'speech')
+  run('go', ['build', '-o', bin, './cmd/speech'], repoRoot)
+  console.log(`starting the speech service with ${openai ? 'OpenAI' : 'your local engines'}…`)
   track(
-    spawn(python, ['-m', 'app'], {
-      cwd: join(repoRoot, 'speech'),
+    spawn(bin, [], {
       env: { ...fileEnv, ...process.env, ...engines, SPEECH_SECRET: secret, PORT: String(SPEECH_PORT) },
       stdio: 'inherit',
     }),
   )
-  await waitHealthy(health, 'the speech service', 180)
+  await waitHealthy(health, 'the speech service', 30)
 }
 
 /** Starts the built meeting server on loopback; returns its base URL. */
