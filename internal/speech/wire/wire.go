@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 )
 
 const headerLength = 2
@@ -81,10 +82,7 @@ func Pack(header any, pcm []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %d bytes", errHeaderTooLong, size)
 	}
 
-	frame := binary.BigEndian.AppendUint16(make([]byte, 0, headerLength+size+len(pcm)), uint16(size))
-	frame = append(frame, encoded...)
-
-	return append(frame, pcm...), nil
+	return slices.Concat(binary.BigEndian.AppendUint16(nil, uint16(size)), encoded, pcm), nil
 }
 
 // Unpack decodes a binary frame's header into header and returns its PCM16 samples.
