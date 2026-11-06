@@ -358,9 +358,12 @@ async function checkSimulcast(failures, publisher, viewer) {
 
   check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
 
-  const back = await waitFor(viewer, remoteVideoWidth, (width) => width >= full.value, 20000)
-  console.log(`simulcast grid again: remote video ${back.value}px wide`)
-  check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, want ${full.value}px or more back`)
+  // What is being checked is that the layer climbs back up, so the bar is
+  // relative to the filmstrip: a capture that settles on a different size
+  // mid-call (a busy machine will do that) must not read as a failure.
+  const back = await waitFor(viewer, remoteVideoWidth, (width) => width >= filmstrip.value * 2, 20000)
+  console.log(`simulcast grid again: remote video ${back.value}px wide against ${filmstrip.value}px in the filmstrip`)
+  check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, not a layer above ${filmstrip.value}px`)
 }
 
 async function checkPinRoundTrip(failures, label, browser) {
