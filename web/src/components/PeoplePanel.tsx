@@ -2,7 +2,9 @@ import { memo, type ReactNode } from 'react'
 import { Mic, MicOff, MonitorUp, MonitorX, UserX, Video, VideoOff } from 'lucide-react'
 
 import type { MemberInfo, ModerateAction } from '@/lib/sfu'
+import type { Language } from '@/lib/translate/languages'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
 interface PeoplePanelProps {
@@ -10,6 +12,10 @@ interface PeoplePanelProps {
   selfId: string
   canModerate: boolean
   onModerate: (target: string, action: ModerateAction) => void
+  /** Live-translation languages, for a host to set someone's; empty without translation. */
+  languages?: Language[]
+  memberLangs?: Record<string, string>
+  onSetLanguage?: (target: string, lang: string) => void
 }
 
 interface ActionButton {
@@ -33,6 +39,9 @@ export const PeoplePanel = memo(function PeoplePanel({
   selfId,
   canModerate,
   onModerate,
+  languages = [],
+  memberLangs = {},
+  onSetLanguage,
 }: PeoplePanelProps) {
   return (
     <ul className="h-full space-y-1 overflow-y-auto p-2">
@@ -79,6 +88,26 @@ export const PeoplePanel = memo(function PeoplePanel({
                     {label}
                   </Button>
                 ))}
+              </div>
+            )}
+            {canModerate && !self && onSetLanguage && languages.length > 0 && (
+              <div className="mt-2 flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">Language</span>
+                <Select value={memberLangs[member.id] ?? ''} onValueChange={(lang) => onSetLanguage(member.id, lang)}>
+                  <SelectTrigger
+                    className="h-7 min-w-0 flex-1 text-xs"
+                    aria-label={`${member.name}'s language for live translation`}
+                  >
+                    <SelectValue placeholder="Not set" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {languages.map((language) => (
+                      <SelectItem key={language.code} value={language.code}>
+                        {language.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             )}
           </li>

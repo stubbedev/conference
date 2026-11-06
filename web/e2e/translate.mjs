@@ -139,6 +139,19 @@ async function main() {
   const muted = await waitFor(guest, tileState('Hana'), (tile) => tile?.volume === 0, 5_000)
   check('guest muting', muted.ok, `the host's own voice is not muted for the guest: ${JSON.stringify(muted.value)}`)
 
+  // A guest who never chose a language starts in the browser's own one,
+  // and the join screen asks for it plainly.
+  const swede = await launchChrome(chrome, 3, dir, [`--use-file-for-fake-audio-capture=${join(fixtures, 'english.wav')}`, '--mute-audio', '--accept-lang=sv-SE,sv'])
+  procs.push(swede.proc)
+  await joinRoom(swede, room.url, null, async (browser) => {
+    const prompt = await waitFor(browser, `(() => {
+      const label = [...document.querySelectorAll('label')].find((l) => l.textContent.includes('Which language do you speak?'))
+      return label ? document.getElementById(label.htmlFor)?.textContent ?? '' : null
+    })()`, (picked) => picked === 'Swedish', 15_000)
+    check('browser language', prompt.ok, `the join screen did not start in the browser's language: ${JSON.stringify(prompt.value)}`)
+  })
+  await stopProcess(swede.proc)
+
   // The host leaves; translation stays on and a new English joiner gets
   // the guest's German speech in English from the guest's own browser.
   await stopProcess(host.proc)

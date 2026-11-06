@@ -11,12 +11,14 @@ interface TranslationSettingsProps {
   config: TranslationConfig
   prefs: LangPrefs
   onChange: (prefs: LangPrefs) => void
+  /** On the join screen: ask for the language plainly, since guests see it first there. */
+  prominent?: boolean
 }
 
 // The language this member speaks, and how translations of everyone else
 // reach them. Always shown; greyed out with what has to be set up first
 // while the speech service cannot translate.
-export function TranslationSettings({ config, prefs, onChange }: TranslationSettingsProps) {
+export function TranslationSettings({ config, prefs, onChange, prominent }: TranslationSettingsProps) {
   const disabled = !config.available
   // Until the server configuration is read there is no list, but the setting still shows.
   const languages = config.languages.length > 0 ? config.languages : [{ code: prefs.lang, name: 'Not available' }]
@@ -40,9 +42,15 @@ export function TranslationSettings({ config, prefs, onChange }: TranslationSett
         className={cn('flex min-w-0 flex-col gap-3', disabled && 'opacity-50')}
       >
         <div className="flex min-w-0 flex-col gap-1.5">
-          <Label htmlFor="my-language" className="text-xs text-muted-foreground">
-            My language
+          <Label
+            htmlFor="my-language"
+            className={prominent ? 'text-sm font-medium' : 'text-xs text-muted-foreground'}
+          >
+            {prominent ? 'Which language do you speak?' : 'My language'}
           </Label>
+          {prominent && (
+            <p className="text-xs text-muted-foreground">You hear and read everyone else in this language.</p>
+          )}
           <Select value={prefs.lang} onValueChange={(lang) => onChange({ ...prefs, lang })} disabled={disabled}>
             <SelectTrigger id="my-language" className="w-full">
               <span className="min-w-0 flex-1 truncate text-left">

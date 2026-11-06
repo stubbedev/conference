@@ -128,6 +128,8 @@ interface Events {
   'translate-token': { token: string }
   error: { code: string; text: string }
   forced: { action: ForcedAction }
+  /** A host set this member's live-translation language. */
+  'lang-set': { from: string; lang: string }
   kicked: Record<string, never>
   closed: Record<string, never>
 }
@@ -485,6 +487,12 @@ export class RoomClient {
     this.send({ type: 'moderate', target, action })
   }
 
+  /** Sets another member's live-translation language (host only); sealed like their own. */
+  async setMemberLanguage(target: string, lang: string): Promise<void> {
+    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify({ lang }))
+    this.send({ type: 'moderate', target, action: 'lang', iv: sealed.iv, ct: sealed.ct })
+  }
+
   // announceRecording claims (or releases) the room's recording badge.
   // The server arbitrates: host-only, one recorder, cleared if the
   // recorder drops. The denial arrives as an error event.
@@ -689,6 +697,10 @@ export class RoomClient {
         const action = msg.action
         if (action === 'mute' || action === 'cam' || action === 'screen') {
           this.emit('forced', { action })
+        } else if (action === 'lang') {
+          const sealed = await this.openSealed(msg)
+          const lang = (sealed as { lang?: unknown } | undefined)?.lang
+          if (msg.from && typeof lang === 'string') this.emit('lang-set', { from: msg.from, lang })
         }
         return
       }
