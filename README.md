@@ -184,10 +184,11 @@ anything older than five minutes.
 
 ### Live translation
 
-Everyone picks the language they speak before joining ("Which language
-do you speak?"; it starts in their browser's language) or in the
-settings, plus whether they want subtitles, a translated voice, and which
-voice others hear them in. They hear and read everyone else in that same
+Everyone picks the language they speak, under **Language and subtitles**
+before joining or in the settings; it starts in their browser's
+language, so most guests needn't touch it. There they also choose
+whether they want subtitles, a translated voice, and which voice others
+hear them in. They hear and read everyone else in that same
 language. A host can also set a participant's language from the
 participants list, e.g. for a guest who joined in the wrong one; the guest
 is told and can change it back. A host then turns on **Live translation**
