@@ -4,26 +4,49 @@
 // downstream — simulcast layers, the room, a local recording — follows
 // without knowing that blur exists.
 //
-// The composite runs at the capture's frame rate and the model is asked
-// less often, on a downscaled copy: a mask barely changes between frames,
-// a cut-out edge does not need more resolution than a face is wide, and
-// segmentation is by far the most expensive thing in a call with the
-// camera on.
+// The composite runs at the capture's frame rate and the model is asked as
+// often as the machine can afford within a budget, measured rather than
+// guessed: a mask is worth having on every frame, but never at the cost of
+// the picture that carries it.
 
-import { segmentEvery, writeMaskAlpha } from '@/lib/mask'
+import {
+  blurPlan,
+  featherRadius,
+  modelFor,
+  segmentCadence,
+  writeMaskAlpha,
+  type SegmentShape,
+} from '@/lib/mask'
 import type { Mask, Segmenter } from '@/lib/vision'
 
 /** How many frames a second the blurred camera publishes. */
 const FPS = 30
 
-/** How often per second the model is asked for a mask. */
-const SEGMENT_FPS = 15
-
 /** The model's input is this many pixels across, whatever the camera gives. */
 const SEGMENT_LONG_EDGE = 256
 
-/** The background is blurred by shrinking it this much and scaling it back up. */
-const BLUR_DOWNSCALE = 8
+/** How much a new measurement moves the estimate of what a mask costs. */
+const SEGMENT_SMOOTHING = 0.3
+
+/**
+ * The background is blurred at this fraction of the frame's size: a
+ * Gaussian that large costs real time per pixel, and a fraction of it
+ * still reads as a room out of focus once it is scaled back up.
+ */
+const BLUR_DOWNSCALE = 2
+
+/**
+ * How far a plain bilinear upscale has to shrink the background instead,
+ * for browsers that cannot draw with a filter: the picture is drawn this
+ * much smaller and scaled back up, which is the coarse version of the
+ * same idea.
+ */
+const FILTERLESS_DOWNSCALE = 8
+
+export interface BlurOptions {
+  /** Called once when the model cannot start at all on this machine. */
+  onUnavailable?: (err: unknown) => void
+}
 
 export interface BlurPipeline {
   /** The track to publish instead of the camera's own. */
@@ -54,19 +77,24 @@ class CanvasBlur implements BlurPipeline {
   private readonly subjectCtx = context(this.subject, true)
   private readonly segmentCtx = context(this.segmentInput, false)
   private readonly maskCtx = context(this.maskCanvas, true)
-  private readonly segmenter: Segmenter
+  private readonly options: BlurOptions
   private readonly stream: MediaStream
-  private readonly every: number
+  private readonly canFilter: boolean
+  private plan = blurPlan(1, 1)
+  private segmenter: Segmenter | null = null
+  private segmentShape: SegmentShape | null = null
+  private segmentRequested: SegmentShape | null = null
+  private segmentMs = 0
+  private frames = 0
   private mask: Mask | null = null
   private maskImage: ImageData | null = null
-  private frames = 0
   private frameRequest = 0
   private timer = 0
   private stopped = false
 
-  constructor(source: MediaStreamTrack, segmenter: Segmenter) {
-    this.segmenter = segmenter
-    this.every = segmentEvery(FPS, SEGMENT_FPS)
+  constructor(source: MediaStreamTrack, options: BlurOptions) {
+    this.options = options
+    this.canFilter = 'filter' in this.backgroundCtx
 
     this.video.muted = true
     this.video.playsInline = true
@@ -129,7 +157,10 @@ class CanvasBlur implements BlurPipeline {
 
     this.resize(width, height)
 
-    if (this.frames % this.every === 0) this.mask = this.segment(width, height)
+    const shape = modelFor(width, height)
+    if (this.segmentShape !== shape) this.useModel(shape)
+
+    if (this.segmenter && this.segmentShape === shape) this.segmentIfDue(width, height)
     this.frames += 1
 
     if (!this.mask) {
@@ -138,14 +169,42 @@ class CanvasBlur implements BlurPipeline {
       return
     }
 
-    this.backgroundCtx.drawImage(this.video, 0, 0, this.background.width, this.background.height)
-
-    this.outputCtx.imageSmoothingEnabled = true
-    this.outputCtx.imageSmoothingQuality = 'high'
-    this.outputCtx.drawImage(this.background, 0, 0, this.background.width, this.background.height, 0, 0, width, height)
-
+    this.paintBackground(width, height)
     this.paintSubject(width, height)
     this.outputCtx.drawImage(this.subject, 0, 0)
+  }
+
+  private useModel(shape: SegmentShape): void {
+    this.mask = null
+    if (this.segmentRequested === shape) return
+
+    this.segmentRequested = shape
+    void loadSegmenterFor(shape).then(
+      (segmenter) => {
+        if (this.stopped) return
+
+        this.segmenter = segmenter
+        this.segmentShape = shape
+        this.segmentRequested = null
+      },
+      (err: unknown) => {
+        this.segmentRequested = null
+        if (this.stopped) return
+
+        this.options.onUnavailable?.(err)
+      },
+    )
+  }
+
+  private segmentIfDue(width: number, height: number): void {
+    const cadence = segmentCadence(this.segmentMs, 1000 / FPS)
+    if (this.frames % cadence !== 0) return
+
+    const started = performance.now()
+    this.mask = this.segment(width, height)
+    const took = performance.now() - started
+
+    this.segmentMs = this.segmentMs === 0 ? took : this.segmentMs * (1 - SEGMENT_SMOOTHING) + took * SEGMENT_SMOOTHING
   }
 
   private segment(width: number, height: number): Mask | null {
@@ -154,7 +213,29 @@ class CanvasBlur implements BlurPipeline {
     this.segmentInput.height = Math.max(1, Math.round(height * scale))
     this.segmentCtx.drawImage(this.video, 0, 0, this.segmentInput.width, this.segmentInput.height)
 
-    return this.segmenter.confidence(this.segmentInput, performance.now())
+    return this.segmenter?.confidence(this.segmentInput, performance.now()) ?? null
+  }
+
+  private paintBackground(width: number, height: number): void {
+    this.backgroundCtx.imageSmoothingEnabled = true
+    this.backgroundCtx.imageSmoothingQuality = 'high'
+    this.backgroundCtx.filter = this.canFilter ? `blur(${this.plan.radius}px)` : 'none'
+    this.backgroundCtx.drawImage(this.video, this.plan.pad, this.plan.pad, this.plan.width, this.plan.height)
+    this.backgroundCtx.filter = 'none'
+
+    this.outputCtx.imageSmoothingEnabled = true
+    this.outputCtx.imageSmoothingQuality = 'high'
+    this.outputCtx.drawImage(
+      this.background,
+      this.plan.pad,
+      this.plan.pad,
+      this.plan.width,
+      this.plan.height,
+      0,
+      0,
+      width,
+      height,
+    )
   }
 
   private paintSubject(width: number, height: number): void {
@@ -171,7 +252,11 @@ class CanvasBlur implements BlurPipeline {
     this.subjectCtx.globalCompositeOperation = 'destination-in'
     this.subjectCtx.imageSmoothingEnabled = true
     this.subjectCtx.imageSmoothingQuality = 'high'
+    // The fade is drawn with the mask, so the person's edge meets the room
+    // over a few pixels instead of on a line the eye can follow.
+    this.subjectCtx.filter = this.canFilter ? `blur(${featherRadius(width)}px)` : 'none'
     this.subjectCtx.drawImage(this.maskCanvas, 0, 0, mask.width, mask.height, 0, 0, width, height)
+    this.subjectCtx.filter = 'none'
     this.subjectCtx.globalCompositeOperation = 'source-over'
   }
 
@@ -194,15 +279,27 @@ class CanvasBlur implements BlurPipeline {
 
     this.output.width = width
     this.output.height = height
-    this.background.width = Math.max(1, Math.round(width / BLUR_DOWNSCALE))
-    this.background.height = Math.max(1, Math.round(height / BLUR_DOWNSCALE))
     this.subject.width = width
     this.subject.height = height
+
+    this.plan = blurPlan(width, height, this.canFilter ? BLUR_DOWNSCALE : FILTERLESS_DOWNSCALE)
+    this.background.width = this.plan.width + 2 * this.plan.pad
+    this.background.height = this.plan.height + 2 * this.plan.pad
   }
 }
 
-export function startBlur(source: MediaStreamTrack, segmenter: Segmenter): BlurPipeline {
-  return new CanvasBlur(source, segmenter)
+let loader: typeof import('@/lib/vision').loadSegmenter | null = null
+
+// loadSegmenterFor keeps the vision module out of the initial bundle: the
+// runtime is megabytes of WebAssembly that most calls never need.
+async function loadSegmenterFor(shape: SegmentShape): Promise<Segmenter> {
+  loader ??= (await import('@/lib/vision')).loadSegmenter
+
+  return loader(shape)
+}
+
+export function startBlur(source: MediaStreamTrack, options: BlurOptions = {}): BlurPipeline {
+  return new CanvasBlur(source, options)
 }
 
 /** Whether this browser can publish a canvas track at all. */

@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
-  Aperture,
+  ScanFace,
   Circle,
   Languages,
   Maximize2,
@@ -163,7 +163,7 @@ export const ControlsBar = memo(function ControlsBar({
             aria-pressed={blur}
             disabled={!cam}
           >
-            <Aperture />
+            <ScanFace />
           </Button>
         </Hint>
       )}

@@ -60,7 +60,6 @@ import {
 import { Button } from '@/components/ui/button'
 import { ChatPanel } from '@/components/ChatPanel'
 import { blurSupported, startBlur, type BlurPipeline } from '@/lib/blur'
-import { loadSegmenter } from '@/lib/vision'
 import { ControlsBar } from '@/components/ControlsBar'
 import { DeviceSettingsPopover } from '@/components/MediaSettings'
 import { Hint } from '@/components/Hint'
@@ -410,8 +409,23 @@ export default function Room() {
   // The camera's outbound track: the capture itself, or the blurred
   // composite of it. The pipeline is built the first time blur is needed
   // and pointed at whatever capture is live from then on.
+  // One message for a machine that cannot run the model at all, and the
+  // switch goes back where it was: a camera that silently ignores the
+  // toggle is worse than one that says why.
+  const blurFailed = useCallback(
+    (err: unknown) => {
+      console.error('blur: starting the background blur', err)
+      blurIntentRef.current = false
+      updateDevicePrefs({ blur: false })
+      blurPipelineRef.current?.stop()
+      blurPipelineRef.current = null
+      toast.error('Background blur is unavailable here, so your camera goes out as it is.')
+    },
+    [updateDevicePrefs],
+  )
+
   const cameraTrackFor = useCallback(
-    async (raw: MediaStreamTrack, blur: boolean): Promise<MediaStreamTrack> => {
+    (raw: MediaStreamTrack, blur: boolean): MediaStreamTrack => {
       if (!blur) {
         blurPipelineRef.current?.stop()
         blurPipelineRef.current = null
@@ -420,22 +434,18 @@ export default function Room() {
       }
 
       try {
-        const segmenter = await loadSegmenter()
-        const pipeline = blurPipelineRef.current ?? startBlur(raw, segmenter)
+        const pipeline = blurPipelineRef.current ?? startBlur(raw, { onUnavailable: blurFailed })
         blurPipelineRef.current = pipeline
         pipeline.rewire(raw)
 
         return pipeline.track
       } catch (err) {
-        console.error('blur: starting the background blur', err)
-        toast.error('Background blur is unavailable here, so your camera goes out as it is.')
-        blurIntentRef.current = false
-        updateDevicePrefs({ blur: false })
+        blurFailed(err)
 
         return raw
       }
     },
-    [updateDevicePrefs],
+    [blurFailed],
   )
 
   // publishCamera swaps the track this member sends as its camera, keeping
@@ -470,7 +480,7 @@ export default function Room() {
     const raw = rawCamRef.current
     if (!raw) return
 
-    await publishCamera(await cameraTrackFor(raw, next))
+    await publishCamera(cameraTrackFor(raw, next))
   }, [cameraTrackFor, publishCamera, updateDevicePrefs])
 
   const acquireMedia = useCallback(async () => {
@@ -538,7 +548,7 @@ export default function Room() {
       if (camTrack) camTrack.enabled = controlsRef.current.cam
 
       rawCamRef.current = camTrack
-      const outboundCam = camTrack ? await cameraTrackFor(camTrack, blurIntentRef.current) : null
+      const outboundCam = camTrack ? cameraTrackFor(camTrack, blurIntentRef.current) : null
 
       stopMediaStream(localStreamRef.current)
       const stream = new MediaStream([outboundMic, outboundCam].filter(Boolean) as MediaStreamTrack[])
@@ -1251,7 +1261,7 @@ export default function Room() {
         }
       } else {
         rawCamRef.current = track
-        outbound = await cameraTrackFor(track, blurIntentRef.current)
+        outbound = cameraTrackFor(track, blurIntentRef.current)
       }
 
       const current = localStreamRef.current

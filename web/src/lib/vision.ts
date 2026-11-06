@@ -8,7 +8,13 @@
 
 import type { ImageSegmenter, ImageSource } from '@mediapipe/tasks-vision'
 
-const MODEL_PATH = `${import.meta.env.BASE_URL}vision/selfie_segmenter.tflite`
+import type { SegmentShape } from '@/lib/mask'
+
+const MODELS: Record<SegmentShape, string> = {
+  landscape: `${import.meta.env.BASE_URL}vision/selfie_segmenter_landscape.tflite`,
+  square: `${import.meta.env.BASE_URL}vision/selfie_segmenter.tflite`,
+}
+
 const WASM_PATH = `${import.meta.env.BASE_URL}vision/wasm`
 
 export interface Mask {
@@ -23,13 +29,16 @@ export interface Segmenter {
   close(): void
 }
 
-async function create(): Promise<Segmenter> {
+/** Which model suits a camera of this shape. */
+export { modelFor, type SegmentShape } from '@/lib/mask'
+
+async function create(shape: SegmentShape): Promise<Segmenter> {
   const { FilesetResolver, ImageSegmenter: SegmenterClass } = await import('@mediapipe/tasks-vision')
 
   const fileset = await FilesetResolver.forVisionTasks(WASM_PATH)
   const open = (delegate: 'GPU' | 'CPU'): Promise<ImageSegmenter> =>
     SegmenterClass.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+      baseOptions: { modelAssetPath: MODELS[shape], delegate },
       runningMode: 'VIDEO',
       outputConfidenceMasks: true,
       outputCategoryMask: false,
@@ -64,17 +73,22 @@ async function create(): Promise<Segmenter> {
   }
 }
 
-let loading: Promise<Segmenter> | null = null
+const loading = new Map<SegmentShape, Promise<Segmenter>>()
 
 /**
- * loadSegmenter returns the shared segmenter, loading the runtime and the
- * model the first time background blur is switched on.
+ * loadSegmenter returns the shared segmenter built for that camera shape,
+ * loading the runtime and the model the first time it is asked for.
  */
-export function loadSegmenter(): Promise<Segmenter> {
-  loading ??= create().catch((err: unknown) => {
-    loading = null
+export function loadSegmenter(shape: SegmentShape): Promise<Segmenter> {
+  const known = loading.get(shape)
+  if (known) return known
+
+  const pending = create(shape).catch((err: unknown) => {
+    loading.delete(shape)
     throw err
   })
 
-  return loading
+  loading.set(shape, pending)
+
+  return pending
 }

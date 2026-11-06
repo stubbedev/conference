@@ -1,7 +1,13 @@
 // Copies what background blur needs into web/public/vision, which is not
 // committed: the runtime comes from the installed @mediapipe/tasks-vision
-// package, and the segmentation model is a small Apache-2.0 file from
+// package, and the segmentation models are small Apache-2.0 files from
 // MediaPipe's own model registry.
+//
+// There are two models because the input shape is fixed at build time in
+// the model: the landscape one takes a 256x144 picture, which is exactly
+// the shape of a phone held sideways or a laptop camera, and a person
+// squeezed from 16:9 into a square is a person the model segments worse.
+// Portrait cameras get the square one.
 
 import { createHash } from 'node:crypto'
 import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
@@ -12,10 +18,20 @@ const OUT = path.join(ROOT, 'public', 'vision')
 const WASM_OUT = path.join(OUT, 'wasm')
 const PACKAGE_WASM = path.join(ROOT, 'node_modules', '@mediapipe', 'tasks-vision', 'wasm')
 
-const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite'
-const MODEL_SHA256 = '191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b'
-const MODEL_FILE = path.join(OUT, 'selfie_segmenter.tflite')
+const REGISTRY = 'https://storage.googleapis.com/mediapipe-models/image_segmenter'
+
+const MODELS = [
+  {
+    file: 'selfie_segmenter_landscape.tflite',
+    url: `${REGISTRY}/selfie_segmenter_landscape/float16/1/selfie_segmenter_landscape.tflite`,
+    sha256: '490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e',
+  },
+  {
+    file: 'selfie_segmenter.tflite',
+    url: `${REGISTRY}/selfie_segmenter/float16/1/selfie_segmenter.tflite`,
+    sha256: '191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b',
+  },
+]
 
 const WASM_FILES = ['vision_wasm_internal.js', 'vision_wasm_internal.wasm']
 
@@ -40,28 +56,26 @@ async function copyWasm() {
   }
 }
 
-async function downloadModel() {
-  if (await exists(MODEL_FILE)) {
-    const digest = createHash('sha256')
-      .update(await readFile(MODEL_FILE))
-      .digest('hex')
-    if (digest === MODEL_SHA256) return
-  }
+const digestOf = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
-  const response = await fetch(MODEL_URL)
+async function downloadModel({ file, url, sha256 }) {
+  const target = path.join(OUT, file)
+  if ((await exists(target)) && digestOf(await readFile(target)) === sha256) return
+
+  const response = await fetch(url)
   if (!response.ok) {
-    throw new Error(`cannot download the segmentation model: ${response.status} from ${MODEL_URL}`)
+    throw new Error(`cannot download ${file}: ${response.status} from ${url}`)
   }
 
   const bytes = Buffer.from(await response.arrayBuffer())
-  const digest = createHash('sha256').update(bytes).digest('hex')
-  if (digest !== MODEL_SHA256) {
-    throw new Error(`the segmentation model from ${MODEL_URL} has sha256 ${digest}, expected ${MODEL_SHA256}`)
+  const digest = digestOf(bytes)
+  if (digest !== sha256) {
+    throw new Error(`${url} has sha256 ${digest}, expected ${sha256}`)
   }
 
-  await writeFile(MODEL_FILE, bytes)
+  await writeFile(target, bytes)
 }
 
 await mkdir(WASM_OUT, { recursive: true })
 await copyWasm()
-await downloadModel()
+for (const model of MODELS) await downloadModel(model)

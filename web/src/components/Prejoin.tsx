@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { Aperture, Loader2, Mic, MicOff, RotateCcw, ShieldCheck, Video, VideoOff } from 'lucide-react'
+import { ScanFace, Loader2, Mic, MicOff, RotateCcw, ShieldCheck, Video, VideoOff } from 'lucide-react'
 
 import { FALLBACK_ASPECT_RATIO } from '@/hooks/media'
 import { Button } from '@/components/ui/button'
@@ -120,7 +120,7 @@ export function Prejoin({
                       disabled={!cam}
                       onClick={onToggleBlur}
                     >
-                      <Aperture />
+                      <ScanFace />
                     </Button>
                   </Hint>
                 )}

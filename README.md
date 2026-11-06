@@ -293,12 +293,17 @@ an external service".
 - Background blur runs in the browser, before the camera is published:
   MediaPipe's selfie segmentation model, served from this app
   (`/vision/`) rather than a CDN, composited at the capture's frame rate
-  over a blurred copy of the same frame. The runtime and the model are
-  fetched the first time blur is switched on and cached by the browser
-  afterwards; nothing about the camera leaves the machine, and the SFU
-  only ever relays the composited picture. That is about 15 MB of assets
-  in the binary, which is the price of not sending a face to a model
-  somebody else runs.
+  over a blurred copy of the same frame. There are two models, landscape
+  and square, and the one whose fixed input matches the camera's shape is
+  the one that runs: a person squeezed from 16:9 into a square is a
+  person the model segments worse. Segmentation is asked for as often as
+  the machine can afford within half of each frame's time, and the
+  person's edge is feathered so the cut-out does not look pasted on. The
+  runtime and the models are fetched the first time blur is switched on
+  and cached by the browser afterwards; nothing about the camera leaves
+  the machine, and the SFU only ever relays the composited picture. That
+  is about 15 MB of assets in the binary, which is the price of not
+  sending a face to a model somebody else runs.
 
 </details>
 
