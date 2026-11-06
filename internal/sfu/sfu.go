@@ -1195,7 +1195,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		}
 
 		down.sends[track.mid] = &downSend{local: local, kind: track.kind}
-		track.addViewer(m.ID, local, m.layerPreference(sourceID))
+		track.addViewer(m.ID, local, m.layerPreference(sourceID), publishCeilingBps(m.room.cfg.MaxPublishKbps))
 		down.watchFeedback(transceiver.Sender(), m, track)
 	})
 
@@ -1412,9 +1412,18 @@ type upViewer struct {
 // is low, multiplicative decrease on loss, clamped by whatever REMB the
 // viewer itself reports.
 type viewerRate struct {
-	mu   sync.Mutex
-	loss uint64 // bps, AIMD estimate from receiver reports
-	remb uint64 // bps cap from the viewer's REMB, 0 = none seen
+	mu    sync.Mutex
+	start uint64 // bps before the first loss report
+	loss  uint64 // bps, AIMD estimate from receiver reports
+	remb  uint64 // bps cap from the viewer's REMB, 0 = none seen
+}
+
+// newViewerRate starts a viewer at the publisher ceiling rather than at
+// a guess: a single-layer stream (a screen share) has no lower layer to
+// adapt to, so the only useful starting point is everything the uplink
+// may use, and real loss walks it down from there.
+func newViewerRate(start uint64) viewerRate {
+	return viewerRate{mu: sync.Mutex{}, start: start, loss: 0, remb: 0}
 }
 
 // Galène's loss-controller tuning: receiver-report fraction-lost
@@ -1428,14 +1437,20 @@ const (
 	lossScale        = 512
 )
 
+// estimate is the current rate; callers hold vr.mu.
+func (vr *viewerRate) estimate() uint64 {
+	if vr.loss >= minViewerBitrate {
+		return vr.loss
+	}
+
+	return max(vr.start, initViewerBitrate)
+}
+
 func (vr *viewerRate) updateLoss(fractionLost uint8) {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 
-	rate := vr.loss
-	if rate < minViewerBitrate {
-		rate = initViewerBitrate
-	}
+	rate := vr.estimate()
 
 	if fractionLost < lowLossFraction {
 		rate = rate * rateGainNum / rateGainDen
@@ -1462,10 +1477,7 @@ func (vr *viewerRate) max() uint64 {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 
-	rate := vr.loss
-	if rate < minViewerBitrate {
-		rate = initViewerBitrate
-	}
+	rate := vr.estimate()
 
 	if vr.remb != 0 && vr.remb < rate {
 		rate = vr.remb
@@ -1645,7 +1657,7 @@ func (ut *UpTrack) setViewerPreference(viewerID string, layer int) {
 
 // addViewer starts forwarding to a viewer. A single-layer track flows
 // at once; a simulcast viewer starts at its first target keyframe.
-func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int) {
+func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int, ceiling uint64) {
 	ut.mu.Lock()
 
 	if viewer := ut.viewers[viewerID]; viewer != nil {
@@ -1664,7 +1676,7 @@ func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int
 	}
 
 	viewer := &upViewer{
-		local: local, rate: viewerRate{mu: sync.Mutex{}, loss: 0, remb: 0},
+		local: local, rate: newViewerRate(ceiling),
 		mu: sync.Mutex{}, current: current, target: current, preferred: preferred,
 		steps: newLadder(), mung: newMunger(), buf: nil,
 	}
