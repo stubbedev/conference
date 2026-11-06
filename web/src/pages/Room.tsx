@@ -94,6 +94,7 @@ const LOCAL_SOURCE = 'local'
 const NO_PIN = 'none'
 const RECOVER_BACKOFF_MS = 5000
 const RECONNECT_TOAST = 'reconnect'
+const RECORDING_HIDDEN_TOAST = 'recording-hidden'
 const TRANSLATION_KIND_PREFIX = 'translation-'
 // A final subtitle stays up this long; an interim one that never got its
 // final (the speaker trailed off) is dropped after the longer hold.
@@ -1507,6 +1508,26 @@ export default function Room() {
     if (!recording) return
     recorderRef.current?.setTiles(recorderTiles)
   }, [recording, recorderTiles])
+
+  // A hidden tab records a slideshow: browsers throttle a page's capture
+  // pipeline to about a frame a second once it is out of sight, sound
+  // keeps flowing, and no compositor can talk them out of it. Say so the
+  // first time it happens rather than let someone discover it in the file.
+  useEffect(() => {
+    if (!recording) return
+
+    const onVisibility = () => {
+      if (document.visibilityState !== 'hidden') return
+
+      toast('Recording continues, but the video slows to about one frame a second while this tab is in the background.', {
+        id: RECORDING_HIDDEN_TOAST,
+      })
+    }
+
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [recording])
 
   // The recording plays as one conversation in the recorder's language:
   // other-language speakers are left out of the mix (above) and each
