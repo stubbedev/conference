@@ -5,6 +5,7 @@
 // the SFU relays ciphertext it cannot decode, let alone record.
 
 import { audioContext, playMediaElement } from '@/hooks/media'
+import { withDuration } from './webm.ts'
 
 export interface RecorderTile {
   key: string
@@ -22,6 +23,10 @@ const CANVAS_HEIGHT = 720
 const CANVAS_FPS = 30
 const CHUNK_MS = 4000
 const LABEL_FONT = '500 16px system-ui, sans-serif'
+// The Info element that carries the duration sits at the very start of
+// the file, well inside this window; the rest is copied, never parsed.
+const DURATION_HEAD_BYTES = 256 * 1024
+const COPY_CHUNK_BYTES = 8 * 1024 * 1024
 
 // Safari's MediaRecorder cannot produce WebM and rejects it outright;
 // Chrome and Firefox prefer it. Whatever container actually comes out
@@ -123,6 +128,7 @@ export class CallRecorder {
   private paintTimer = 0
   private lastPaint = 0
   private endedReason = ''
+  private startedAt = 0
   private finishing: Promise<void> | null = null
   private stopped: (() => void) | null = null
 
@@ -245,6 +251,7 @@ export class CallRecorder {
     await this.openSink()
 
     this.recorder.start(CHUNK_MS)
+    this.startedAt = performance.now()
     this.pumpFrames()
     // rAF stops entirely in hidden tabs, which would freeze the picture
     // in a background recording for as long as the tab stays hidden;
@@ -353,20 +360,78 @@ export class CallRecorder {
         await sink.writing.catch(() => {})
         await sink.writable.close()
         const file = await sink.handle.getFile()
-        if (file.size > 0) saveFile(file, this.filename)
-        // The download carries the bytes now; drop the origin-private
-        // copy so a recording never lives twice. Delayed long enough
-        // that the download's read has certainly finished.
-        const root = this.storageRoot
-        const name = this.filename
-        window.setTimeout(() => {
-          void root?.removeEntry(name).catch(() => {})
-        }, 10_000)
+        if (file.size > 0) {
+          const { blob, temporary } = await this.recordingWithDuration(file, mime)
+          saveFile(blob, this.filename)
+          // The download carries the bytes now; drop the origin-private
+          // copies so a recording never lives twice. Delayed long enough
+          // that the download's read has certainly finished.
+          const root = this.storageRoot
+          const names = temporary ? [this.filename, temporary] : [this.filename]
+          window.setTimeout(() => {
+            for (const name of names) void root?.removeEntry(name).catch(() => {})
+          }, 10_000)
+        }
       } else if (sink && sink.chunks.length > 0) {
-        saveFile(new Blob(sink.chunks, { type: mime || 'video/webm' }), this.filename)
+        const file = new Blob(sink.chunks, { type: mime || 'video/webm' })
+        const head = await this.headWithDuration(file, mime)
+        saveFile(head ? new Blob([head.bytes, file.slice(head.consumed)]) : file, this.filename)
       }
     } finally {
       this.dispose()
+    }
+  }
+
+  // headWithDuration rewrites the first bytes of the recording so they
+  // carry its length, and reports how many bytes of the original file
+  // those replace: inserting the Duration makes the head longer than what
+  // was read, and the tail must start where the head began.
+  private async headWithDuration(
+    blob: Blob,
+    mime?: string,
+  ): Promise<{ bytes: Uint8Array<ArrayBuffer>; consumed: number } | null> {
+    if (!(mime ?? blob.type).includes('webm')) return null
+    if (typeof blob.slice !== 'function') {
+      console.warn('recorder: this browser cannot read the recording back in slices, so it is saved without a duration')
+      return null
+    }
+    try {
+      const head = new Uint8Array(await blob.slice(0, DURATION_HEAD_BYTES).arrayBuffer())
+      const bytes = withDuration(head, this.startedAt > 0 ? performance.now() - this.startedAt : 0)
+      return { bytes, consumed: head.length }
+    } catch (err) {
+      console.warn('recorder: giving the recording a duration, keeping the file as recorded', err)
+      return null
+    }
+  }
+
+  // recordingWithDuration writes the patched head and then the untouched
+  // tail into a second origin-private file, so an hour-long recording is
+  // never held in memory and the download streams from disk.
+  private async recordingWithDuration(
+    file: File,
+    mime?: string,
+  ): Promise<{ blob: Blob; temporary: string | null }> {
+    const head = await this.headWithDuration(file, mime)
+    const root = this.storageRoot
+    if (!head || !root) return { blob: file, temporary: null }
+    const temporary = `${this.filename}.duration`
+    try {
+      const handle = await root.getFileHandle(temporary, { create: true })
+      const writable = await handle.createWritable()
+      try {
+        await writable.write(head.bytes)
+        for (let offset = head.consumed; offset < file.size; offset += COPY_CHUNK_BYTES) {
+          await writable.write(file.slice(offset, Math.min(offset + COPY_CHUNK_BYTES, file.size)))
+        }
+      } finally {
+        await writable.close()
+      }
+      return { blob: await handle.getFile(), temporary }
+    } catch (err) {
+      console.warn('recorder: writing the recording with its duration to disk, keeping the file as recorded', err)
+      await root.removeEntry(temporary).catch(() => {})
+      return { blob: file, temporary: null }
     }
   }
 
@@ -578,6 +643,7 @@ export class CallRecorder {
     for (const track of this.canvasStream?.getTracks() ?? []) track.stop()
     this.canvasStream = null
     this.recorder = null
+    this.startedAt = 0
     this.stopped = null
   }
 }
