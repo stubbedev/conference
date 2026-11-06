@@ -14,6 +14,7 @@ import {
   featherRadius,
   modelFor,
   segmentCadence,
+  stabiliseMask,
   writeMaskAlpha,
   type SegmentShape,
 } from '@/lib/mask'
@@ -87,6 +88,8 @@ class CanvasBlur implements BlurPipeline {
   private segmentMs = 0
   private frames = 0
   private mask: Mask | null = null
+  private maskBuffers: [Float32Array, Float32Array] | null = null
+  private maskBuffer = 0
   private maskImage: ImageData | null = null
   private frameRequest = 0
   private timer = 0
@@ -110,6 +113,8 @@ class CanvasBlur implements BlurPipeline {
   }
 
   rewire(source: MediaStreamTrack): void {
+    this.mask = null
+    this.maskBuffers = null
     this.video.srcObject = new MediaStream([source])
     void this.video.play().catch(() => {})
   }
@@ -201,10 +206,34 @@ class CanvasBlur implements BlurPipeline {
     if (this.frames % cadence !== 0) return
 
     const started = performance.now()
-    this.mask = this.segment(width, height)
+    const fresh = this.segment(width, height)
     const took = performance.now() - started
 
+    if (fresh) this.mask = this.stabilise(fresh)
+
     this.segmentMs = this.segmentMs === 0 ? took : this.segmentMs * (1 - SEGMENT_SMOOTHING) + took * SEGMENT_SMOOTHING
+  }
+
+  // stabilise decides each pixel against the mask before it, alternating
+  // between two buffers so nothing is allocated per mask. A pixel the model
+  // is unsure about keeps the side it was on, which is what stops a
+  // high-contrast spot of the room from flashing sharp between masks.
+  private stabilise(mask: Mask): Mask {
+    const length = mask.values.length
+    if (!this.maskBuffers || this.maskBuffers[0].length !== length) {
+      this.maskBuffers = [new Float32Array(length), new Float32Array(length)]
+      stabiliseMask(this.maskBuffers[0], null, mask.values)
+      this.maskBuffer = 0
+
+      return { values: this.maskBuffers[0], width: mask.width, height: mask.height }
+    }
+
+    const previous = this.maskBuffers[this.maskBuffer]
+    const next = this.maskBuffers[1 - this.maskBuffer]
+    stabiliseMask(next, previous, mask.values)
+    this.maskBuffer = 1 - this.maskBuffer
+
+    return { values: next, width: mask.width, height: mask.height }
   }
 
   private segment(width: number, height: number): Mask | null {

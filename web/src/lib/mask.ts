@@ -1,18 +1,54 @@
 // Turning a segmentation mask into something a canvas can composite. The
-// model gives one confidence per pixel of a small mask; the edges are
-// what decide whether a blurred background looks like a bad cut-out or
-// like a room out of focus, so the ramp between "person" and "not" is
-// narrow enough to keep a background object from lingering as a ghost,
-// and the upscale does the feathering.
+// model gives one confidence per pixel of a small mask; what decides
+// whether a blurred background reads as a room out of focus or as a bad
+// cut-out is how sure a pixel has to be before it is kept sharp. The
+// model answers a little differently for the same still scene from frame
+// to frame, so a pixel is only allowed to change sides when the model is
+// sure, and keeps the side it was on while the model is not: that is what
+// stops a dark spot of the room from flickering in and out of the picture.
 
-/** Confidence below which a pixel is background, and above which it is person. */
-export const MASK_LOW = 0.35
-export const MASK_HIGH = 0.75
+/**
+ * Confidence at which a pixel becomes the person, and the one below which it
+ * stops being the person. The gap between them is what a pixel on the
+ * boundary sits in, unchanged, mask after mask.
+ */
+export const MASK_HIGH = 0.6
+export const MASK_LOW = 0.4
 
 function smoothstep(low: number, high: number, value: number): number {
   const t = Math.min(1, Math.max(0, (value - low) / (high - low)))
 
   return t * t * (3 - 2 * t)
+}
+
+/**
+ * stabiliseMask writes this mask's decision per pixel into state, and
+ * returns state. A pixel becomes the person when the model is confident it
+ * is one, and stops being the person when the model is confident it is
+ * not; in between it keeps the side it was on. The first mask, and one of
+ * a different size, are decided on their own merits.
+ *
+ * The state is what the picture is composited from, so a spot the model is
+ * unsure about is blurred once and stays blurred, instead of flashing
+ * sharp for a frame whenever the model's answer drifts. The first mask a
+ * pixel is seen in decides it the same way: unsure means blurred.
+ */
+export function stabiliseMask(
+  state: Float32Array,
+  previous: Float32Array | null,
+  confidence: ArrayLike<number>,
+  low = MASK_LOW,
+  high = MASK_HIGH,
+): Float32Array {
+  const fresh = !previous || previous.length !== state.length || state.length !== confidence.length
+
+  for (let index = 0; index < state.length; index += 1) {
+    const value = confidence[index] ?? 0
+    const wasPerson = !fresh && (previous[index] ?? 0) > 0.5
+    state[index] = value >= high || (value > low && wasPerson) ? 1 : 0
+  }
+
+  return state
 }
 
 /**

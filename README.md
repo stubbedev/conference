@@ -297,8 +297,11 @@ an external service".
   and square, and the one whose fixed input matches the camera's shape is
   the one that runs: a person squeezed from 16:9 into a square is a
   person the model segments worse. Segmentation is asked for as often as
-  the machine can afford within half of each frame's time, and the
-  person's edge is feathered so the cut-out does not look pasted on. The
+  the machine can afford within half of each frame's time; a pixel only
+  changes sides between person and background when the model is sure, so
+  a high-contrast spot of the room is blurred once and stays blurred
+  instead of flickering; and the person's edge is feathered so the
+  cut-out does not look pasted on. The
   runtime and the models are fetched the first time blur is switched on
   and cached by the browser afterwards; nothing about the camera leaves
   the machine, and the SFU only ever relays the composited picture. That
