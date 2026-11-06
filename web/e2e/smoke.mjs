@@ -17,7 +17,7 @@
 // held on every browser.
 import { spawn, spawnSync } from 'node:child_process'
 import { createSocket } from 'node:dgram'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,6 +30,7 @@ import {
   evalJs,
   findChrome,
   freePort,
+  hook,
   joinRoom,
   launchChrome,
   sleep,
@@ -149,6 +150,100 @@ function maxVolume(file) {
 }
 
 const recordingBadgePresent = `(() => { const h = document.querySelector('header'); return Boolean(h && [...h.querySelectorAll('span')].some(s => s.textContent.trim() === 'Recording')); })()`
+
+// A camera whose pixels change at random from frame to frame: what a test
+// needs to see a blur at all, since a picture of a flat wall looks the
+// same blurred or sharp. Written here rather than shot with ffmpeg so the
+// check depends on nothing but node.
+function writeNoiseVideo(file, { width = 320, height = 240, frames = 30, rate = 30 } = {}) {
+  const frame = Buffer.alloc(width * height + 2 * ((width / 2) * (height / 2)), 128)
+  const parts = [Buffer.from(`YUV4MPEG2 W${width} H${height} F${rate}:1 Ip A1:1 C420jpeg\n`)]
+
+  for (let index = 0; index < frames; index++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        frame[y * width + x] = (x * 71 + y * 113 + index * 37 + ((x * y) % 251)) & 0xff
+      }
+    }
+    parts.push(Buffer.from('FRAME\n'), frame)
+  }
+
+  writeFileSync(file, Buffer.concat(parts))
+}
+
+const previewSharpness = `(() => {
+  const video = document.querySelector('video')
+  if (!video || !video.videoWidth) return -1
+  const canvas = document.createElement('canvas')
+  canvas.width = 320
+  canvas.height = 240
+  const ctx = canvas.getContext('2d')
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  let energy = 0
+  for (let y = 1; y < canvas.height; y++) {
+    for (let x = 1; x < canvas.width; x++) {
+      const at = (y * canvas.width + x) * 4
+      energy += Math.abs(data[at] - data[at - 4]) + Math.abs(data[at] - data[at - canvas.width * 4])
+    }
+  }
+  return energy / (canvas.width * canvas.height)
+})()`
+
+const previewCameraLabel = `(() => {
+  const video = document.querySelector('video')
+  const track = video && video.srcObject && video.srcObject.getVideoTracks()[0]
+  return track ? track.label : ''
+})()`
+
+async function checkBackgroundBlur(failures, dir, base) {
+  const camera = join(dir, 'blur-camera.y4m')
+  writeNoiseVideo(camera)
+
+  const browser = await launch(5, dir, [`--use-file-for-fake-video-capture=${camera}`])
+  try {
+    const room = await createRoom(base, 'blur')
+    const session = browser.sessionId
+    await browser.cdp.send('Page.enable', {}, session)
+    await browser.cdp.send('Runtime.enable', {}, session)
+    await browser.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook() }, session)
+    await browser.cdp.send('Page.navigate', { url: room.url }, session)
+
+    const prejoined = await waitFor(browser, previewSharpness, (value) => value > 0, 20000)
+    check(failures, 'blur', prejoined.ok, `the prejoin preview never showed a camera (${prejoined.value})`)
+
+    const before = await evalJs(browser, previewSharpness)
+    const cameraLabel = await evalJs(browser, previewCameraLabel)
+    check(failures, 'blur', await clickButtonByTitle(browser, 'Blur background'), 'no blur button on the prejoin')
+
+    const blurred = await waitFor(browser, previewSharpness, (value) => value > 0 && value < before / 2, 20000)
+    console.log(`blur: preview sharpness ${before.toFixed(2)} before, ${blurred.value.toFixed(2)} after`)
+    check(failures, 'blur', blurred.ok, `the camera did not blur (sharpness ${blurred.value.toFixed(2)} against ${before.toFixed(2)})`)
+
+    const composited = await evalJs(browser, previewCameraLabel)
+    check(failures, 'blur', composited !== cameraLabel, `the preview still carries the raw camera (${composited})`)
+
+    const errors = await evalJs(browser, 'window.__errors')
+    check(failures, 'blur', errors.length === 0, `blur page errors: ${errors.join(' | ')}`)
+
+    // The choice belongs to the camera preferences, so it has to survive
+    // a reload — the same person rejoining the same way they left.
+    await browser.cdp.send('Page.reload', {}, session)
+    const remembered = await waitFor(
+      browser,
+      `Boolean(document.querySelector('button[aria-label="Turn off background blur"]'))`,
+      Boolean,
+      20000,
+    )
+    check(failures, 'blur', remembered.ok, 'blur did not survive a reload')
+
+    check(failures, 'blur', await clickButtonByTitle(browser, 'Turn off background blur'), 'no blur-off button after the reload')
+    const cleared = await waitFor(browser, previewCameraLabel, (label) => label === cameraLabel, 20000)
+    check(failures, 'blur', cleared.ok, `turning blur off did not restore the camera (${cleared.value})`)
+  } finally {
+    await stopProcess(browser.proc)
+  }
+}
 const recordButtonPresent = `[...document.querySelectorAll('button')].some(b => b.getAttribute('aria-label') === 'Record the call')`
 
 // waitForBadge polls until the badge reaches the wanted state, so the
@@ -323,6 +418,8 @@ async function main() {
     }
 
     await checkSimulcast(failures, browsers[0], browsers[1])
+
+    await checkBackgroundBlur(failures, dir, `http://127.0.0.1:${port}`)
 
     await evalJs(browsers[1], 'window.__sockets.at(-1).close()')
     await checkCall(failures, browsers, ['dropped signaling 0', 'dropped signaling 1'], { seconds })
