@@ -6,6 +6,7 @@
 // relays ciphertext.
 
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
+import { screenSenderParameters } from '@/lib/screen'
 import { isLangPrefs, isRoomCaption, type LangPrefs, type RoomCaption } from '@/lib/translate/types'
 
 export interface MemberInfo {
@@ -162,6 +163,17 @@ function preferVP8(transceiver: RTCRtpTransceiver): void {
   )
   if (!preferred.some((codec) => codec.mimeType === 'video/VP8')) return
   transceiver.setCodecPreferences(preferred)
+}
+
+// tuneScreenSender applies the screen-share encoding. A browser that
+// refuses the parameters still shares its screen at its own defaults,
+// which beats failing the share over a hint.
+async function tuneScreenSender(sender: RTCRtpSender): Promise<void> {
+  try {
+    await sender.setParameters(screenSenderParameters(sender.getParameters()))
+  } catch (err) {
+    console.warn('sfu: tuning the screen-share encoder', err)
+  }
 }
 
 // The camera is published as three encodings so the SFU can give each
@@ -355,12 +367,17 @@ export class RoomClient {
     if (!pc) throw new Error('Publish before sharing your screen.')
 
     for (const track of stream.getVideoTracks()) {
+      // 'motion' tells the browser this is a moving picture to keep up
+      // with, not a scan of text to keep sharp: a shared window that
+      // keeps its frame rate is what a call is missing otherwise.
+      track.contentHint = 'motion'
       this.screenTrackIds.add(track.id)
       const sender = pc.addTrack(track, stream)
       this.screenSenders.push(sender)
       const transceiver = pc.getTransceivers().find((t) => t.sender === sender)
       if (transceiver) preferVP8(transceiver)
       this.installSenderTransform(sender)
+      await tuneScreenSender(sender)
     }
 
     this.state = { ...this.state, sharing: true }
