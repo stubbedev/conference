@@ -44,8 +44,10 @@
 2. **Share the link.** Send the short link to everyone who should join.
    Keep the *privileged link* for yourself: it opens the room without
    the password and lets you mute, stop cameras or remove people.
-3. **Join.** People open the link, pick their camera and microphone, type
-   the password if the room has one, and they are in.
+3. **Join.** People open the link, mute or turn off the camera if they
+   like (both are remembered next time), type the password if the room
+   has one, and they are in. Devices, quality, volumes and language live
+   in the call's settings.
 
 > [!TIP]
 > The room key travels in the part of the link after `#`, which browsers
@@ -276,8 +278,13 @@ an external service".
 - Recording composites every tile plus one mixed audio track in the
   recorder's browser and mirrors their layout (pinned tile large, others
   in a strip, screen shares pinned automatically). Long calls stream to
-  the origin-private file system so memory stays flat. The container
-  follows the browser: WebM on Chrome and Firefox, MP4 on Safari.
+  the origin-private file system so memory stays flat; should the
+  browser end the recording itself, everything captured until then is
+  still downloaded. The container follows the browser: WebM on Chrome
+  and Firefox, MP4 on Safari.
+- Screen shares go out as one full-quality encoding, and the SFU hands a
+  publisher the whole upload budget for it: a screen share that is
+  starved of bitrate drops frames until it looks frozen.
 
 </details>
 
