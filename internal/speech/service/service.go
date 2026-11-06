@@ -279,6 +279,10 @@ func audio(ctx context.Context, current *session, data []byte) error {
 		return fmt.Errorf("audio frame: %w", err)
 	}
 
+	if header.Sample {
+		return current.sampleAudio(header, pcm)
+	}
+
 	return current.audio(ctx, header, pcm)
 }
 
@@ -293,10 +297,15 @@ func handle(connCtx, ctx context.Context, conn *websocket.Conn, current *session
 	switch message.Type {
 	case wire.TypeHello:
 		log.Printf("targets: %s", strings.Join(current.setTargets(message.Targets), ","))
+		current.setVoiceTargets(message.VoiceTargets)
 
-		return write(connCtx, conn, wire.Command{Type: wire.TypeReady, Targets: nil, Speaker: ""})
+		return write(connCtx, conn, wire.Command{Type: wire.TypeReady, Targets: nil, VoiceTargets: nil, Speaker: "", Lang: ""})
 	case wire.TypeEnd:
 		return current.end(ctx, message.Speaker)
+	case wire.TypeVoiceSample:
+		return current.finishSample(ctx, message.Speaker, message.Lang)
+	case wire.TypeForgetVoice:
+		return current.forgetVoice(message.Speaker)
 	default:
 		return nil
 	}

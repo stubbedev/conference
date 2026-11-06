@@ -14,6 +14,9 @@ type Status struct {
 	Reason    string          `json:"reason,omitempty"`
 	Languages []wire.Language `json:"languages"`
 	External  bool            `json:"external"`
+	// OwnVoice says whether a speaker can be heard in their own, cloned
+	// voice; the app only offers it then.
+	OwnVoice bool `json:"ownVoice"`
 }
 
 // Status reports whether live translation can run with these settings.
@@ -25,7 +28,13 @@ func (s Settings) Status() Status {
 		langs[i] = wire.Language{Code: lang.Code, Name: lang.Name}
 	}
 
-	return Status{Available: s.ready(), Reason: s.notReadyReason(), Languages: langs, External: s.external()}
+	return Status{
+		Available: s.ready(),
+		Reason:    s.notReadyReason(),
+		Languages: langs,
+		External:  s.external(),
+		OwnVoice:  s.voiceCloning,
+	}
 }
 
 // notReadyReason names what the engines still need, such as the model

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import { Circle, CircleAlert, Languages, Link2, Loader2, TriangleAlert, Users } from 'lucide-react'
+import { AudioLines, Circle, CircleAlert, Languages, Link2, Loader2, TriangleAlert, Users } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -48,6 +48,7 @@ import { requestDisplay, SCREEN_AUDIO_KIND, screenTracks } from '@/lib/screen'
 import { tilesOfMembers } from '@/lib/reconnect'
 import { Translator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName, type Language } from '@/lib/translate/languages'
+import { forgetSample, rememberSample, rememberedSample, type OwnVoiceSample } from '@/lib/translate/own-voice'
 import { isVoiceChoice, type LangPrefs, type RoomCaption, type TranslatorStatus } from '@/lib/translate/types'
 import {
   JoinError,
@@ -177,7 +178,20 @@ function translationWarnings(status: TranslatorStatus, selfLang: string, languag
   if (status.failedTranslations > 0) {
     warnings.push(`${status.failedTranslations} sentence${status.failedTranslations === 1 ? '' : 's'} sent untranslated`)
   }
+  if (status.droppedVoices > 0) {
+    warnings.push(
+      `${status.droppedVoices} translated voice${status.droppedVoices === 1 ? '' : 's'} skipped: the voice engine fell behind`,
+    )
+  }
   return warnings
+}
+
+// Where this member's own voice stands, while they have chosen it.
+function ownVoiceLabel(status: TranslatorStatus, recorded: boolean): string {
+  if (status.ownVoice === 'ready') return 'Your own voice is in use'
+  if (status.ownVoice === 'rejected') return 'Your recording was too short: record again (female voice for now)'
+  if (!recorded) return 'Record your voice in the settings (female voice for now)'
+  return 'Preparing your voice…'
 }
 
 function tileLabel(tile: Tile, displayName: string, members: MemberInfo[]): string {
@@ -236,7 +250,7 @@ export default function Room() {
   const [memberLangs, setMemberLangs] = useState<Record<string, string>>({})
   // Speakers whose translated voice is playing right now, driven by the
   // bridge's voice cues; voiceEndsRef holds when each one's last ends.
-  const [voicePlaying, setVoicePlaying] = useState<Record<string, true>>({})
+  const [voicePlaying, setVoicePlaying] = useState<Record<string, 'stock' | 'cloned'>>({})
   const [translatorStatus, setTranslatorStatus] = useState<TranslatorStatus | null>(null)
   // Why live translation stopped on its own; stays until dismissed or restarted.
   const [translationFailure, setTranslationFailure] = useState('')
@@ -289,6 +303,14 @@ export default function Room() {
   const clientRef = useRef<RoomClient | null>(null)
   const recorderRef = useRef<CallRecorder | null>(null)
   const translatorRef = useRef<Translator | null>(null)
+  // The speaker's own voice, recorded before (or during) the call; kept on
+  // this device only when they ask to remember it.
+  const [ownSample, setOwnSample] = useState<OwnVoiceSample | null>(null)
+  const ownSampleRef = useLatest(ownSample)
+  const [rememberOwn, setRememberOwn] = usePersistentState('conference:own-voice-remember', false, (stored) =>
+    stored === true,
+  )
+  const rememberOwnRef = useLatest(rememberOwn)
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
   const micPipelineRef = useRef<MicPipeline | null>(null)
@@ -660,6 +682,49 @@ export default function Room() {
     setLangPrefs({ ...langPrefs, lang: codes.includes(DEFAULT_LANGUAGE) ? DEFAULT_LANGUAGE : codes[0] })
   }, [translation, langPrefs, setLangPrefs])
 
+  useEffect(() => {
+    // Not remembering: make sure no earlier copy is left on this device.
+    if (!rememberOwn) {
+      void forgetSample()
+      return
+    }
+    let cancelled = false
+    void rememberedSample().then((sample) => {
+      if (!cancelled && sample) setOwnSample((current) => current ?? sample)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [rememberOwn])
+
+  useEffect(() => {
+    translatorRef.current?.setOwnVoiceSample(ownSample)
+  }, [ownSample])
+
+  const changeOwnSample = useCallback(
+    (sample: OwnVoiceSample | null) => {
+      setOwnSample(sample)
+      if (!sample) void forgetSample()
+      else if (rememberOwn) void rememberSample(sample).catch(() => toast.error('Could not keep your voice on this device.'))
+    },
+    [rememberOwn],
+  )
+
+  const changeRememberOwn = useCallback(
+    (remember: boolean) => {
+      setRememberOwn(remember)
+      if (!remember) void forgetSample()
+      else if (ownSampleRef.current) void rememberSample(ownSampleRef.current).catch(() => {})
+    },
+    [setRememberOwn, ownSampleRef],
+  )
+
+  // A remembered own voice falls back to the default where the server can't clone voices.
+  useEffect(() => {
+    if (translation === TRANSLATION_CHECKING || translation.ownVoice || langPrefs.voiceChoice !== 'own') return
+    setLangPrefs({ ...langPrefs, voiceChoice: 'female' })
+  }, [translation, langPrefs, setLangPrefs])
+
   // Captions for this member's own language only; interim lines are
   // replaced in place by the next line from the same speaker.
   const handleRoomCaption = useCallback(
@@ -677,10 +742,13 @@ export default function Room() {
         setCaptions((prev) => ({ ...prev, [caption.speaker]: shown }))
         return
       }
-      const { speaker, startInMs, durationMs } = caption
+      const { speaker, startInMs, durationMs, cloned } = caption
       const ends = Date.now() + startInMs + durationMs
       voiceEndsRef.current.set(speaker, Math.max(voiceEndsRef.current.get(speaker) ?? 0, ends))
-      window.setTimeout(() => setVoicePlaying((prev) => ({ ...prev, [speaker]: true })), startInMs)
+      window.setTimeout(
+        () => setVoicePlaying((prev) => ({ ...prev, [speaker]: cloned ? 'cloned' : 'stock' })),
+        startInMs,
+      )
       window.setTimeout(() => {
         // A later segment of the same speaker keeps the ring on.
         if (Date.now() < (voiceEndsRef.current.get(speaker) ?? 0) - 50) return
@@ -726,10 +794,11 @@ export default function Room() {
         onStatus: setTranslatorStatus,
       })
       translatorRef.current = translator
+      translator.setOwnVoiceSample(ownSampleRef.current)
       translator.attach(client)
       translator.start(localMicTrack(localStreamRef.current))
     },
-    [langPrefsRef, handleRoomCaption, stopTranslation],
+    [langPrefsRef, ownSampleRef, handleRoomCaption, stopTranslation],
   )
 
   // The host's switch for the whole room; each browser's bridge follows
@@ -1319,7 +1388,18 @@ export default function Room() {
         onVolumeChange={handleVolumeChange}
         onMicGainChange={handleMicGainChange}
         translation={
-          <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+          <TranslationSettings
+            config={translation}
+            prefs={langPrefs}
+            onChange={changeLangPrefs}
+            ownVoice={{
+              sample: ownSample,
+              remember: rememberOwn,
+              micTrack: localMicTrack(localStream),
+              onSample: changeOwnSample,
+              onRemember: changeRememberOwn,
+            }}
+          />
         }
       />
     ),
@@ -1327,6 +1407,11 @@ export default function Room() {
       translation,
       langPrefs,
       changeLangPrefs,
+      ownSample,
+      rememberOwn,
+      localStream,
+      changeOwnSample,
+      changeRememberOwn,
       devices,
       devicePrefs,
       hasMic,
@@ -1405,9 +1490,11 @@ export default function Room() {
     endedRef.current = true
     await stopRecording()
     await stopTranslation()
+    // An own voice not remembered on this device goes with the call.
+    if (!rememberOwnRef.current) setOwnSample(null)
     clientRef.current?.leave()
     navigate('/')
-  }, [navigate, stopRecording, stopTranslation])
+  }, [navigate, stopRecording, stopTranslation, rememberOwnRef])
 
   const sendChat = useCallback(async (text: string) => {
     await clientRef.current?.sendChat(text)
@@ -1584,6 +1671,7 @@ export default function Room() {
         volume={playsAudio ? (replaced ? 0 : devicePrefs.volume) : undefined}
         caption={caption}
         speaking={replaced ? speakerId in voicePlaying : undefined}
+        aiVoice={replaced ? voicePlaying[speakerId] : undefined}
         pinned={pinnedKey === tile.key}
         onTogglePin={allTiles.length > 1 ? togglePin : undefined}
         compact={compact}
@@ -1663,7 +1751,18 @@ export default function Room() {
           onJoin={() => void joinCall()}
           translation={
             translationAvailable ? (
-              <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+              <TranslationSettings
+                config={translation}
+                prefs={langPrefs}
+                onChange={changeLangPrefs}
+                ownVoice={{
+                  sample: ownSample,
+                  remember: rememberOwn,
+                  micTrack: localMicTrack(localStream),
+                  onSample: changeOwnSample,
+                  onRemember: changeRememberOwn,
+                }}
+              />
             ) : undefined
           }
         />
@@ -1731,6 +1830,14 @@ export default function Room() {
                 <TriangleAlert className="size-3 shrink-0" />
                 <span className="truncate">Live translation failed: {translationFailure}</span>
               </button>
+            </Hint>
+          )}
+          {translatorStatus && translationBy && langPrefs.voiceChoice === 'own' && translation.ownVoice && (
+            <Hint label="Others hear your translations in a voice cloned from your recording." side="bottom">
+              <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                <AudioLines className="size-3 shrink-0" />
+                <span className="truncate">{ownVoiceLabel(translatorStatus, ownSample !== null)}</span>
+              </span>
             </Hint>
           )}
           {translatorStatus && translationWarnings(translatorStatus, langPrefs.lang, translation.languages).map((warning) => (

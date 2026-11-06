@@ -31,6 +31,8 @@ interface VideoTileProps {
   onAspectRatio?: (tileKey: string, ratio: number) => void
   /** Live-translation subtitle for what this member is saying. */
   caption?: string
+  /** A translated voice is playing for this member: a stock one or their own, cloned one. */
+  aiVoice?: 'stock' | 'cloned'
   /**
    * Overrides voice detection for the speaking ring: set while this
    * member is heard through their translation, which plays later than
@@ -80,6 +82,7 @@ export const VideoTile = memo(function VideoTile({
   compact,
   onAspectRatio,
   caption,
+  aiVoice,
   speaking: speakingOverride,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -245,6 +248,9 @@ export const VideoTile = memo(function VideoTile({
         {!sharing && micOff && <MicOff className="size-3.5 shrink-0 text-red-400" />}
         <span className={cn('truncate', compact ? 'max-w-24' : 'max-w-48')}>{name}</span>
         {sharing && <span className="shrink-0 text-white/60">screen</span>}
+        {aiVoice && (
+          <span className="shrink-0 text-white/60">{aiVoice === 'cloned' ? 'AI voice (cloned)' : 'AI voice'}</span>
+        )}
       </div>
       {caption && (
         <p

@@ -3,6 +3,7 @@ import { Globe, Info } from 'lucide-react'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { OwnVoiceRecorder, type OwnVoiceControls } from '@/components/OwnVoiceRecorder'
 import type { TranslationConfig } from '@/lib/api'
 import { isVoiceChoice, type LangPrefs } from '@/lib/translate/types'
 import { cn } from '@/lib/utils'
@@ -11,12 +12,14 @@ interface TranslationSettingsProps {
   config: TranslationConfig
   prefs: LangPrefs
   onChange: (prefs: LangPrefs) => void
+  /** Recording the speaker's own voice before the call. */
+  ownVoice?: OwnVoiceControls
 }
 
 // The language this member speaks, and how translations of everyone else
 // reach them. Always shown; greyed out with what has to be set up first
 // while the speech service cannot translate.
-export function TranslationSettings({ config, prefs, onChange }: TranslationSettingsProps) {
+export function TranslationSettings({ config, prefs, onChange, ownVoice }: TranslationSettingsProps) {
   const disabled = !config.available
   // Until the server configuration is read there is no list, but the setting still shows.
   const languages = config.languages.length > 0 ? config.languages : [{ code: prefs.lang, name: 'Not available' }]
@@ -77,8 +80,12 @@ export function TranslationSettings({ config, prefs, onChange }: TranslationSett
             <SelectContent>
               <SelectItem value="female">Female voice</SelectItem>
               <SelectItem value="male">Male voice</SelectItem>
+              {config.ownVoice && <SelectItem value="own">My own voice</SelectItem>}
             </SelectContent>
           </Select>
+          {prefs.voiceChoice === 'own' && config.ownVoice && ownVoice && (
+            <OwnVoiceRecorder lang={prefs.lang} {...ownVoice} />
+          )}
         </div>
         <div className="flex items-center justify-between gap-3">
           <Label htmlFor="translated-voice" className="text-xs text-muted-foreground">

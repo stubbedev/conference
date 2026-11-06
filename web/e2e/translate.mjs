@@ -70,6 +70,8 @@ async function startServer(bin) {
         TURN_PORT: String(await freePort()),
         DB_PATH: join(dir, 'translate.db'),
         SPEECH_ENGINES: 'fake',
+        // The stand-in voice engine clones too: a higher tone in the speaker's own voice.
+        VOICE_CLONING: 'true',
         GORACE: 'halt_on_error=1',
       },
       stdio: 'inherit',
@@ -81,8 +83,8 @@ async function startServer(bin) {
 }
 
 // Language settings the app reads from localStorage on its first load.
-function preset(browser, lang, name) {
-  const prefs = JSON.stringify({ lang, voice: true, subtitles: true, voiceChoice: 'female' })
+function preset(browser, lang, name, voiceChoice = 'female') {
+  const prefs = JSON.stringify({ lang, voice: true, subtitles: true, voiceChoice })
   return browser.cdp.send(
     'Page.addScriptToEvaluateOnNewDocument',
     {
@@ -114,10 +116,23 @@ async function main() {
   const guest = await launchChrome(chrome, 1, dir, [`--use-file-for-fake-audio-capture=${join(fixtures, 'german.wav')}`, '--mute-audio'])
   procs.push(host.proc, guest.proc)
   await preset(host, 'en', 'Hana')
-  await preset(guest, 'de', 'Gerd')
+  // The guest speaks in its own voice, learned from the first ~12 s of its speech.
+  await preset(guest, 'de', 'Gerd', 'own')
 
   await joinRoom(host, room.privUrl)
-  await joinRoom(guest, room.url)
+  // The guest records its voice on the join screen, so it is in use from its
+  // first sentence.
+  await joinRoom(guest, room.url, null, async (browser) => {
+    // Language and subtitles are folded on the join screen; open them like a person would.
+    const section = `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Language and subtitles')`
+    await waitFor(browser, `Boolean(${section})`, Boolean, 15_000)
+    await evalJs(browser, `${section}?.click()`)
+    const recordButton = `[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Record my voice') && !b.disabled)`
+    await waitFor(browser, `Boolean(${recordButton})`, Boolean, 15_000)
+    await evalJs(browser, `${recordButton}?.click()`)
+    const recorded = await waitFor(browser, `document.body.innerText`, (text) => text.includes('Your voice is recorded'), 30_000)
+    check('recorded voice', recorded.ok, 'the guest could not record its voice on the join screen')
+  })
   // Enabled once /api/config reports the speech engines ready.
   const button = await waitFor(host, `document.querySelector('[aria-label="Start live translation"]')?.getAttribute('aria-disabled')`, (v) => v === 'false', 15_000)
   check('start', button.ok, `no enabled "Start live translation" button for the host: ${JSON.stringify(button.value)}`)
@@ -132,6 +147,17 @@ async function main() {
 
   const hostSees = await waitFor(host, tileState('Gerd'), (tile) => tile?.caption.startsWith('[en] de utterance'), TIMEOUT_MS)
   check('host subtitles', hostSees.ok, `no English subtitle on the guest's tile: ${JSON.stringify(hostSees.value)}`)
+
+  const ownVoice = await waitFor(guest, `document.querySelector('header')?.innerText ?? ''`, (text) => text.includes('Your own voice is in use'), TIMEOUT_MS)
+  check('own voice', ownVoice.ok, `the guest's recorded voice was never in use: ${JSON.stringify(ownVoice.value)}`)
+
+  // The label only shows while a cloned voice plays, so poll quickly.
+  let cloned = false
+  for (let t = 0; t < TIMEOUT_MS && !cloned; t += 50) {
+    cloned = await evalJs(host, `[...document.querySelectorAll('.hud-tile')].some((t) => t.innerText.includes('Gerd') && t.innerText.includes('AI voice (cloned)'))`)
+    if (!cloned) await sleep(50)
+  }
+  check('cloned voice', cloned, "the host never heard the guest's cloned voice")
 
   const voice = await waitFor(guest, translationAudio, (list) => list?.some((a) => a.tracks > 0 && !a.paused), TIMEOUT_MS)
   check('guest voice', voice.ok, `no playing translated-voice track: ${JSON.stringify(voice.value)}`)

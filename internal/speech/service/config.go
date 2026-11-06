@@ -50,6 +50,7 @@ const (
 	envTranslateProvider = "TRANSLATE_PROVIDER"
 	envTranscribeFormat  = "TRANSCRIBE_RESPONSE_FORMAT"
 	envVoiceName         = "VOICE_NAME"
+	envVoiceCloning      = "VOICE_CLONING"
 	envInterim           = "INTERIM_MS"
 	prefixTranscribe     = "TRANSCRIBE"
 	prefixTranslate      = "TRANSLATE"
@@ -81,9 +82,12 @@ type Settings struct {
 	translation      engine
 	voice            engine
 	voiceName        string
-	interim          time.Duration
-	glossary         string
-	languages        languages
+	// voiceCloning: the voice engine takes a reference recording
+	// (voice_ref, reference_text), so a speaker can be heard in their own voice.
+	voiceCloning bool
+	interim      time.Duration
+	glossary     string
+	languages    languages
 }
 
 // LogEngines says which engines are not set up yet, which send audio or
@@ -129,6 +133,7 @@ var (
 	errNegative       = errors.New("must not be negative")
 	errEngineURL      = errors.New("must be an http:// or https:// URL with a host")
 	errDomain         = errors.New("must be domain names separated by commas")
+	errCloningValue   = errors.New(envVoiceCloning + " must be true or false")
 )
 
 // FromEnv reads the settings from the environment that getenv looks up.
@@ -151,12 +156,18 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		translation:      standIn(),
 		voice:            standIn(),
 		voiceName:        env(envVoiceName),
+		voiceCloning:     false,
 		interim:          0,
 		glossary:         env("GLOSSARY"),
 		languages:        langs,
 	}
 
 	settings, err = env.chosenEngines(settings)
+	if err != nil {
+		return Settings{}, err
+	}
+
+	settings.voiceCloning, err = env.flag(envVoiceCloning, errCloningValue)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -243,6 +254,17 @@ func (env environment) or(name, fallback string) string {
 	}
 
 	return fallback
+}
+
+func (env environment) flag(name string, invalid error) (bool, error) {
+	switch value := env(name); value {
+	case "", "false", "0":
+		return false, nil
+	case "true", "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%w, not %q", invalid, value)
+	}
 }
 
 func (env environment) duration(name string, unit, fallback time.Duration) (time.Duration, error) {

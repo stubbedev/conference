@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/stubbe/conference/internal/speech/vad"
+	"github.com/stubbe/conference/internal/speech/wav"
 	"github.com/stubbe/conference/internal/speech/wire"
 )
 
@@ -18,6 +20,11 @@ const (
 	minUtterance = vad.Rate / 4
 	queuedFinals = 8
 	contextKept  = 5
+
+	// A speaker's own voice is cloned from a sample they recorded: at
+	// least 6 s, at most 20 s is kept.
+	ownVoiceMax      = 20 * vad.Rate
+	ownVoicePrepared = 6 * vad.Rate
 )
 
 type voiceFrame struct {
@@ -32,6 +39,8 @@ type final struct {
 	lang  language
 	voice voiceChoice
 	audio []int16
+	// own is the speaker's recorded voice, when they chose it (see ownVoice).
+	own *reference
 }
 
 type speaker struct {
@@ -44,6 +53,17 @@ type speaker struct {
 	interimBusy    atomic.Bool
 	interimSamples int
 	context        []string
+	// incoming collects a voice sample the speaker recorded while it
+	// arrives (read loop only); prepared is that sample once it is ready.
+	incoming []int16
+	prepared atomic.Pointer[reference]
+}
+
+// voiceTargets are the languages someone wants a translated voice in;
+// all means every target, for clients that don't say.
+type voiceTargets struct {
+	all   bool
+	codes []string
 }
 
 func (s *speaker) segID(seg int64) string {
@@ -56,6 +76,7 @@ type session struct {
 	send     sender
 	tasks    sync.WaitGroup
 	targets  atomic.Pointer[[]language]
+	voices   atomic.Pointer[voiceTargets]
 	speaker  *speaker
 	pending  atomic.Int64
 }
@@ -74,6 +95,7 @@ func newSession(ctx context.Context, settings Settings, engines speechEngines, m
 		send:     send,
 		tasks:    sync.WaitGroup{},
 		targets:  atomic.Pointer[[]language]{},
+		voices:   atomic.Pointer[voiceTargets]{},
 		speaker: &speaker{
 			id:             member,
 			lang:           language{Code: "", Name: "", Whisper: "", Address: "", Voices: nil},
@@ -84,10 +106,13 @@ func newSession(ctx context.Context, settings Settings, engines speechEngines, m
 			interimBusy:    atomic.Bool{},
 			interimSamples: 0,
 			context:        nil,
+			incoming:       nil,
+			prepared:       atomic.Pointer[reference]{},
 		},
 		pending: atomic.Int64{},
 	}
 	created.targets.Store(&[]language{})
+	created.voices.Store(&voiceTargets{all: true, codes: nil})
 	created.tasks.Go(func() { created.work(ctx, created.speaker) })
 
 	return created, nil
@@ -110,6 +135,18 @@ func (s *session) setTargets(codes []string) []string {
 	s.targets.Store(&targets)
 
 	return accepted
+}
+
+// setVoiceTargets narrows the translated voices to these languages; nil
+// means every target.
+func (s *session) setVoiceTargets(codes []string) {
+	s.voices.Store(&voiceTargets{all: codes == nil, codes: slices.Clone(codes)})
+}
+
+func (s *session) wantsVoice(code string) bool {
+	targets := s.voices.Load()
+
+	return targets.all || slices.Contains(targets.codes, code)
 }
 
 func (s *session) audio(ctx context.Context, header wire.AudioHeader, pcm []int16) error {
@@ -150,6 +187,86 @@ func (s *session) audio(ctx context.Context, header wire.AudioHeader, pcm []int1
 	return nil
 }
 
+// sampleAudio collects audio of a voice sample the speaker recorded
+// before the call, up to the longest sample kept.
+func (s *session) sampleAudio(header wire.AudioHeader, pcm []int16) error {
+	current := s.speaker
+	if header.Speaker != current.id {
+		return fmt.Errorf("%w: %q", errForeignSpeaker, header.Speaker)
+	}
+
+	if s.settings.voiceCloning {
+		current.incoming = append(current.incoming, pcm[:min(len(pcm), ownVoiceMax-len(current.incoming))]...)
+	}
+
+	return nil
+}
+
+// finishSample turns the collected voice sample into the speaker's own
+// voice: transcribed, so the voice engine gets its text too, and used for
+// every translated sentence from then on.
+func (s *session) finishSample(ctx context.Context, speakerID, code string) error {
+	current := s.speaker
+	if speakerID != current.id {
+		return fmt.Errorf("%w: %q", errForeignSpeaker, speakerID)
+	}
+
+	audio := current.incoming
+	current.incoming = nil
+
+	if !s.settings.voiceCloning {
+		return nil
+	}
+
+	lang, ok := s.settings.languages.get(code)
+	if !ok || len(audio) < ownVoicePrepared {
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceRejected, Seconds: seconds(len(audio))})
+
+		return nil
+	}
+
+	s.tasks.Go(func() { s.prepare(ctx, current, audio, lang) })
+
+	return nil
+}
+
+func (s *session) prepare(ctx context.Context, current *speaker, audio []int16, lang language) {
+	text, err := s.engines.transcribe(ctx, audio, lang)
+	if err != nil || text == "" {
+		if err != nil {
+			logFailure(ctx, "own voice sample", err)
+		}
+
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceRejected, Seconds: seconds(len(audio))})
+
+		return
+	}
+
+	encoded, err := wav.Encode(audio, vad.Rate)
+	if err != nil {
+		logFailure(ctx, "own voice sample", err)
+
+		return
+	}
+
+	current.prepared.Store(&reference{wav: encoded, text: text})
+	s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceReady, Seconds: seconds(len(audio))})
+}
+
+// forgetVoice drops the speaker's own voice from this session at once:
+// the recorded sample, and one still arriving.
+func (s *session) forgetVoice(speakerID string) error {
+	current := s.speaker
+	if speakerID != current.id {
+		return fmt.Errorf("%w: %q", errForeignSpeaker, speakerID)
+	}
+
+	current.incoming = nil
+	current.prepared.Store(nil)
+
+	return nil
+}
+
 func (s *session) end(ctx context.Context, speakerID string) error {
 	if speakerID != s.speaker.id {
 		return fmt.Errorf("%w: %q", errForeignSpeaker, speakerID)
@@ -168,7 +285,7 @@ func (s *session) finish(ctx context.Context, current *speaker, audio []int16) e
 		return nil
 	}
 
-	job := final{seg: current.seg.Load(), lang: current.lang, voice: current.voice, audio: audio}
+	job := final{seg: current.seg.Load(), lang: current.lang, voice: current.voice, audio: audio, own: nil}
 
 	s.pending.Add(1)
 	current.seg.Add(1)
@@ -240,6 +357,8 @@ func (s *session) final(ctx context.Context, current *speaker, job final) {
 
 	s.caption(ctx, current, job.seg, job.lang, job.lang, text, true)
 
+	job.own = s.ownVoice(current, job)
+
 	earlier := slices.Clone(current.context)
 	current.context = append(current.context, text)
 	current.context = current.context[max(0, len(current.context)-contextKept):]
@@ -260,11 +379,25 @@ func (s *session) final(ctx context.Context, current *speaker, job final) {
 		float64(len(job.audio))/vad.Rate, transcribed.Milliseconds(), time.Since(started).Milliseconds())
 }
 
+// ownVoice is the speaker's recorded voice while they have chosen it,
+// or nil for the stock voice.
+func (s *session) ownVoice(current *speaker, job final) *reference {
+	if !s.settings.voiceCloning || job.voice != voiceOwn {
+		return nil
+	}
+
+	return current.prepared.Load()
+}
+
+func seconds(samples int) float64 {
+	return math.Round(float64(samples)/vad.Rate*10) / 10 //nolint:mnd // one decimal
+}
+
 func (s *session) translate(ctx context.Context, current *speaker, job final, target language, text string, earlier []string) {
 	translated, err := s.engines.translate(ctx, text, job.lang, target, earlier)
 	if err != nil {
 		logFailure(ctx, "translation, sent the original", err)
-		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeTranslateFailed})
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeTranslateFailed, Seconds: 0})
 		s.caption(ctx, current, job.seg, job.lang, target, text, true)
 
 		return
@@ -272,7 +405,20 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 
 	s.caption(ctx, current, job.seg, job.lang, target, translated, true)
 
-	spoken, err := s.engines.speak(ctx, translated, target, job.voice)
+	if !s.wantsVoice(target.Code) {
+		return
+	}
+
+	spoken, err := s.engines.speak(ctx, translated, target, job.voice, job.own)
+	cloned := job.own != nil
+
+	if err != nil && cloned {
+		logFailure(ctx, "own voice, spoke in the stock voice", err)
+
+		spoken, err = s.engines.speak(ctx, translated, target, job.voice, nil)
+		cloned = false
+	}
+
 	if err != nil {
 		logFailure(ctx, "voice", err)
 
@@ -280,8 +426,10 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 	}
 
 	s.emit(ctx, voiceFrame{
-		header: wire.VoiceHeader{Speaker: current.id, SegID: current.segID(job.seg), Lang: target.Code, Rate: spoken.rate},
-		pcm:    spoken.pcm,
+		header: wire.VoiceHeader{
+			Speaker: current.id, SegID: current.segID(job.seg), Lang: target.Code, Rate: spoken.rate, Cloned: cloned,
+		},
+		pcm: spoken.pcm,
 	})
 }
 
