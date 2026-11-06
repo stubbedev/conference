@@ -543,6 +543,22 @@ export class RoomClient {
     this.worker.terminate()
   }
 
+  /**
+   * pause gives up the connection and the upstream, but holds on to the
+   * downstream connections: the call's pictures stay on screen while a
+   * replacement negotiates underneath, which is the difference between a
+   * blip and a black screen. destroy releases what was held.
+   */
+  pause(): void {
+    this.closing = true
+    this.ws?.close()
+    this.up?.close()
+  }
+
+  destroy(): void {
+    this.leave()
+  }
+
   private send(msg: WireMessage): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     this.ws.send(JSON.stringify(msg))

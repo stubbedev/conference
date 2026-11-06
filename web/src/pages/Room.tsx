@@ -45,6 +45,7 @@ import {
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
 import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
 import { requestDisplay, SCREEN_AUDIO_KIND, screenTracks } from '@/lib/screen'
+import { tilesOfMembers } from '@/lib/reconnect'
 import { Translator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName, type Language } from '@/lib/translate/languages'
 import { isVoiceChoice, type LangPrefs, type RoomCaption, type TranslatorStatus } from '@/lib/translate/types'
@@ -926,34 +927,40 @@ export default function Room() {
       if (reconnectingRef.current) return
       reconnectingRef.current = true
       const resume = lost.resume
-      lost.leave()
+      lost.pause()
       clientRef.current = null
-      setTiles([])
-      setMembers([])
       toast.loading('Connection lost, reconnecting…', { id: RECONNECT_TOAST })
 
       try {
         for (let attempt = 0; attempt < RECONNECT_DELAYS_MS.length; attempt++) {
           await waitForRetry(RECONNECT_DELAYS_MS[attempt])
-          if (endedRef.current) return
+          if (endedRef.current) break
           try {
             await connectClient(resume)
+            // Whoever left during the gap is not on screen any more; the
+            // tiles of everyone who stayed have been replaced by the new
+            // connections' tracks.
+            setTiles((prev) => tilesOfMembers(prev, membersRef.current.map((member) => member.id)))
             toast.success('Reconnected', { id: RECONNECT_TOAST })
             return
           } catch (err) {
             if (err instanceof JoinError && err.final) break
           }
         }
-        if (endedRef.current) return
-        toast.error('The connection was lost.', { id: RECONNECT_TOAST })
-        endedRef.current = true
-        await stopRecording()
-        navigate('/')
       } finally {
+        lost.destroy()
         reconnectingRef.current = false
       }
+
+      setTiles([])
+      setMembers([])
+      if (endedRef.current) return
+      toast.error('The connection was lost.', { id: RECONNECT_TOAST })
+      endedRef.current = true
+      await stopRecording()
+      navigate('/')
     },
-    [connectClient, stopRecording, navigate],
+    [connectClient, membersRef, stopRecording, navigate],
   )
   useEffect(() => {
     reconnectRef.current = reconnect
