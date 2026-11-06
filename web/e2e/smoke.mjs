@@ -248,19 +248,24 @@ async function checkSimulcast(failures, publisher, viewer) {
   console.log(`simulcast sent: ${JSON.stringify(sent.value)}`)
   check(failures, 'simulcast', sent.ok, `publisher is not sending all three layers: ${JSON.stringify(sent.value)}`)
 
-  const steps = [
-    { name: 'grid of two', action: null, want: (w) => w >= 1280 },
-    { name: 'filmstrip', action: 'Pin to main view', want: (w) => w > 0 && w <= 320 },
-    { name: 'grid again', action: 'Unpin', want: (w) => w >= 1280 },
-  ]
-  for (const step of steps) {
-    if (step.action) {
-      check(failures, 'simulcast', await callJs(viewer, clickLocalPin, step.action), `no "${step.action}" button on the viewer's own tile`)
-    }
-    const got = await waitFor(viewer, remoteVideoWidth, step.want, 20000)
-    console.log(`simulcast ${step.name}: remote video ${got.value}px wide`)
-    check(failures, 'simulcast', got.ok, `${step.name}: remote video ${got.value}px wide, wrong layer`)
-  }
+  // Sizes are compared with each other, not with pixels: which resolution
+  // the capture and the encoder settle on is the browser's business, that
+  // a filmstrip tile gets a fraction of a pinned one is this app's.
+  const full = await waitFor(viewer, remoteVideoWidth, (width) => width >= 640, 20000)
+  console.log(`simulcast grid of two: remote video ${full.value}px wide`)
+  check(failures, 'simulcast', full.ok, `grid of two: remote video ${full.value}px wide, want the largest layer`)
+
+  check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Pin to main view'), 'no "Pin to main view" button on the viewer\'s own tile')
+
+  const filmstrip = await waitFor(viewer, remoteVideoWidth, (width) => width > 0 && width * 2 <= full.value, 20000)
+  console.log(`simulcast filmstrip: remote video ${filmstrip.value}px wide against ${full.value}px`)
+  check(failures, 'simulcast', filmstrip.ok, `filmstrip: remote video ${filmstrip.value}px wide, not a layer below ${full.value}px`)
+
+  check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
+
+  const back = await waitFor(viewer, remoteVideoWidth, (width) => width >= full.value, 20000)
+  console.log(`simulcast grid again: remote video ${back.value}px wide`)
+  check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, want ${full.value}px or more back`)
 }
 
 async function checkPinRoundTrip(failures, label, browser) {
