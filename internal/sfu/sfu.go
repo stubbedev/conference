@@ -1410,12 +1410,16 @@ type upViewer struct {
 // viewerRate tracks a sustainable downlink bitrate for one viewer,
 // following Galène's loss-based controller: additive increase while loss
 // is low, multiplicative decrease on loss, clamped by whatever REMB the
-// viewer itself reports.
+// viewer itself reports. It recovers in both directions: the walk back up
+// is paced by elapsed time, and a viewer's own REMB is taken as evidence
+// of recovered headroom, so a screen share that dropped during a blip
+// returns to full quality in seconds instead of creeping back.
 type viewerRate struct {
 	mu    sync.Mutex
-	start uint64 // bps before the first loss report
+	start uint64 // bps before the first loss report, the room's ceiling
 	loss  uint64 // bps, AIMD estimate from receiver reports
 	remb  uint64 // bps cap from the viewer's REMB, 0 = none seen
+	clean bool   // the last receiver report showed no loss
 }
 
 // newViewerRate starts a viewer at the publisher ceiling rather than at
@@ -1423,7 +1427,7 @@ type viewerRate struct {
 // adapt to, so the only useful starting point is everything the uplink
 // may use, and real loss walks it down from there.
 func newViewerRate(start uint64) viewerRate {
-	return viewerRate{mu: sync.Mutex{}, start: start, loss: 0, remb: 0}
+	return viewerRate{mu: sync.Mutex{}, start: start, loss: 0, remb: 0, clean: false}
 }
 
 // Galène's loss-controller tuning: receiver-report fraction-lost
@@ -1435,6 +1439,16 @@ const (
 	rateGainNum      = 269
 	rateGainDen      = 256
 	lossScale        = 512
+
+	// rateGainPeriod is how long one additive-increase step takes. The
+	// increase is scaled by the time since the previous report so the
+	// ramp stays at 5% a second whether a viewer reports every 200 ms or
+	// every two seconds.
+	rateGainPeriod = time.Second
+
+	// maxGainSteps bounds one increase, so a viewer that has been quiet
+	// for minutes does not jump from the floor to the ceiling at once.
+	maxGainSteps = 16
 )
 
 // estimate is the current rate; callers hold vr.mu.
@@ -1446,17 +1460,53 @@ func (vr *viewerRate) estimate() uint64 {
 	return max(vr.start, initViewerBitrate)
 }
 
-func (vr *viewerRate) updateLoss(fractionLost uint8) {
+// grow applies one additive-increase burst for the time elapsed since the
+// previous receiver report, never above the ceiling the room set: the
+// walk up has to end somewhere, and more than the publisher may send is
+// not useful.
+func (vr *viewerRate) grow(rate uint64, elapsed time.Duration) uint64 {
+	steps := min(max(1, int(elapsed/rateGainPeriod)), maxGainSteps)
+
+	for range steps {
+		rate = rate * rateGainNum / rateGainDen
+
+		if rate >= vr.start {
+			return vr.start
+		}
+	}
+
+	return rate
+}
+
+// lift takes the viewer's own REMB as evidence of recovered headroom: the
+// viewer measuring its own downlink sees a network recover long before a
+// 5%-a-second walk notices. Callers hold vr.mu.
+func (vr *viewerRate) lift(rate uint64) uint64 {
+	if vr.remb == 0 {
+		return rate
+	}
+
+	return max(rate, min(vr.remb, vr.start))
+}
+
+func (vr *viewerRate) updateLoss(fractionLost uint8, elapsed time.Duration) {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 
+	if elapsed <= 0 {
+		elapsed = rateGainPeriod
+	}
+
 	rate := vr.estimate()
 
-	if fractionLost < lowLossFraction {
-		rate = rate * rateGainNum / rateGainDen
-	} else if fractionLost > highLossFraction {
+	switch {
+	case fractionLost > highLossFraction:
 		rate = rate * (lossScale - uint64(fractionLost)) / lossScale
 		rate = max(rate, minViewerBitrate)
+		vr.clean = false
+	case fractionLost < lowLossFraction:
+		vr.clean = true
+		rate = vr.lift(vr.grow(rate, elapsed))
 	}
 
 	vr.loss = rate
@@ -1471,6 +1521,13 @@ func (vr *viewerRate) setREMB(bitrate float64) {
 	defer vr.mu.Unlock()
 
 	vr.remb = uint64(bitrate)
+
+	// A viewer that is not losing packets and now says it has more room
+	// is right about its own link; follow it instead of waiting for the
+	// additive ramp to rediscover the bandwidth.
+	if vr.clean && vr.loss >= minViewerBitrate {
+		vr.loss = vr.lift(vr.loss)
+	}
 }
 
 func (vr *viewerRate) max() uint64 {
@@ -1718,7 +1775,7 @@ func (ut *UpTrack) setViewerREMB(viewerID string, bitrate float64) {
 	}
 }
 
-func (ut *UpTrack) updateViewerLoss(viewerID string, fractionLost uint8) {
+func (ut *UpTrack) updateViewerLoss(viewerID string, fractionLost uint8, elapsed time.Duration) {
 	ut.mu.RLock()
 	viewer := ut.viewers[viewerID]
 	ut.mu.RUnlock()
@@ -1727,7 +1784,7 @@ func (ut *UpTrack) updateViewerLoss(viewerID string, fractionLost uint8) {
 		return
 	}
 
-	viewer.rate.updateLoss(fractionLost)
+	viewer.rate.updateLoss(fractionLost, elapsed)
 
 	viewer.mu.Lock()
 	viewer.steps.observeLoss(fractionLost, viewer.current)
@@ -2077,7 +2134,7 @@ func (dp *DownPeer) watchFeedback(sender *webrtc.RTPSender, viewer *Member, trac
 	}
 
 	go func() {
-		var lastForward time.Time
+		var relay feedbackRelay
 
 		for {
 			packets, _, err := sender.ReadRTCP()
@@ -2086,25 +2143,47 @@ func (dp *DownPeer) watchFeedback(sender *webrtc.RTPSender, viewer *Member, trac
 			}
 
 			for _, packet := range packets {
-				switch feedback := packet.(type) {
-				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
-					if time.Since(lastForward) < keyframeRequestInterval {
-						continue
-					}
-
-					lastForward = time.Now()
-
-					viewer.room.requestKeyframe(dp.sourceID)
-				case *rtcp.ReceiverEstimatedMaximumBitrate:
-					track.setViewerREMB(viewer.ID, float64(feedback.Bitrate))
-				case *rtcp.ReceiverReport:
-					for _, report := range feedback.Reports {
-						track.updateViewerLoss(viewer.ID, report.FractionLost)
-					}
-				}
+				dp.relayFeedback(&relay, packet, viewer, track)
 			}
 		}
 	}()
+}
+
+// feedbackRelay is the state one viewer's feedback loop keeps between
+// packets: when it last asked for a keyframe and when it last reported
+// loss, which together pace the requests and the rate controller.
+type feedbackRelay struct {
+	keyframe time.Time
+	loss     time.Time
+}
+
+// relayFeedback hands one RTCP packet from a viewer to the publisher.
+func (dp *DownPeer) relayFeedback(relay *feedbackRelay, packet rtcp.Packet, viewer *Member, track *UpTrack) {
+	now := time.Now()
+
+	switch feedback := packet.(type) {
+	case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+		if now.Sub(relay.keyframe) < keyframeRequestInterval {
+			return
+		}
+
+		relay.keyframe = now
+
+		viewer.room.requestKeyframe(dp.sourceID)
+	case *rtcp.ReceiverEstimatedMaximumBitrate:
+		track.setViewerREMB(viewer.ID, float64(feedback.Bitrate))
+	case *rtcp.ReceiverReport:
+		elapsed := rateGainPeriod
+		if !relay.loss.IsZero() {
+			elapsed = now.Sub(relay.loss)
+		}
+
+		relay.loss = now
+
+		for _, report := range feedback.Reports {
+			track.updateViewerLoss(viewer.ID, report.FractionLost, elapsed)
+		}
+	}
 }
 
 // sdpSection accumulates the fingerprint fields of one media section.

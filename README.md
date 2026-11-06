@@ -368,7 +368,10 @@ Galène-style SFU (selective forwarding unit):
 - One upstream connection per publisher and one downstream connection per
   viewer, trickle ICE, keyframe requests, NACK and receiver-report
   interceptors, and a REMB bandwidth ceiling, all on a single UDP port.
-- Simulcast cameras, with each viewer getting the layer that fits.
+- Simulcast cameras, with each viewer getting the layer that fits, and
+  a loss-driven bitrate ceiling that climbs back as the network does: a
+  layer or a screen share lost to one bad minute comes back, and the
+  viewer's own REMB is taken as evidence that its link recovered.
 - A built-in TURN relay over UDP, TCP and TLS on 443. No coturn and no
   third-party STUN.
 - SQLite storage in pure Go (no CGO), with the web UI embedded.

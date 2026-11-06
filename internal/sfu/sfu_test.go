@@ -1007,12 +1007,60 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 func TestScreenShareRembStartsAtCeiling(t *testing.T) {
 	t.Parallel()
 
+	call := newScreenShareCall(t)
+
+	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its screen share", atCeiling)
+
+	call.report(t, 64)
+
+	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
+}
+
+// TestScreenShareRembRecoversAfterCongestion asserts the other half of
+// the controller: once the viewer reports a clean link and says its own
+// downlink is healthy again, the publisher's ceiling comes back on that
+// report. A screen share that only adapts downwards stays blurred by one
+// bad minute for the rest of the call.
+func TestScreenShareRembRecoversAfterCongestion(t *testing.T) {
+	t.Parallel()
+
+	call := newScreenShareCall(t)
+
+	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its screen share", atCeiling)
+
+	call.report(t, 64)
+
+	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
+
+	call.report(t, 0)
+	call.setREMB(t, screenShareCeiling)
+
+	waitRemb(t, call.rembs, "the ceiling back once the viewer's link recovered", atCeiling)
+}
+
+// screenShareCall is one member sharing a screen to one viewer, with the
+// publisher's RTCP watched for the bitrate the hub feeds it. A screen
+// share has no simulcast layers to move between, so it is the only video
+// stream the hub throttles with REMB.
+type screenShareCall struct {
+	viewer *testPeer
+	ssrc   uint32
+	rembs  <-chan float64
+}
+
+// screenShareCeiling is the room's default publish ceiling in bits per
+// second, which a single screen share may use in full.
+const screenShareCeiling = 2_500_000.0
+
+func newScreenShareCall(t *testing.T) screenShareCall {
+	t.Helper()
+
 	engine, closeEngine, err := sfu.NewLoopbackEngine()
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
 
-	defer closeEngine()
+	t.Cleanup(closeEngine)
 
 	hub := newTestHub(t, engine)
 
@@ -1025,30 +1073,47 @@ func TestScreenShareRembStartsAtCeiling(t *testing.T) {
 	viewer := newTestPeer(t, hub, engine, "bob", false)
 	remote, _ := viewerSubscribe(t, viewer, engine)
 
-	const ceiling = 2_500_000.0
+	return screenShareCall{
+		viewer: viewer,
+		ssrc:   uint32(remote.SSRC()),
+		rembs:  watchRembOnPublisher(publisherVideoSender(t, publisher)),
+	}
+}
 
-	rembs := watchRembOnPublisher(publisherVideoSender(t, publisher))
+// report sends one receiver report, the viewer's account of what it lost.
+func (c screenShareCall) report(t *testing.T, fractionLost uint8) {
+	t.Helper()
 
-	waitRemb(t, rembs, "a REMB at the uplink ceiling for its screen share", func(bitrate float64) bool {
-		return bitrate >= ceiling*0.99
-	})
+	packet := &rtcp.ReceiverReport{
+		SSRC:    1,
+		Reports: []rtcp.ReceptionReport{{SSRC: c.ssrc, FractionLost: fractionLost}},
+	}
 
-	err = viewer.localPC().WriteRTCP([]rtcp.Packet{
-		&rtcp.ReceiverReport{
-			SSRC: 1,
-			Reports: []rtcp.ReceptionReport{
-				{SSRC: uint32(remote.SSRC()), FractionLost: 64},
-			},
-		},
-	})
+	err := c.viewer.localPC().WriteRTCP([]rtcp.Packet{packet})
 	if err != nil {
 		t.Fatalf("viewer receiver report: %v", err)
 	}
-
-	waitRemb(t, rembs, "a REMB below the ceiling after heavy loss", func(bitrate float64) bool {
-		return bitrate < ceiling*0.99
-	})
 }
+
+// setREMB sends the viewer's own estimate of its downlink.
+func (c screenShareCall) setREMB(t *testing.T, bitrate float64) {
+	t.Helper()
+
+	packet := &rtcp.ReceiverEstimatedMaximumBitrate{
+		SenderSSRC: 1,
+		Bitrate:    float32(bitrate),
+		SSRCs:      []uint32{c.ssrc},
+	}
+
+	err := c.viewer.localPC().WriteRTCP([]rtcp.Packet{packet})
+	if err != nil {
+		t.Fatalf("viewer remb: %v", err)
+	}
+}
+
+func atCeiling(bitrate float64) bool { return bitrate >= screenShareCeiling*0.99 }
+
+func belowCeiling(bitrate float64) bool { return !atCeiling(bitrate) }
 
 // TestWelcomeCarriesRelayCredentials checks that a member is handed
 // TURN credentials for the host it signaled on, and that the hub
