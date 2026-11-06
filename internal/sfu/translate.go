@@ -31,9 +31,11 @@ type SpeechTokens interface {
 	Token(room, member string) (string, error)
 }
 
-// isAudioKind reports whether a track kind carries audio.
+// isAudioKind reports whether a track kind carries audio. A share's
+// audio is audio: it must not grow a simulcast ladder, be measured for
+// packet loss as video, or be sent for transcription.
 func isAudioKind(kind string) bool {
-	return kind == KindAudio || strings.HasPrefix(kind, KindTranslationPrefix)
+	return kind == KindAudio || kind == KindScreenAudio || strings.HasPrefix(kind, KindTranslationPrefix)
 }
 
 func sealed(msg Message, maxCiphertext int) bool {

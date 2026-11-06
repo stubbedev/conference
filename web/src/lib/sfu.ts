@@ -6,7 +6,7 @@
 // relays ciphertext.
 
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
-import { screenSenderParameters } from '@/lib/screen'
+import { SCREEN_AUDIO_KIND, screenSenderParameters } from '@/lib/screen'
 import { isLangPrefs, isRoomCaption, type LangPrefs, type RoomCaption } from '@/lib/translate/types'
 
 export interface MemberInfo {
@@ -366,18 +366,25 @@ export class RoomClient {
     const pc = this.up
     if (!pc) throw new Error('Publish before sharing your screen.')
 
-    for (const track of stream.getVideoTracks()) {
-      // 'motion' tells the browser this is a moving picture to keep up
-      // with, not a scan of text to keep sharp: a shared window that
-      // keeps its frame rate is what a call is missing otherwise.
-      track.contentHint = 'motion'
+    for (const track of stream.getTracks()) {
+      // A share carries its own sound when the picker offered it; it is
+      // announced as screen audio so the server treats it as audio and
+      // every member hears what is shared.
       this.screenTrackIds.add(track.id)
+
       const sender = pc.addTrack(track, stream)
       this.screenSenders.push(sender)
       const transceiver = pc.getTransceivers().find((t) => t.sender === sender)
       if (transceiver) preferVP8(transceiver)
       this.installSenderTransform(sender)
-      await tuneScreenSender(sender)
+
+      if (track.kind === 'video') {
+        // 'motion' tells the browser this is a moving picture to keep up
+        // with, not a scan of text to keep sharp: a shared window that
+        // keeps its frame rate is what a call is missing otherwise.
+        track.contentHint = 'motion'
+        await tuneScreenSender(sender)
+      }
     }
 
     this.state = { ...this.state, sharing: true }
@@ -613,8 +620,8 @@ export class RoomClient {
     if (!track) return 'camera'
     const translationLang = this.translationTrackLangs.get(track.id)
     if (translationLang) return `translation-${translationLang}`
+    if (this.screenTrackIds.has(track.id)) return track.kind === 'audio' ? SCREEN_AUDIO_KIND : 'screen'
     if (track.kind === 'audio') return 'audio'
-    if (this.screenTrackIds.has(track.id)) return 'screen'
     return 'camera'
   }
 
@@ -740,13 +747,17 @@ export class RoomClient {
           ev.track.kind === 'audio'
             ? labelled?.startsWith('translation-')
               ? labelled
-              : 'audio'
+              : labelled === SCREEN_AUDIO_KIND
+                ? SCREEN_AUDIO_KIND
+                : 'audio'
             : (labelled ?? 'camera')
-        // A translated voice is played on its own, never as part of the
-        // speaker's camera stream, so it gets a stream of its own.
-        const stream = kind.startsWith('translation-')
-          ? new MediaStream([ev.track])
-          : (ev.streams[0] ?? new MediaStream([ev.track]))
+        // A translated voice and a share's sound are played on their own
+        // terms, never as part of the speaker's camera stream, so each
+        // gets a stream of its own.
+        const stream =
+          kind.startsWith('translation-') || kind === SCREEN_AUDIO_KIND
+            ? new MediaStream([ev.track])
+            : (ev.streams[0] ?? new MediaStream([ev.track]))
         this.emit('track', { sourceId, stream, kind })
       }
     }

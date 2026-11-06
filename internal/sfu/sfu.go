@@ -23,9 +23,10 @@ import (
 
 // Track kinds as announced by the client in offer metadata.
 const (
-	KindAudio  = "audio"
-	KindCamera = "camera"
-	KindScreen = "screen"
+	KindAudio       = "audio"
+	KindCamera      = "camera"
+	KindScreen      = "screen"
+	KindScreenAudio = "screen-audio"
 )
 
 // Moderation actions a privileged member can request for another member.

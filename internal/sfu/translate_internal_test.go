@@ -9,6 +9,7 @@ func TestTranslationTracksAreAudio(t *testing.T) {
 
 	for kind, audio := range map[string]bool{
 		KindAudio:                    true,
+		KindScreenAudio:              true,
 		KindTranslationPrefix + "de": true,
 		KindCamera:                   false,
 		KindScreen:                   false,

@@ -44,6 +44,7 @@ import {
 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
 import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
+import { requestDisplay, SCREEN_AUDIO_KIND, screenTracks } from '@/lib/screen'
 import { Translator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName, type Language } from '@/lib/translate/languages'
 import { isVoiceChoice, type LangPrefs, type RoomCaption, type TranslatorStatus } from '@/lib/translate/types'
@@ -818,12 +819,18 @@ export default function Room() {
           return
         }
         // A member's microphone and camera share one tile (and one
-        // MediaStream from the SFU); only a screen share gets its own.
-        const tileKind = kind === SCREEN_KIND ? SCREEN_KIND : CAMERA_KIND
+        // MediaStream from the SFU); a screen share gets its own, and
+        // its sound joins it there whatever order the tracks arrive in.
+        const tileKind = kind === SCREEN_KIND || kind === SCREEN_AUDIO_KIND ? SCREEN_KIND : CAMERA_KIND
         const key = `${sourceId}:${tileKind}`
         setTiles((prev) => {
+          const existing = prev.find((t) => t.key === key)
+          const stream =
+            tileKind === SCREEN_KIND
+              ? new MediaStream(screenTracks(existing?.stream?.getTracks() ?? [], stream_.getTracks()))
+              : stream_
           const rest = prev.filter((t) => t.key !== key)
-          return [...rest, { key, sourceId, kind: tileKind, stream: stream_ }]
+          return [...rest, { key, sourceId, kind: tileKind, stream }]
         })
       })
       client.on('chat', (message) => {
@@ -1011,7 +1018,7 @@ export default function Room() {
     }
 
     try {
-      const display = await navigator.mediaDevices.getDisplayMedia({ video: true })
+      const display = await requestDisplay()
       screenStreamRef.current = display
       await client.addScreen(display)
       setScreenStream(display)
