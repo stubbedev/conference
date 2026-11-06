@@ -22,6 +22,8 @@ export interface DevicePrefs {
   resolution: CameraResolution
   volume: number
   micGain: number
+  /** Whether the camera goes out with its background blurred. */
+  blur: boolean
 }
 
 export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
@@ -32,6 +34,7 @@ export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
   resolution: 'auto',
   volume: 1,
   micGain: 1,
+  blur: false,
 }
 
 /** Whether this member goes out with microphone and camera on. */

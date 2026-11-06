@@ -24,6 +24,10 @@
   controls.
 - 🖥️ **Screen sharing and chat**, with mute and camera controls for
   every participant.
+- 🫥 **Background blur, on your machine.** One switch hides the room
+  behind you without the picture leaving the browser for anyone else's
+  model: the segmentation runs here, and everyone else receives the
+  blurred camera like any other camera.
 - 🎥 **Recording that stays with you.** Anyone in the meeting can
   record it in their own browser and download the video afterwards, one
   person at a time. The recording never touches the server, and everyone
@@ -286,6 +290,15 @@ an external service".
 - Screen shares go out as one full-quality encoding, and the SFU hands a
   publisher the whole upload budget for it: a screen share that is
   starved of bitrate drops frames until it looks frozen.
+- Background blur runs in the browser, before the camera is published:
+  MediaPipe's selfie segmentation model, served from this app
+  (`/vision/`) rather than a CDN, composited at the capture's frame rate
+  over a blurred copy of the same frame. The runtime and the model are
+  fetched the first time blur is switched on and cached by the browser
+  afterwards; nothing about the camera leaves the machine, and the SFU
+  only ever relays the composited picture. That is about 15 MB of assets
+  in the binary, which is the price of not sending a face to a model
+  somebody else runs.
 
 </details>
 

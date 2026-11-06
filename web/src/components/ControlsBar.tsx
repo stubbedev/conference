@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
+  Aperture,
   Circle,
   Languages,
   Maximize2,
@@ -24,6 +25,12 @@ interface ControlsBarProps {
   mic: boolean
   cam: boolean
   sharing: boolean
+  /** Whether the camera goes out with its background blurred. */
+  blur: boolean
+  /** Browsers that can composite a blurred camera hide the control. */
+  canBlur?: boolean
+  blurUnavailable?: string
+  onBlur?: () => void
   chatOpen: boolean
   unread: number
   fullscreen: boolean
@@ -58,6 +65,10 @@ export const ControlsBar = memo(function ControlsBar({
   mic,
   cam,
   sharing,
+  blur = false,
+  canBlur = false,
+  blurUnavailable,
+  onBlur,
   chatOpen,
   unread,
   fullscreen,
@@ -141,6 +152,21 @@ export const ControlsBar = memo(function ControlsBar({
           {cam ? <Video /> : <VideoOff />}
         </Button>
       </Hint>
+      {canBlur && onBlur && (
+        <Hint label={blurUnavailable || (blur ? 'Turn off background blur' : 'Blur background')}>
+          <Button
+            variant={blur ? 'default' : 'secondary'}
+            size="icon"
+            className={ICON_BUTTON}
+            onClick={onBlur}
+            aria-label={blur ? 'Turn off background blur' : 'Blur background'}
+            aria-pressed={blur}
+            disabled={!cam}
+          >
+            <Aperture />
+          </Button>
+        </Hint>
+      )}
       {canShare && (
         <Hint label={sharing ? 'Stop sharing' : 'Share your screen'}>
           <Button

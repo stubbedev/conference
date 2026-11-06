@@ -59,6 +59,8 @@ import {
 } from '@/lib/sfu'
 import { Button } from '@/components/ui/button'
 import { ChatPanel } from '@/components/ChatPanel'
+import { blurSupported, startBlur, type BlurPipeline } from '@/lib/blur'
+import { loadSegmenter } from '@/lib/vision'
 import { ControlsBar } from '@/components/ControlsBar'
 import { DeviceSettingsPopover } from '@/components/MediaSettings'
 import { Hint } from '@/components/Hint'
@@ -260,6 +262,7 @@ export default function Room() {
         : 'auto',
       volume: typeof stored.volume === 'number' ? Math.min(1, Math.max(0, stored.volume)) : 1,
       micGain: typeof stored.micGain === 'number' ? Math.min(4, Math.max(0, stored.micGain)) : 1,
+      blur: stored.blur === true,
       camFacing:
         stored.camFacing === 'user' || stored.camFacing === 'environment'
           ? stored.camFacing
@@ -285,6 +288,7 @@ export default function Room() {
 
   const { devices, refresh: refreshDevices } = useMediaDevices()
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+  const canBlur = blurSupported()
 
   const clientRef = useRef<RoomClient | null>(null)
   const recorderRef = useRef<CallRecorder | null>(null)
@@ -292,11 +296,21 @@ export default function Room() {
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
   const micPipelineRef = useRef<MicPipeline | null>(null)
+  const blurPipelineRef = useRef<BlurPipeline | null>(null)
+  const blurIntentRef = useRef(false)
+  const rawCamRef = useRef<MediaStreamTrack | null>(null)
   const sessionRef = useRef('')
   const roomKeyRef = useRef<Uint8Array<ArrayBuffer> | null>(null)
 
   const controlsRef = useLatest(controls)
   const prefsRef = useLatest(devicePrefs)
+
+  // Background blur follows a ref as well as the stored preference: the
+  // camera is opened asynchronously, and it must land on the choice the
+  // person made last, even if they made it while the lens was opening.
+  useEffect(() => {
+    blurIntentRef.current = devicePrefs.blur
+  }, [devicePrefs.blur])
   const devicesRef = useLatest(devices)
   const chatOpenRef = useLatest(chatOpen)
   const membersRef = useLatest(members)
@@ -393,6 +407,72 @@ export default function Room() {
     [handleLocalTrackLoss],
   )
 
+  // The camera's outbound track: the capture itself, or the blurred
+  // composite of it. The pipeline is built the first time blur is needed
+  // and pointed at whatever capture is live from then on.
+  const cameraTrackFor = useCallback(
+    async (raw: MediaStreamTrack, blur: boolean): Promise<MediaStreamTrack> => {
+      if (!blur) {
+        blurPipelineRef.current?.stop()
+        blurPipelineRef.current = null
+
+        return raw
+      }
+
+      try {
+        const segmenter = await loadSegmenter()
+        const pipeline = blurPipelineRef.current ?? startBlur(raw, segmenter)
+        blurPipelineRef.current = pipeline
+        pipeline.rewire(raw)
+
+        return pipeline.track
+      } catch (err) {
+        console.error('blur: starting the background blur', err)
+        toast.error('Background blur is unavailable here, so your camera goes out as it is.')
+        blurIntentRef.current = false
+        updateDevicePrefs({ blur: false })
+
+        return raw
+      }
+    },
+    [updateDevicePrefs],
+  )
+
+  // publishCamera swaps the track this member sends as its camera, keeping
+  // the raw capture alive: blur can be turned back off, and the pipeline
+  // is only ever pointed at it.
+  const publishCamera = useCallback(
+    async (outbound: MediaStreamTrack) => {
+      const current = localStreamRef.current
+      if (!current) return
+
+      const previous = current.getVideoTracks()[0]
+      if (previous && previous !== outbound) {
+        current.removeTrack(previous)
+        if (previous !== rawCamRef.current) previous.stop()
+      }
+
+      if (!current.getTracks().some((track) => track === outbound)) current.addTrack(outbound)
+      setLocalStream(new MediaStream(current.getTracks()))
+      await clientRef.current?.replaceLocalTrack('cam', outbound)
+      clientRef.current?.setTrackEnabled('cam', controlsRef.current.cam)
+    },
+    [controlsRef],
+  )
+
+  const toggleBlur = useCallback(async () => {
+    const next = !blurIntentRef.current
+    // The intent is recorded before the state is, so a camera that is
+    // still being opened joins the call the way it was just switched.
+    blurIntentRef.current = next
+    updateDevicePrefs({ blur: next })
+
+    const raw = rawCamRef.current
+    if (!raw) return
+
+    await publishCamera(await cameraTrackFor(raw, next))
+  }, [cameraTrackFor, publishCamera, updateDevicePrefs])
+
   const acquireMedia = useCallback(async () => {
     setMediaBusy(true)
     setMediaError('')
@@ -413,6 +493,8 @@ export default function Room() {
         lossGuardRef.current = {}
         micPipelineRef.current?.dispose()
         micPipelineRef.current = null
+        blurPipelineRef.current?.stop()
+        blurPipelineRef.current = null
         stopMediaStream(localStreamRef.current)
       }
       const combined = await navigator.mediaDevices
@@ -455,12 +537,15 @@ export default function Room() {
       if (micTrack) micTrack.enabled = controlsRef.current.mic
       if (camTrack) camTrack.enabled = controlsRef.current.cam
 
+      rawCamRef.current = camTrack
+      const outboundCam = camTrack ? await cameraTrackFor(camTrack, blurIntentRef.current) : null
+
       stopMediaStream(localStreamRef.current)
-      const stream = new MediaStream([outboundMic, camTrack].filter(Boolean) as MediaStreamTrack[])
+      const stream = new MediaStream([outboundMic, outboundCam].filter(Boolean) as MediaStreamTrack[])
       localStreamRef.current = stream
       setLocalStream(stream)
       if (micTrack && outboundMic) watchLocalTrack('mic', micTrack, outboundMic)
-      if (camTrack) watchLocalTrack('cam', camTrack, camTrack)
+      if (camTrack && outboundCam) watchLocalTrack('cam', camTrack, outboundCam)
       if (camTrack && mobile) {
         // Remember the facing of the camera that actually opened so the
         // picker names the live lens and the next page load (iOS rotates
@@ -479,7 +564,7 @@ export default function Room() {
     } finally {
       setMediaBusy(false)
     }
-  }, [refreshDevices, controlsRef, prefsRef, devicesRef, updateDevicePrefs, watchLocalTrack])
+  }, [refreshDevices, controlsRef, prefsRef, devicesRef, updateDevicePrefs, watchLocalTrack, cameraTrackFor])
 
   const bootstrap = useCallback(
     async (password?: string) => {
@@ -565,6 +650,8 @@ export default function Room() {
       recorderRef.current?.stop().catch(() => {})
       translatorRef.current?.stop().catch(() => {})
       micPipelineRef.current?.dispose()
+      blurPipelineRef.current?.stop()
+      rawCamRef.current = null
       stopMediaStream(localStreamRef.current)
       stopMediaStream(screenStreamRef.current)
     }
@@ -1162,6 +1249,9 @@ export default function Room() {
             outbound = created.track
           }
         }
+      } else {
+        rawCamRef.current = track
+        outbound = await cameraTrackFor(track, blurIntentRef.current)
       }
 
       const current = localStreamRef.current
@@ -1169,7 +1259,7 @@ export default function Room() {
         const old = kind === 'mic' ? current.getAudioTracks()[0] : current.getVideoTracks()[0]
         if (old && old !== outbound) {
           current.removeTrack(old)
-          old.stop()
+          if (old !== rawCamRef.current) old.stop()
         }
         if (!current.getTracks().some((existing) => existing === outbound)) {
           current.addTrack(outbound)
@@ -1217,7 +1307,7 @@ export default function Room() {
       clientRef.current?.setTrackEnabled(kind, controlsRef.current[kind])
       if (silent) toast.success(`${DEVICE_LABELS[kind]} is back in the call`)
     },
-    [updateDevicePrefs, refreshDevices, controlsRef, prefsRef, devicesRef, watchLocalTrack],
+    [updateDevicePrefs, refreshDevices, controlsRef, prefsRef, devicesRef, watchLocalTrack, cameraTrackFor],
   )
 
   useEffect(() => {
@@ -1656,9 +1746,12 @@ export default function Room() {
           name={displayName}
           mic={controls.mic}
           cam={controls.cam}
+          blur={devicePrefs.blur}
+          canBlur={canBlur}
           onNameChange={setDisplayName}
           onToggleMic={toggleMic}
           onToggleCam={toggleCam}
+          onToggleBlur={() => void toggleBlur()}
           onRetryMedia={() => void acquireMedia()}
           onJoin={() => void joinCall()}
           translation={
@@ -1832,6 +1925,9 @@ export default function Room() {
         mic={controls.mic}
         cam={controls.cam}
         sharing={controls.sharing}
+        blur={devicePrefs.blur}
+        canBlur={canBlur}
+        onBlur={() => void toggleBlur()}
         chatOpen={chatOpen}
         unread={unread}
         fullscreen={fullscreen}

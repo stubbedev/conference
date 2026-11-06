@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { Loader2, Mic, MicOff, RotateCcw, ShieldCheck, Video, VideoOff } from 'lucide-react'
+import { Aperture, Loader2, Mic, MicOff, RotateCcw, ShieldCheck, Video, VideoOff } from 'lucide-react'
 
 import { FALLBACK_ASPECT_RATIO } from '@/hooks/media'
 import { Button } from '@/components/ui/button'
@@ -18,9 +18,13 @@ interface PrejoinProps {
   name: string
   mic: boolean
   cam: boolean
+  /** Whether the camera goes out with its background blurred. */
+  blur: boolean
+  canBlur: boolean
   onNameChange: (name: string) => void
   onToggleMic: () => void
   onToggleCam: () => void
+  onToggleBlur: () => void
   onRetryMedia: () => void
   onJoin: () => void
   /** Live-translation settings, when the server offers it. */
@@ -40,9 +44,12 @@ export function Prejoin({
   name,
   mic,
   cam,
+  blur,
+  canBlur,
   onNameChange,
   onToggleMic,
   onToggleCam,
+  onToggleBlur,
   onRetryMedia,
   onJoin,
   translation,
@@ -103,6 +110,20 @@ export function Prejoin({
                     {cam ? <Video /> : <VideoOff />}
                   </Button>
                 </Hint>
+                {canBlur && onToggleBlur && (
+                  <Hint label={blur ? 'Turn off background blur' : 'Blur background'} side="top">
+                    <Button
+                      variant={blur ? 'default' : 'secondary'}
+                      size="icon"
+                      aria-label={blur ? 'Turn off background blur' : 'Blur background'}
+                      aria-pressed={blur}
+                      disabled={!cam}
+                      onClick={onToggleBlur}
+                    >
+                      <Aperture />
+                    </Button>
+                  </Hint>
+                )}
               </div>
             </div>
           )}
