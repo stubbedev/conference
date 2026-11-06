@@ -353,7 +353,7 @@ async function main() {
 
     const hostRecordButton = await clickButtonByTitle(browsers[0], 'Record the call')
     check(failures, 'recording', hostRecordButton, 'record button missing on the privileged browser')
-    check(failures, 'recording', !(await evalJs(browsers[1], recordButtonPresent)), 'record button visible on the unprivileged browser')
+    check(failures, 'recording', await evalJs(browsers[1], recordButtonPresent), 'record button missing on the unprivileged browser')
 
     if (hostRecordButton) {
       check(failures, 'recording', await waitForBadge(browsers[0], true), 'recording badge missing on the recorder page')
@@ -369,8 +369,8 @@ async function main() {
       check(failures, 'recording', await waitForBadge(browsers[1], false), 'badge did not clear on the guest after the recorder left')
       check(failures, 'recording', await waitForBadge(late, false), 'badge did not clear on the late joiner after the recorder left')
 
-      // Round two: the late joiner holds a privileged session, so it
-      // becomes the recorder and must deliver a file when it stops.
+      // Round two: the late joiner becomes the recorder and must deliver
+      // a file when it stops.
       await late.cdp.send('Browser.setDownloadBehavior', {
         behavior: 'allow',
         downloadPath: dlDir,
