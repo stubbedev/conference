@@ -403,6 +403,38 @@ async function main() {
         check(failures, 'recording', loudest !== null && loudest > REMOTE_VOICE_MIN_DB, `the guest's voice is not in the recording (loudest ${loudest} dB)`)
 
         console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
+
+        // Round three: a recording the browser ends on its own (the
+        // encoder failed, the way a long recording can die) must still
+        // hand over the file and clear the badge everywhere instead of
+        // silently recording nothing.
+        for (const name of readdirSync(dlDir)) rmSync(join(dlDir, name))
+
+        const again = await clickButtonByTitle(late, 'Record the call')
+        check(failures, 'recording', again, 'record button missing for the interrupted round')
+
+        if (again) {
+          check(failures, 'recording', await waitForBadge(late, true), 'recording badge missing before the interruption')
+          await sleep(5000)
+
+          const failed = await evalJs(
+            late,
+            `(() => {
+              const recorder = window.__mediaRecorders.at(-1)
+              if (!recorder) return false
+              const event = Object.assign(new Event('error'), { error: new DOMException('encoder failure', 'EncodingError') })
+              recorder.dispatchEvent(event)
+              return true
+            })()`,
+          )
+          check(failures, 'recording', failed, 'the recording has no MediaRecorder to interrupt')
+
+          const partial = await waitForDownload(dlDir)
+          check(failures, 'recording', partial !== null, 'a recording the browser ended was not saved')
+          check(failures, 'recording', await waitForBadge(late, false), 'badge stayed up on the recorder after its recording ended')
+          check(failures, 'recording', await waitForBadge(browsers[1], false), "badge stayed up on the guest after the recorder's recording ended")
+          console.log(`recording: interrupted by the browser, file ${partial ? `${partial.name} ${partial.size} bytes` : 'MISSING'}`)
+        }
       }
     }
 

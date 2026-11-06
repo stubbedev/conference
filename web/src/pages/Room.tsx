@@ -612,7 +612,17 @@ export default function Room() {
 
     let instance: CallRecorder
     try {
-      instance = new CallRecorder(slug)
+      instance = new CallRecorder(slug, (reason) => {
+        // The recorder gave up on its own (the browser stopped it, or it
+        // could not keep writing): the file is already downloading, so
+        // release the room's badge and say what happened instead of
+        // leaving a recording that looks like it is still running.
+        if (recorderRef.current !== instance) return
+        recorderRef.current = null
+        setRecording(false)
+        clientRef.current?.announceRecording(false)
+        toast.error(`Recording stopped: ${reason}. Everything captured until then has been saved.`)
+      })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Recording is unavailable.')
       return

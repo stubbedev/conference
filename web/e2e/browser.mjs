@@ -179,6 +179,16 @@ export const hook = (relayTransport) => `
   window.__errors = [];
   window.addEventListener('error', (e) => window.__errors.push(e.message));
   window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason)));
+  // Every MediaRecorder the page builds, so a test can end a recording
+  // the way a browser does, without waiting for one to fail.
+  window.__mediaRecorders = [];
+  const OrigRecorder = window.MediaRecorder;
+  window.MediaRecorder = class extends OrigRecorder {
+    constructor(...a) {
+      super(...a);
+      window.__mediaRecorders.push(this);
+    }
+  };
 })();
 `
 
