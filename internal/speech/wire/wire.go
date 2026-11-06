@@ -16,8 +16,14 @@ const headerLength = 2
 
 // Message types and the notice code a client acts on.
 const (
-	TypeHello             = "hello"
-	TypeEnd               = "end"
+	TypeHello = "hello"
+	TypeEnd   = "end"
+	// TypeVoiceSample ends a voice sample the speaker recorded before the
+	// call, sent ahead in audio frames marked Sample.
+	TypeVoiceSample = "voice-sample"
+	// TypeForgetVoice drops the speaker's own voice, recorded or learned,
+	// at once: they deleted it or chose a stock voice.
+	TypeForgetVoice       = "forget-voice"
 	TypeReady             = "ready"
 	TypeCaption           = "caption"
 	TypeNotice            = "notice"
@@ -26,6 +32,9 @@ const (
 	// own voice have been collected; NoticeOwnVoiceReady that it is in use.
 	NoticeOwnVoiceLearning = "own-voice-learning"
 	NoticeOwnVoiceReady    = "own-voice-ready"
+	// NoticeOwnVoiceRejected: a recorded voice sample was too short or
+	// held no speech; the voice is learned from the call instead.
+	NoticeOwnVoiceRejected = "own-voice-rejected"
 )
 
 var (
@@ -38,6 +47,9 @@ type AudioHeader struct {
 	Speaker string `json:"speaker"`
 	Lang    string `json:"lang"`
 	Voice   string `json:"voice"`
+	// Sample marks audio of a voice sample recorded before the call, not
+	// live speech.
+	Sample bool `json:"sample,omitempty"`
 }
 
 // VoiceHeader heads the service's frame of translated voice.
@@ -51,7 +63,8 @@ type VoiceHeader struct {
 }
 
 // Command is a client's text message: hello with its target languages,
-// or end when a speaker's stream stops. VoiceTargets, when present, are
+// end when a speaker's stream stops, or voice-sample after a recorded
+// voice sample. VoiceTargets, when present, are
 // the targets someone wants to hear a translated voice in; without it
 // every target gets one.
 type Command struct {
@@ -59,6 +72,8 @@ type Command struct {
 	Targets      []string `json:"targets,omitempty"`
 	VoiceTargets []string `json:"voiceTargets,omitempty"`
 	Speaker      string   `json:"speaker,omitempty"`
+	// Lang is the language a voice sample is spoken in.
+	Lang string `json:"lang,omitempty"`
 }
 
 // Caption is a subtitle in one language; Final is false while the

@@ -101,19 +101,45 @@ latest.
 ## Own voice
 
 With `VOICE_CLONING=true`, a speaker can choose **My own voice** instead
-of the female or male one; without it the app doesn't offer the option. The speech service learns it from what they
-say in the call: once 12 s of their finished sentences in one language
-are collected (filler under 1 s doesn't count, at most 20 s is kept), it
-sends that recording and its transcript with every voice request for
-them. Until then, and whenever a cloned request fails, they are heard in
-the female voice. The speaker sees "Learning your voice…" and then "Your
-own voice is in use"; listeners see "AI voice (cloned)" on the tile while
-it plays, so nobody mistakes it for the person speaking that language.
+of the female or male one; without it the app doesn't offer the option.
+Listeners see "AI voice (cloned)" on the tile while it plays, so nobody
+mistakes it for the person speaking that language.
 
-**Nothing is kept.** The recording lives in the speech service's memory
-for that member's stream and goes with it; the voice engine gets it
-inline with each request, so nothing has to be stored or deleted there.
-It comes only from the speaker's own microphone.
+**Recorded before the meeting.** With My own voice chosen, the join
+screen (and the settings during the call) offers **Record my voice**: the
+speaker reads a short, meeting-like text in their language (15 s; English,
+German, Swedish and Danish have texts written to cover each language's
+sounds and a question's intonation, other languages get a prompt to talk
+freely). When live translation starts, their browser sends the recording
+to the speech service, which transcribes it and uses it from their first
+sentence. A recording under 6 s, or one with no speech, is turned down.
+
+**Or learned from the call.** Without a recording, the service learns the
+voice from what they say: once 12 s of their finished sentences in one
+language are collected (filler under 1 s doesn't count, at most 20 s is
+kept). Until then, and whenever a cloned request fails, they are heard in
+the female voice; they see "Learning your voice…" and then "Your own
+voice is in use".
+
+**Where the voice is, and when it's gone.** It comes only from the
+speaker's own microphone.
+
+- *Their browser:* in memory while the page is open; cleared when they
+  leave the call or delete it. Only if they switch on **Remember my voice
+  on this device** is it also kept in this browser's IndexedDB, for later
+  calls, until they delete it or switch that off. Every page load deletes
+  any stored copy while that switch is off.
+- *The speech service:* in memory for that member's stream only. It is
+  dropped when the stream ends, and at once when the speaker deletes it
+  or picks a stock voice (the browser sends `forget-voice`). Never logged
+  or written to disk.
+- *The voice engine:* gets it inline with each request, so nothing has to
+  be stored or deleted there. audio.cpp keeps one prepared voice in memory
+  per model to save preparing it again for every sentence
+  (`conditionals_cache_slots` for Chatterbox, `prompt_cache_slots` for
+  VoxCPM2, both 1 by default); set them to 0 if no voice may outlive its
+  request, at the cost of preparing it each time. Keep its
+  `log_request_body` off, so request bodies aren't logged.
 
 The voice engine must accept audio.cpp's request fields:
 
@@ -130,7 +156,8 @@ The voice engine must accept audio.cpp's request fields:
 (C++, Apache-2.0) serves voice-cloning models such as VoxCPM2 (Apache-2.0)
 and Chatterbox Multilingual (MIT), both covering, among others, Danish,
 German, English and Swedish. Cloning is heavier than a stock voice: it
-needs a GPU to keep up with a live call.
+needs a GPU to keep up with a live call. Chatterbox needs `language`: a
+German sentence without it comes out garbled.
 
 **Voices only where someone listens.** Each speaker's browser tells the
 service which languages someone wants a translated voice in; others get

@@ -153,7 +153,7 @@ func speak(ctx context.Context, conn *websocket.Conn, who speakerCase) error {
 	}
 
 	samples = append(samples, make([]int16, vad.Rate)...)
-	header := wire.AudioHeader{Speaker: who.id, Lang: who.lang, Voice: string(voiceMale)}
+	header := wire.AudioHeader{Speaker: who.id, Lang: who.lang, Voice: string(voiceMale), Sample: false}
 
 	for offset := 0; offset < len(samples); offset += chunk {
 		err = sendAudio(ctx, conn, header, samples[offset:min(offset+chunk, len(samples))])
@@ -162,7 +162,7 @@ func speak(ctx context.Context, conn *websocket.Conn, who speakerCase) error {
 		}
 	}
 
-	return writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, VoiceTargets: nil, Speaker: who.id})
+	return writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, VoiceTargets: nil, Speaker: who.id, Lang: ""})
 }
 
 func dialStream(ctx context.Context, t *testing.T, server testServer, member string) *websocket.Conn {
@@ -188,7 +188,9 @@ func dialStream(ctx context.Context, t *testing.T, server testServer, member str
 func hello(ctx context.Context, t *testing.T, conn *websocket.Conn) {
 	t.Helper()
 
-	err := writeJSONMessage(ctx, conn, wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de", "xx"}, VoiceTargets: nil, Speaker: ""})
+	hello := wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de", "xx"}, VoiceTargets: nil, Speaker: "", Lang: ""}
+
+	err := writeJSONMessage(ctx, conn, hello)
 	if err != nil {
 		t.Fatalf("hello: %v", err)
 	}
@@ -303,7 +305,7 @@ func TestForeignSpeakerEndsTheStream(t *testing.T) {
 
 	conn := dialStream(ctx, t, start(t, map[string]string{envEngines: enginesFake}), anna)
 
-	err := sendAudio(ctx, conn, wire.AudioHeader{Speaker: sam, Lang: "en", Voice: ""}, make([]int16, chunk))
+	err := sendAudio(ctx, conn, wire.AudioHeader{Speaker: sam, Lang: "en", Voice: "", Sample: false}, make([]int16, chunk))
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}

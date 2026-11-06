@@ -257,3 +257,124 @@ func TestOwnVoiceStatus(t *testing.T) {
 		t.Fatal("VOICE_CLONING=maybe was accepted")
 	}
 }
+
+// sendSample sends a recorded Swedish voice sample of this many seconds.
+func sendSample(t *testing.T, opened *session, seconds int) {
+	t.Helper()
+
+	const lang = "sv"
+
+	header := wire.AudioHeader{Speaker: anna, Lang: lang, Voice: string(voiceOwn), Sample: true}
+	audio := make([]int16, seconds*vad.Rate)
+
+	for offset := 0; offset < len(audio); offset += chunk {
+		err := opened.sampleAudio(header, audio[offset:min(offset+chunk, len(audio))])
+		if err != nil {
+			t.Fatalf("sample audio: %v", err)
+		}
+	}
+
+	err := opened.finishSample(t.Context(), anna, lang)
+	if err != nil {
+		t.Fatalf("finish the sample: %v", err)
+	}
+}
+
+func noticeOf(code string) func(any) bool {
+	return func(message any) bool {
+		notice, ok := message.(wire.Notice)
+
+		return ok && notice.Code == code
+	}
+}
+
+func TestRecordedVoiceIsUsedFromTheFirstSentence(t *testing.T) {
+	t.Parallel()
+
+	opened, out := newOwnVoiceSession(t, "true", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
+
+	sendSample(t, opened, 8)
+	out.waitFor(t, noticeOf(wire.NoticeOwnVoiceReady))
+
+	own := opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 1), "hallo")
+	if own == nil || own.text != "said in sv" {
+		t.Fatalf("first sentence spoke with %+v, want the recorded sample and its transcript", own)
+	}
+
+	if len(notices(out, wire.NoticeOwnVoiceLearning)) != 0 {
+		t.Fatal("learned from the call although a sample was recorded")
+	}
+}
+
+func TestRecordedVoiceTooShortOrSilent(t *testing.T) {
+	t.Parallel()
+
+	short, out := newOwnVoiceSession(t, "true", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
+	sendSample(t, short, 3)
+	out.waitFor(t, noticeOf(wire.NoticeOwnVoiceRejected))
+
+	silent, quiet := newOwnVoiceSession(t, "true", stubEngines{
+		transcribeFn: func(context.Context, language) (string, error) { return "", nil },
+		translateFn:  echoTranslations,
+	})
+	sendSample(t, silent, 8)
+	quiet.waitFor(t, noticeOf(wire.NoticeOwnVoiceRejected))
+
+	for _, opened := range []*session{short, silent} {
+		if opened.speaker.prepared.Load() != nil {
+			t.Fatal("a rejected sample was kept")
+		}
+	}
+}
+
+func TestRecordedVoiceNeedsCloningAndItsOwnSpeaker(t *testing.T) {
+	t.Parallel()
+
+	without, out := newOwnVoiceSession(t, "", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
+	sendSample(t, without, 8)
+
+	if without.speaker.prepared.Load() != nil || len(out.snapshot()) != 0 || without.speaker.incoming != nil {
+		t.Fatalf("kept or answered a sample without VOICE_CLONING: %+v", out.snapshot())
+	}
+
+	opened, _ := newOwnVoiceSession(t, "true", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
+
+	err := opened.sampleAudio(wire.AudioHeader{Speaker: sam, Lang: "sv", Voice: string(voiceOwn), Sample: true}, make([]int16, chunk))
+	if err == nil {
+		t.Fatal("accepted sample audio for another member")
+	}
+
+	err = opened.finishSample(t.Context(), sam, "sv")
+	if err == nil {
+		t.Fatal("accepted another member's voice sample")
+	}
+}
+
+func TestForgetVoiceDropsEverything(t *testing.T) {
+	t.Parallel()
+
+	opened, out := newOwnVoiceSession(t, "true", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
+
+	sendSample(t, opened, 8)
+	out.waitFor(t, noticeOf(wire.NoticeOwnVoiceReady))
+	opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 5), "eins")
+
+	err := opened.forgetVoice(anna)
+	if err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+
+	if opened.speaker.prepared.Load() != nil || opened.speaker.incoming != nil || opened.speaker.sample.audio != nil ||
+		opened.speaker.sample.ready != nil {
+		t.Fatal("the voice survived forget-voice")
+	}
+
+	if own := opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 5), "zwei"); own != nil {
+		t.Fatal("still spoke in the forgotten voice")
+	}
+
+	err = opened.forgetVoice(sam)
+	if err == nil {
+		t.Fatal("another member made this speaker's voice be forgotten")
+	}
+}

@@ -120,7 +120,15 @@ async function main() {
   await preset(guest, 'de', 'Gerd', 'own')
 
   await joinRoom(host, room.privUrl)
-  await joinRoom(guest, room.url)
+  // The guest records its voice on the join screen, so it is in use from its
+  // first sentence instead of being learned from the call.
+  await joinRoom(guest, room.url, null, async (browser) => {
+    const recordButton = `[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Record my voice') && !b.disabled)`
+    await waitFor(browser, `Boolean(${recordButton})`, Boolean, 15_000)
+    await evalJs(browser, `${recordButton}?.click()`)
+    const recorded = await waitFor(browser, `document.body.innerText`, (text) => text.includes('Your voice is recorded'), 30_000)
+    check('recorded voice', recorded.ok, 'the guest could not record its voice on the join screen')
+  })
   // Enabled once /api/config reports the speech engines ready.
   const button = await waitFor(host, `document.querySelector('[aria-label="Start live translation"]')?.getAttribute('aria-disabled')`, (v) => v === 'false', 15_000)
   check('start', button.ok, `no enabled "Start live translation" button for the host: ${JSON.stringify(button.value)}`)
@@ -136,8 +144,14 @@ async function main() {
   const hostSees = await waitFor(host, tileState('Gerd'), (tile) => tile?.caption.startsWith('[en] de utterance'), TIMEOUT_MS)
   check('host subtitles', hostSees.ok, `no English subtitle on the guest's tile: ${JSON.stringify(hostSees.value)}`)
 
-  const ownVoice = await waitFor(guest, `document.querySelector('header')?.innerText ?? ''`, (text) => text.includes('Your own voice is in use'), TIMEOUT_MS)
-  check('own voice', ownVoice.ok, `the guest's own voice was never learned: ${JSON.stringify(ownVoice.value)}`)
+  // In use right away: the recorded sample, not 12 s learned from the call.
+  let learning = false
+  const ownVoice = await waitFor(guest, `document.querySelector('header')?.innerText ?? ''`, (text) => {
+    learning ||= text.includes('Learning your voice')
+    return text.includes('Your own voice is in use')
+  }, TIMEOUT_MS)
+  check('own voice', ownVoice.ok, `the guest's recorded voice was never in use: ${JSON.stringify(ownVoice.value)}`)
+  check('own voice', !learning, 'the guest learned its voice from the call although it had recorded one')
 
   // The label only shows while a cloned voice plays, so poll quickly.
   let cloned = false

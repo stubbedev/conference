@@ -112,7 +112,7 @@ func speakUntilSpeaking(ctx context.Context, t *testing.T, opened *session, lang
 		t.Fatalf("fixture: %v", err)
 	}
 
-	header := wire.AudioHeader{Speaker: anna, Lang: lang, Voice: ""}
+	header := wire.AudioHeader{Speaker: anna, Lang: lang, Voice: "", Sample: false}
 
 	for offset := 0; offset < len(samples); offset += chunk {
 		err = opened.audio(ctx, header, samples[offset:min(offset+chunk, len(samples))])
@@ -147,7 +147,7 @@ func TestLanguageSwitchEndsTheSentenceInTheOldLanguage(t *testing.T) {
 
 	speakUntilSpeaking(ctx, t, opened, "de")
 
-	err := opened.audio(ctx, wire.AudioHeader{Speaker: anna, Lang: "en", Voice: ""}, make([]int16, chunk))
+	err := opened.audio(ctx, wire.AudioHeader{Speaker: anna, Lang: "en", Voice: "", Sample: false}, make([]int16, chunk))
 	if err != nil {
 		t.Fatalf("audio: %v", err)
 	}
@@ -285,7 +285,7 @@ func speakUntilInterim(ctx context.Context, t *testing.T, opened *session, start
 		t.Fatalf("fixture: %v", err)
 	}
 
-	header := wire.AudioHeader{Speaker: anna, Lang: "de", Voice: ""}
+	header := wire.AudioHeader{Speaker: anna, Lang: "de", Voice: "", Sample: false}
 
 	for offset := 0; offset < len(samples); offset += chunk {
 		err = opened.audio(ctx, header, samples[offset:min(offset+chunk, len(samples))])

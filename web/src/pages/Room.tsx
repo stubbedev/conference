@@ -44,6 +44,7 @@ import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/l
 import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
 import { Translator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName, type Language } from '@/lib/translate/languages'
+import { forgetSample, rememberSample, rememberedSample, type OwnVoiceSample } from '@/lib/translate/own-voice'
 import { isVoiceChoice, type LangPrefs, type RoomCaption, type TranslatorStatus } from '@/lib/translate/types'
 import {
   JoinError,
@@ -286,6 +287,14 @@ export default function Room() {
   const clientRef = useRef<RoomClient | null>(null)
   const recorderRef = useRef<CallRecorder | null>(null)
   const translatorRef = useRef<Translator | null>(null)
+  // The speaker's own voice, recorded before (or during) the call; kept on
+  // this device only when they ask to remember it.
+  const [ownSample, setOwnSample] = useState<OwnVoiceSample | null>(null)
+  const ownSampleRef = useLatest(ownSample)
+  const [rememberOwn, setRememberOwn] = usePersistentState('conference:own-voice-remember', false, (stored) =>
+    stored === true,
+  )
+  const rememberOwnRef = useLatest(rememberOwn)
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
   const micPipelineRef = useRef<MicPipeline | null>(null)
@@ -641,6 +650,43 @@ export default function Room() {
     setLangPrefs({ ...langPrefs, lang: codes.includes(DEFAULT_LANGUAGE) ? DEFAULT_LANGUAGE : codes[0] })
   }, [translation, langPrefs, setLangPrefs])
 
+  useEffect(() => {
+    // Not remembering: make sure no earlier copy is left on this device.
+    if (!rememberOwn) {
+      void forgetSample()
+      return
+    }
+    let cancelled = false
+    void rememberedSample().then((sample) => {
+      if (!cancelled && sample) setOwnSample((current) => current ?? sample)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [rememberOwn])
+
+  useEffect(() => {
+    translatorRef.current?.setOwnVoiceSample(ownSample)
+  }, [ownSample])
+
+  const changeOwnSample = useCallback(
+    (sample: OwnVoiceSample | null) => {
+      setOwnSample(sample)
+      if (!sample) void forgetSample()
+      else if (rememberOwn) void rememberSample(sample).catch(() => toast.error('Could not keep your voice on this device.'))
+    },
+    [rememberOwn],
+  )
+
+  const changeRememberOwn = useCallback(
+    (remember: boolean) => {
+      setRememberOwn(remember)
+      if (!remember) void forgetSample()
+      else if (ownSampleRef.current) void rememberSample(ownSampleRef.current).catch(() => {})
+    },
+    [setRememberOwn, ownSampleRef],
+  )
+
   // A remembered own voice falls back to the default where the server can't clone voices.
   useEffect(() => {
     if (translation === TRANSLATION_CHECKING || translation.ownVoice || langPrefs.voiceChoice !== 'own') return
@@ -716,10 +762,11 @@ export default function Room() {
         onStatus: setTranslatorStatus,
       })
       translatorRef.current = translator
+      translator.setOwnVoiceSample(ownSampleRef.current)
       translator.attach(client)
       translator.start(localMicTrack(localStreamRef.current))
     },
-    [langPrefsRef, handleRoomCaption, stopTranslation],
+    [langPrefsRef, ownSampleRef, handleRoomCaption, stopTranslation],
   )
 
   // The host's switch for the whole room; each browser's bridge follows
@@ -1297,7 +1344,18 @@ export default function Room() {
         onVolumeChange={handleVolumeChange}
         onMicGainChange={handleMicGainChange}
         translation={
-          <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+          <TranslationSettings
+            config={translation}
+            prefs={langPrefs}
+            onChange={changeLangPrefs}
+            ownVoice={{
+              sample: ownSample,
+              remember: rememberOwn,
+              micTrack: localMicTrack(localStream),
+              onSample: changeOwnSample,
+              onRemember: changeRememberOwn,
+            }}
+          />
         }
       />
     ),
@@ -1305,6 +1363,11 @@ export default function Room() {
       translation,
       langPrefs,
       changeLangPrefs,
+      ownSample,
+      rememberOwn,
+      localStream,
+      changeOwnSample,
+      changeRememberOwn,
       devices,
       devicePrefs,
       hasMic,
@@ -1383,9 +1446,11 @@ export default function Room() {
     endedRef.current = true
     await stopRecording()
     await stopTranslation()
+    // An own voice not remembered on this device goes with the call.
+    if (!rememberOwnRef.current) setOwnSample(null)
     clientRef.current?.leave()
     navigate('/')
-  }, [navigate, stopRecording, stopTranslation])
+  }, [navigate, stopRecording, stopTranslation, rememberOwnRef])
 
   const sendChat = useCallback(async (text: string) => {
     await clientRef.current?.sendChat(text)
@@ -1617,7 +1682,18 @@ export default function Room() {
           onRetryMedia={() => void acquireMedia()}
           onJoin={() => void joinCall()}
           translation={
-            <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+            <TranslationSettings
+            config={translation}
+            prefs={langPrefs}
+            onChange={changeLangPrefs}
+            ownVoice={{
+              sample: ownSample,
+              remember: rememberOwn,
+              micTrack: localMicTrack(localStream),
+              onSample: changeOwnSample,
+              onRemember: changeRememberOwn,
+            }}
+          />
           }
         />
       </>

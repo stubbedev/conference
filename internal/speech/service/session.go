@@ -27,6 +27,8 @@ const (
 	ownVoiceMin      = 12 * vad.Rate
 	ownVoiceMax      = 20 * vad.Rate
 	ownVoiceSentence = vad.Rate
+	// A sample recorded before the call is read on purpose, so less will do.
+	ownVoicePrepared = 6 * vad.Rate
 )
 
 type voiceFrame struct {
@@ -55,7 +57,15 @@ type speaker struct {
 	interimBusy    atomic.Bool
 	interimSamples int
 	context        []string
-	sample         voiceSample
+	// sampleMu guards sample: the worker learns into it, a forget-voice
+	// command clears it.
+	sampleMu sync.Mutex
+	sample   voiceSample
+	// incoming collects a voice sample recorded before the call while it
+	// arrives (read loop only); prepared is that sample once it is ready,
+	// and takes precedence over learning from the call.
+	incoming []int16
+	prepared atomic.Pointer[reference]
 }
 
 // voiceSample collects a speaker's own voice from their finished
@@ -115,7 +125,10 @@ func newSession(ctx context.Context, settings Settings, engines speechEngines, m
 			interimBusy:    atomic.Bool{},
 			interimSamples: 0,
 			context:        nil,
+			sampleMu:       sync.Mutex{},
 			sample:         voiceSample{lang: "", audio: nil, texts: nil, ready: nil},
+			incoming:       nil,
+			prepared:       atomic.Pointer[reference]{},
 		},
 		pending: atomic.Int64{},
 	}
@@ -191,6 +204,90 @@ func (s *session) audio(ctx context.Context, header wire.AudioHeader, pcm []int1
 	}
 
 	s.maybeInterim(ctx, current)
+
+	return nil
+}
+
+// sampleAudio collects audio of a voice sample the speaker recorded
+// before the call, up to the longest sample kept.
+func (s *session) sampleAudio(header wire.AudioHeader, pcm []int16) error {
+	current := s.speaker
+	if header.Speaker != current.id {
+		return fmt.Errorf("%w: %q", errForeignSpeaker, header.Speaker)
+	}
+
+	if s.settings.voiceCloning {
+		current.incoming = append(current.incoming, pcm[:min(len(pcm), ownVoiceMax-len(current.incoming))]...)
+	}
+
+	return nil
+}
+
+// finishSample turns the collected voice sample into the speaker's own
+// voice: transcribed, so the voice engine gets its text too, and used for
+// every translated sentence from then on.
+func (s *session) finishSample(ctx context.Context, speakerID, code string) error {
+	current := s.speaker
+	if speakerID != current.id {
+		return fmt.Errorf("%w: %q", errForeignSpeaker, speakerID)
+	}
+
+	audio := current.incoming
+	current.incoming = nil
+
+	if !s.settings.voiceCloning {
+		return nil
+	}
+
+	lang, ok := s.settings.languages.get(code)
+	if !ok || len(audio) < ownVoicePrepared {
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceRejected, Seconds: seconds(len(audio))})
+
+		return nil
+	}
+
+	s.tasks.Go(func() { s.prepare(ctx, current, audio, lang) })
+
+	return nil
+}
+
+func (s *session) prepare(ctx context.Context, current *speaker, audio []int16, lang language) {
+	text, err := s.engines.transcribe(ctx, audio, lang)
+	if err != nil || text == "" {
+		if err != nil {
+			logFailure(ctx, "own voice sample", err)
+		}
+
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceRejected, Seconds: seconds(len(audio))})
+
+		return
+	}
+
+	encoded, err := wav.Encode(audio, vad.Rate)
+	if err != nil {
+		logFailure(ctx, "own voice sample", err)
+
+		return
+	}
+
+	current.prepared.Store(&reference{wav: encoded, text: text})
+	s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceReady, Seconds: seconds(len(audio))})
+}
+
+// forgetVoice drops the speaker's own voice from this session at once:
+// a recorded sample, one still arriving, and one learned from the call.
+func (s *session) forgetVoice(speakerID string) error {
+	current := s.speaker
+	if speakerID != current.id {
+		return fmt.Errorf("%w: %q", errForeignSpeaker, speakerID)
+	}
+
+	current.incoming = nil
+	current.prepared.Store(nil)
+
+	current.sampleMu.Lock()
+	current.sample = voiceSample{lang: "", audio: nil, texts: nil, ready: nil}
+	current.sampleMu.Unlock()
 
 	return nil
 }
@@ -314,6 +411,13 @@ func (s *session) learn(ctx context.Context, current *speaker, job final, text s
 	if !s.settings.voiceCloning || job.voice != voiceOwn {
 		return nil
 	}
+
+	if prepared := current.prepared.Load(); prepared != nil {
+		return prepared
+	}
+
+	current.sampleMu.Lock()
+	defer current.sampleMu.Unlock()
 
 	sample := &current.sample
 	if sample.lang != job.lang.Code {

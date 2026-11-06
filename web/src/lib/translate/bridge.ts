@@ -13,6 +13,7 @@
 
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import type { CaptionLine, LangPrefs, RoomCaption, TranslatorStatus } from '@/lib/translate/types'
+import type { OwnVoiceSample } from '@/lib/translate/own-voice'
 import captureWorkletUrl from '@/lib/translate/pcm-capture.worklet.ts?worker&url'
 
 const CAPTURE_RATE = 16_000
@@ -26,6 +27,8 @@ const TOKEN_GRACE_MS = 1_500
 // build an ever growing delay. Far beyond what a talkative speaker
 // queues with a normal voice engine.
 const MAX_VOICE_LAG_S = 10
+// A recorded voice sample goes out in frames well under the stream's message limit.
+const SAMPLE_FRAME = 8_000
 
 interface Voice {
   output: MediaStreamAudioDestinationNode
@@ -76,6 +79,9 @@ export class Translator {
   private others = new Map<string, { lang: string; voice: boolean }>()
   private voices = new Map<string, Voice>()
   private localMic: MediaStreamTrack | null = null
+  /** The speaker's own voice, recorded before the call, and whether this connection has it. */
+  private ownSample: OwnVoiceSample | null = null
+  private sampleSent = false
   private refusedConnects = 0
   private status: TranslatorStatus = {
     state: 'claiming',
@@ -156,8 +162,30 @@ export class Translator {
   }
 
   setSelfPrefs(prefs: LangPrefs): void {
+    const droppedOwn = this.selfPrefs.voiceChoice === 'own' && prefs.voiceChoice !== 'own'
     this.selfPrefs = prefs
     this.sendTargets()
+    if (droppedOwn) this.forgetVoice()
+    this.sendSample()
+  }
+
+  /** The recorded own voice, sent to the speech service while the speaker has chosen it. */
+  setOwnVoiceSample(sample: OwnVoiceSample | null): void {
+    if (sample === this.ownSample) return
+    const deleted = this.ownSample !== null && sample === null
+    this.ownSample = sample
+    this.sampleSent = false
+    if (deleted) this.forgetVoice()
+    this.sendSample()
+  }
+
+  // The speech service drops the speaker's own voice, recorded or learned, at once.
+  private forgetVoice(): void {
+    this.sampleSent = false
+    this.setStatus({ ownVoice: 'off', ownVoiceSeconds: 0 })
+    const speaker = this.client?.memberId
+    if (!speaker || this.speech?.readyState !== WebSocket.OPEN) return
+    this.speech.send(JSON.stringify({ type: 'forget-voice', speaker }))
   }
 
   /** Stops translating this member's speech and removes its voice tracks. */
@@ -193,8 +221,10 @@ export class Translator {
     speech.onopen = () => {
       opened = true
       this.refusedConnects = 0
+      this.sampleSent = false
       this.setStatus({ state: 'live', detail: '' })
       this.sendTargets()
+      this.sendSample()
     }
     speech.onmessage = (ev: MessageEvent<string | ArrayBuffer>) => {
       if (typeof ev.data === 'string') this.onSpeechText(ev.data)
@@ -246,6 +276,20 @@ export class Translator {
     const targets = this.targets()
     this.speech.send(JSON.stringify({ type: 'hello', targets, voiceTargets: this.voiceTargets() }))
     for (const lang of targets) if (lang !== this.selfPrefs.lang) void this.ensureVoice(lang)
+  }
+
+  // The service keeps a sample per connection, so each new one gets it again.
+  private sendSample(): void {
+    const sample = this.ownSample
+    const speaker = this.client?.memberId
+    if (this.sampleSent || !sample || !speaker || this.selfPrefs.voiceChoice !== 'own') return
+    if (this.speech?.readyState !== WebSocket.OPEN) return
+    this.sampleSent = true
+    const header = { speaker, lang: sample.lang, voice: 'own', sample: true }
+    for (let offset = 0; offset < sample.pcm.length; offset += SAMPLE_FRAME) {
+      this.speech.send(pack(header, sample.pcm.slice(offset, offset + SAMPLE_FRAME).buffer))
+    }
+    this.speech.send(JSON.stringify({ type: 'voice-sample', speaker, lang: sample.lang }))
   }
 
   private async connectMic(): Promise<void> {
@@ -305,6 +349,8 @@ export class Translator {
         this.setStatus({ ownVoice: 'learning', ownVoiceSeconds: message.seconds ?? 0 })
       } else if (message.code === 'own-voice-ready') {
         this.setStatus({ ownVoice: 'ready' })
+      } else if (message.code === 'own-voice-rejected') {
+        this.setStatus({ ownVoice: 'rejected' })
       }
       return
     }
