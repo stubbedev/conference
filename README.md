@@ -221,9 +221,10 @@ languages of Europe that Whisper transcribes are included (35), each
 translated with the form of address a business call uses; the app takes
 its list from the server.
 
-Until all three engines are set up,
-everyone still sees the live-translation settings and hosts the button,
-greyed out, with what is missing (for example "set TRANSLATE_MODEL").
+Until all three engines are set up, live translation is not offered at
+all: no button for hosts, no settings for anyone, and nothing about the
+server's environment in the page. `/api/config` reports which variables
+are still unset, for whoever runs the server.
 With an engine on a public service, the app says "Live translation via
 an external service".
 

@@ -35,9 +35,11 @@ TRANSLATE_URL=http://host.docker.internal:11434 TRANSLATE_MODEL=… \
 TRANSCRIBE_URL=… TRANSCRIBE_MODEL=… VOICE_URL=… VOICE_MODEL=… VOICE_NAME=… docker compose up -d
 ```
 
-The app shows live translation greyed out, with what is missing, until
-all three engines are set up. The server logs, at start, every engine
-that is not set up or that leaves the network, and whether interim
+The app offers live translation only once all three engines are set up.
+Until then the button and the language settings are not shown at all,
+because what the server is missing is the operator's business: `/api/config`
+names the variables that are still unset. The server logs, at start, every
+engine that is not set up or that leaves the network, and whether interim
 subtitles are on. Engine URLs are checked at start (http or https, with a
 host) and only ever logged with any password hidden.
 

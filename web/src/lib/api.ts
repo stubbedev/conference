@@ -4,14 +4,18 @@ export interface ServerConfig {
   createAuthRequired: boolean
   sessionLifetimeDays: number
   joinOnly: boolean
-  /** Live translation: shown either way, and greyed out with the reason while unavailable. */
+  /** Live translation: its settings only appear once the server can do it. */
   translation: TranslationConfig
 }
 
 export interface TranslationConfig {
   /** All the speech engines are set up. */
   available: boolean
-  /** What has to be set up first, while unavailable. */
+  /**
+   * What the server is missing before it can translate. For whoever runs it
+   * to read, in /api/config: the app shows nothing about translation until
+   * this is empty.
+   */
   reason?: string
   /** The languages the speech service speaks. */
   languages: Language[]

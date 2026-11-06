@@ -440,12 +440,12 @@ func TestStatus(t *testing.T) {
 	}
 }
 
-func TestReadyReasonStaysShort(t *testing.T) {
+func TestReasonIsOneLine(t *testing.T) {
 	t.Parallel()
 
 	reason := load(t, nil).Status().Reason
-	if len(reason) > 80 {
-		t.Fatalf("the reason the tooltip shows is %d characters: %q", len(reason), reason)
+	if len(reason) > 90 {
+		t.Fatalf("the reason an operator reads is %d characters: %q", len(reason), reason)
 	}
 
 	if strings.Count(reason, ".") != 1 || !strings.HasSuffix(reason, ".") {

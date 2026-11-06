@@ -29,9 +29,9 @@ func (s Settings) Status() Status {
 }
 
 // notReadyReason names what the engines still need, such as the variable
-// to set for each engine that has none. It is read in a tooltip, so it
-// names the settings and nothing else: what each one is for is in the
-// environment documentation.
+// to set for each engine that has none. It is read by whoever runs the
+// server, in /api/config: the app shows nothing about translation until
+// every engine is set up, so this never reaches the people in a call.
 func (s Settings) notReadyReason() string {
 	var missing []string
 

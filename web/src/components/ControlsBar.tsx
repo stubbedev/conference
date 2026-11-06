@@ -39,10 +39,8 @@ interface ControlsBarProps {
   /** Browsers without MediaRecorder canvas capture hide it. */
   canRecord?: boolean
   recording?: boolean
-  /** Host-only. */
+  /** Host-only, and only while live translation is configured on the server. */
   canTranslate?: boolean
-  /** Why live translation cannot start: the button shows greyed out with it. */
-  translateUnavailable?: string
   translating?: boolean
   onTranslate?: () => void
   onMic: () => void
@@ -76,7 +74,6 @@ export const ControlsBar = memo(function ControlsBar({
   canRecord = false,
   recording = false,
   canTranslate = false,
-  translateUnavailable,
   translating = false,
   onTranslate,
   onMic,
@@ -89,7 +86,6 @@ export const ControlsBar = memo(function ControlsBar({
   children,
 }: ControlsBarProps) {
   // A room already translating can always be switched off.
-  const translateBlocked = Boolean(translateUnavailable) && !translating
   const translateLabel = translating ? 'Stop live translation' : 'Start live translation'
   const [revealed, setRevealed] = useState(true)
   const visible = !fullscreen || revealed
@@ -194,16 +190,13 @@ export const ControlsBar = memo(function ControlsBar({
         </Hint>
       )}
       {canTranslate && onTranslate && (
-        <Hint label={(translateBlocked && translateUnavailable) || translateLabel}>
-          {/* aria-disabled rather than disabled, so the hint still shows on hover. */}
+        <Hint label={translateLabel}>
           <Button
             variant={translating ? 'default' : 'secondary'}
             size="icon"
-            className={cn(ICON_BUTTON, translateBlocked && 'cursor-not-allowed opacity-50')}
-            onClick={translateBlocked ? undefined : onTranslate}
+            className={ICON_BUTTON}
+            onClick={onTranslate}
             aria-label={translateLabel}
-            aria-description={translateBlocked ? translateUnavailable : undefined}
-            aria-disabled={translateBlocked}
             aria-pressed={translating}
           >
             <Languages />

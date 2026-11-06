@@ -431,19 +431,27 @@ async function main() {
     await checkCall(failures, browsers, ['server restart 0', 'server restart 1'], { seconds })
     await checkStillInRoom(failures, 'server restart', browsers)
 
-    // No translation model here: live translation shows, greyed out with
-    // what has to be set up, and does nothing when clicked.
-    const translateButton = `(() => {
-      const b = document.querySelector('[aria-label="Start live translation"]')
-      return b && { disabled: b.getAttribute('aria-disabled'), reason: b.getAttribute('aria-description') ?? '' }
+    // No speech engines are configured for this server, so live
+    // translation is not offered at all: a host sees no button to press
+    // and no setting that names the variables the operator has to set.
+    const translationSurfaced = `(() => {
+      const header = document.querySelector('header')
+      const text = header ? header.innerText : ''
+      return {
+        button: Boolean(document.querySelector('[aria-label="Start live translation"]')),
+        settings: text.includes('Live translation'),
+        variables: /[A-Z]+_MODEL/.test(document.body.innerText),
+      }
     })()`
-    const blocked = await waitFor(browsers[0], translateButton, (b) => b?.disabled === 'true', 10_000)
-    check(failures, 'translation', blocked.ok, `translate button not greyed out: ${JSON.stringify(blocked.value)}`)
-    check(failures, 'translation', blocked.value?.reason.includes('TRANSLATE_MODEL'), `no setup hint: ${JSON.stringify(blocked.value)}`)
-    check(failures, 'translation', !(await evalJs(browsers[1], translateButton)), 'translate button visible on the unprivileged browser')
-    await evalJs(browsers[0], `document.querySelector('[aria-label="Start live translation"]')?.click()`)
-    await sleep(500)
-    check(failures, 'translation', !(await evalJs(browsers[0], `document.querySelector('header').innerText.includes('Live translation')`)), 'greyed-out translate button started translation')
+    for (const [index, label] of [
+      [0, 'host'],
+      [1, 'member'],
+    ]) {
+      const shown = await evalJs(browsers[index], translationSurfaced)
+      check(failures, 'translation', !shown.button, `translate button offered on the ${label} browser with no engines configured`)
+      check(failures, 'translation', !shown.settings, `translation settings offered on the ${label} browser`)
+      check(failures, 'translation', !shown.variables, `server settings leaked to the ${label} browser`)
+    }
 
     // Recording phase. Round one: the host records, a third browser
     // joins late (the badge must be replayed in its welcome), then the
