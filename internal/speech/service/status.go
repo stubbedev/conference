@@ -28,24 +28,39 @@ func (s Settings) Status() Status {
 	return Status{Available: s.ready(), Reason: s.notReadyReason(), Languages: langs, External: s.external()}
 }
 
-// notReadyReason names what the engines still need, such as the model
-// to set for each engine that has none.
+// notReadyReason names what the engines still need, such as the variable
+// to set for each engine that has none. It is read in a tooltip, so it
+// names the settings and nothing else: what each one is for is in the
+// environment documentation.
 func (s Settings) notReadyReason() string {
-	var purposes, problems []string
+	var missing []string
 
 	for _, entry := range s.engines() {
 		if entry.engine.ready() {
 			continue
 		}
 
-		purposes = append(purposes, string(entry.purpose))
-		problems = append(problems, entry.engine.problem)
+		missing = append(missing, entry.engine.problem)
 	}
 
-	if len(purposes) == 0 {
+	if len(missing) == 0 {
 		return ""
 	}
 
-	return "Live translation needs a " + strings.Join(purposes, " and ") + " model to be set up: " +
-		strings.Join(problems, "; ") + "."
+	return "Live translation needs " + list(missing) + "."
+}
+
+// list joins names the way a sentence does: one on its own, two with and
+// between them, more with commas and a final and.
+func list(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
+	}
 }

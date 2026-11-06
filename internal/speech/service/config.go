@@ -197,7 +197,7 @@ func (env environment) realEngines(settings Settings) (Settings, error) {
 
 	engines := engineReader{env: env, internal: internal}
 
-	settings.transcription, err = engines.openAICompatible(prefixTranscribe, transcription)
+	settings.transcription, err = engines.openAICompatible(prefixTranscribe)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -207,13 +207,13 @@ func (env environment) realEngines(settings Settings) (Settings, error) {
 		return Settings{}, err
 	}
 
-	settings.voice, err = engines.openAICompatible(prefixVoice, voice)
+	settings.voice, err = engines.openAICompatible(prefixVoice)
 	if err != nil {
 		return Settings{}, err
 	}
 
 	if missing := settings.missingVoices(); settings.voice.ready() && len(missing) > 0 {
-		settings.voice.problem = "set voices in the languages file (or " + envVoiceName + ") for " + strings.Join(missing, ", ")
+		settings.voice.problem = "a voice for " + strings.Join(missing, ", ")
 	}
 
 	return settings, nil
@@ -322,7 +322,7 @@ func (r engineReader) endpoint(prefix, fallback string) (*url.URL, error) {
 	return parsed, nil
 }
 
-func (r engineReader) openAICompatible(prefix string, use purpose) (engine, error) {
+func (r engineReader) openAICompatible(prefix string) (engine, error) {
 	endpoint, err := r.endpoint(prefix, openAIURL)
 	if err != nil {
 		return engine{}, err
@@ -332,7 +332,7 @@ func (r engineReader) openAICompatible(prefix string, use purpose) (engine, erro
 
 	problem := ""
 	if model == "" {
-		problem = fmt.Sprintf("set %s_MODEL to the %s model to use", prefix, use)
+		problem = prefix + "_MODEL"
 	}
 
 	return engine{
@@ -348,7 +348,7 @@ func (r engineReader) openAICompatible(prefix string, use purpose) (engine, erro
 func (r engineReader) translation() (engine, error) {
 	chosen := provider(r.env.or(envTranslateProvider, string(ollama)))
 	if chosen == openAICompatible {
-		return r.openAICompatible(prefixTranslate, translation)
+		return r.openAICompatible(prefixTranslate)
 	}
 
 	if chosen != ollama {
@@ -364,7 +364,7 @@ func (r engineReader) translation() (engine, error) {
 
 	problem := ""
 	if model == "" {
-		problem = "set " + prefixTranslate + "_MODEL to the Ollama model to translate with"
+		problem = prefixTranslate + "_MODEL"
 	}
 
 	return engine{

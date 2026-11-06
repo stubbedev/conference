@@ -422,9 +422,12 @@ func TestStatus(t *testing.T) {
 	t.Parallel()
 
 	got := load(t, map[string]string{envTranslateModel: "m"}).Status()
-	if got.Available || !got.External || !strings.Contains(got.Reason, "transcription and voice") ||
-		!strings.Contains(got.Reason, envTranscribeModel) || strings.Contains(got.Reason, envTranslateModel) {
-		t.Fatalf("status %+v, want unavailable, external, transcription and voice missing their models", got)
+	if want := "Live translation needs " + envTranscribeModel + " and " + envVoiceModel + "."; got.Reason != want {
+		t.Fatalf("status reason %q, want %q", got.Reason, want)
+	}
+
+	if got.Available || !got.External {
+		t.Fatalf("status %+v, want unavailable and external", got)
 	}
 
 	if got.Languages[0] != (wire.Language{Code: "en", Name: "English"}) {
@@ -434,5 +437,18 @@ func TestStatus(t *testing.T) {
 	ready := load(t, map[string]string{envEngines: enginesFake}).Status()
 	if !ready.Available || ready.Reason != "" || ready.External {
 		t.Fatalf("fake engines: status %+v, want available and internal", ready)
+	}
+}
+
+func TestReadyReasonStaysShort(t *testing.T) {
+	t.Parallel()
+
+	reason := load(t, nil).Status().Reason
+	if len(reason) > 80 {
+		t.Fatalf("the reason the tooltip shows is %d characters: %q", len(reason), reason)
+	}
+
+	if strings.Count(reason, ".") != 1 || !strings.HasSuffix(reason, ".") {
+		t.Fatalf("reason %q, want one short sentence", reason)
 	}
 }
