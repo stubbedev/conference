@@ -24,9 +24,10 @@
   controls.
 - 🖥️ **Screen sharing and chat**, with mute and camera controls for
   every participant.
-- 🎥 **Recording that stays with you.** The host can record the meeting
-  in their own browser and download the video afterwards. The recording
-  never touches the server, and everyone sees a badge while it runs.
+- 🎥 **Recording that stays with you.** Anyone in the meeting can
+  record it in their own browser and download the video afterwards, one
+  person at a time. The recording never touches the server, and everyone
+  sees a badge while it runs.
 - 🗣️ **Live translation, if you want it.** Everyone picks their language;
   speech in other languages arrives as subtitles and a translated voice
   in yours, on speech engines you choose. See
@@ -43,8 +44,10 @@
 2. **Share the link.** Send the short link to everyone who should join.
    Keep the *privileged link* for yourself: it opens the room without
    the password and lets you mute, stop cameras or remove people.
-3. **Join.** People open the link, pick their camera and microphone, type
-   the password if the room has one, and they are in.
+3. **Join.** People open the link, mute or turn off the camera if they
+   like (both are remembered next time), type the password if the room
+   has one, and they are in. Devices, quality, volumes and language live
+   in the call's settings.
 
 > [!TIP]
 > The room key travels in the part of the link after `#`, which browsers
@@ -94,7 +97,7 @@ All settings are environment variables.
 | `API_KEYS`          | empty           | Comma-separated keys needed to create, list and delete rooms; empty means anyone may create |
 | `JOIN_ONLY`         | `false`         | Hide room creation on the home page so people can only join; requires `API_KEYS`          |
 | `OPEN_CREATE_HOSTS` | —               | Hostnames where anyone may create rooms despite `API_KEYS`/`JOIN_ONLY`                    |
-| `ROOM_TTL_DAYS`     | `365`           | Delete rooms older than this (checked hourly, live rooms are skipped); `0` keeps them forever |
+| `ROOM_TTL_DAYS`     | `365`           | Delete rooms nobody has joined for this long (checked hourly, live rooms are skipped); `0` keeps them forever |
 | `ICE_UDP_PORT`      | `5000`          | The single UDP port for all video and audio                                               |
 | `EXTERNAL_IPS`      | —               | Comma-separated public IPs to advertise when behind NAT                                   |
 | `TURN_PORT`         | `3478`          | UDP and TCP port of the built-in relay                                                    |
@@ -132,8 +135,9 @@ then one a minute; key holders are never limited. Behind a reverse
 proxy, set `TRUSTED_PROXIES` to its address so each visitor is counted
 separately (the bundled compose file already does).
 
-Old rooms are cleaned up automatically after `ROOM_TTL_DAYS`, together
-with their sessions. A room in use is never deleted.
+Rooms nobody has joined for `ROOM_TTL_DAYS` are cleaned up
+automatically, together with their sessions. A room in use is never
+deleted, and neither is one that was joined recently, however old it is.
 
 ### Start meetings from Slack
 
@@ -187,8 +191,8 @@ hear them in. A host then turns on **Live translation** in the call:
 - Subtitles appear on each speaker's tile in your language.
 - Someone speaking another language is heard through their translated
   voice instead of their own, so the call sounds like one conversation
-  in your language. A recording does the same in the recording host's
-  language.
+  in your language. A recording does the same in the language of
+  whoever records it.
 - Everyone sees **Live translation** while it runs, with the state of
   their own translation and anything that keeps their speech from being
   translated, such as nobody else in the call speaking another language.
@@ -273,10 +277,15 @@ an external service".
   and revokes them when the member leaves. It only forwards to the SFU
   itself, so it cannot be abused as an open proxy.
 - Recording composites every tile plus one mixed audio track in the
-  host's browser and mirrors the host's layout (pinned tile large, others
+  recorder's browser and mirrors their layout (pinned tile large, others
   in a strip, screen shares pinned automatically). Long calls stream to
-  the origin-private file system so memory stays flat. The container
-  follows the browser: WebM on Chrome and Firefox, MP4 on Safari.
+  the origin-private file system so memory stays flat; should the
+  browser end the recording itself, everything captured until then is
+  still downloaded. The container follows the browser: WebM on Chrome
+  and Firefox, MP4 on Safari.
+- Screen shares go out as one full-quality encoding, and the SFU hands a
+  publisher the whole upload budget for it: a screen share that is
+  starved of bitrate drops frames until it looks frozen.
 
 </details>
 
@@ -360,7 +369,10 @@ Galène-style SFU (selective forwarding unit):
 - One upstream connection per publisher and one downstream connection per
   viewer, trickle ICE, keyframe requests, NACK and receiver-report
   interceptors, and a REMB bandwidth ceiling, all on a single UDP port.
-- Simulcast cameras, with each viewer getting the layer that fits.
+- Simulcast cameras, with each viewer getting the layer that fits, and
+  a loss-driven bitrate ceiling that climbs back as the network does: a
+  layer or a screen share lost to one bad minute comes back, and the
+  viewer's own REMB is taken as evidence that its link recovered.
 - A built-in TURN relay over UDP, TCP and TLS on 443. No coturn and no
   third-party STUN.
 - SQLite storage in pure Go (no CGO), with the web UI embedded.

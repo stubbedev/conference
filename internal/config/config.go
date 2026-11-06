@@ -79,7 +79,7 @@ type Config struct {
 
 	SessionTTL     time.Duration // authenticated room sessions
 	MaxRoomMembers int           // 0 means unlimited
-	RoomTTL        time.Duration // rooms older than this are reaped; 0 = keep forever
+	RoomTTL        time.Duration // rooms unjoined for this long are reaped; 0 = keep forever
 }
 
 func env(key, def string) string {

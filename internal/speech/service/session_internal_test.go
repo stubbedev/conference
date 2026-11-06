@@ -43,7 +43,7 @@ func newOutbox() *outbox {
 	return &outbox{mu: sync.Mutex{}, messages: nil, arrived: make(chan struct{}, 1)}
 }
 
-func (o *outbox) send(_ context.Context, message any) error {
+func (o *outbox) send(message any) error {
 	o.mu.Lock()
 	o.messages = append(o.messages, message)
 	o.mu.Unlock()

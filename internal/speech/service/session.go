@@ -32,7 +32,7 @@ type voiceFrame struct {
 	pcm    []byte
 }
 
-type sender func(ctx context.Context, message any) error
+type sender func(message any) error
 
 type final struct {
 	seg   int64
@@ -446,7 +446,7 @@ func (s *session) caption(ctx context.Context, current *speaker, seg int64, sour
 }
 
 func (s *session) emit(ctx context.Context, message any) {
-	err := s.send(ctx, message)
+	err := s.send(message)
 	if err != nil {
 		logFailure(ctx, "send", err)
 	}

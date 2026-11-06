@@ -5,6 +5,7 @@
 // the SFU relays ciphertext it cannot decode, let alone record.
 
 import { audioContext, playMediaElement } from '@/hooks/media'
+import { withDuration } from './webm.ts'
 
 export interface RecorderTile {
   key: string
@@ -22,6 +23,10 @@ const CANVAS_HEIGHT = 720
 const CANVAS_FPS = 30
 const CHUNK_MS = 4000
 const LABEL_FONT = '500 16px system-ui, sans-serif'
+// The Info element that carries the duration sits at the very start of
+// the file, well inside this window; the rest is copied, never parsed.
+const DURATION_HEAD_BYTES = 256 * 1024
+const COPY_CHUNK_BYTES = 8 * 1024 * 1024
 
 // Safari's MediaRecorder cannot produce WebM and rejects it outright;
 // Chrome and Firefox prefer it. Whatever container actually comes out
@@ -85,18 +90,25 @@ interface TranslationAudio {
 // Chunked data streams into the origin-private file system where the
 // browser has it (Chrome, Firefox, Safari 16.4+), keeping memory flat
 // for calls of any length and making the final download disk-backed.
-// Browsers without it buffer chunks in memory for the whole call.
+// Browsers without it buffer chunks in memory for the whole call, up to
+// a cap: past that the recording ends with what it has instead of the
+// tab dying with everything still inside it.
 interface DiskSink {
   handle: FileSystemFileHandle
   writable: FileSystemWritableFileStream
+  writing: Promise<void>
 }
 
 interface MemorySink {
   chunks: Blob[]
+  bytes: number
 }
+
+const MEMORY_SINK_LIMIT_BYTES = 1024 * 1024 * 1024
 
 export class CallRecorder {
   private slug: string
+  private ended: ((reason: string) => void) | null
   private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   private entries = new Map<string, RecorderEntry>()
@@ -111,13 +123,18 @@ export class CallRecorder {
   private filename = ''
   private sink: DiskSink | MemorySink | null = null
   private starting: Promise<void> | null = null
+  private drawing = false
   private frame = 0
   private paintTimer = 0
   private lastPaint = 0
+  private endedReason = ''
+  private startedAt = 0
+  private finishing: Promise<void> | null = null
   private stopped: (() => void) | null = null
 
-  constructor(slug: string) {
+  constructor(slug: string, ended?: (reason: string) => void) {
     this.slug = slug
+    this.ended = ended ?? null
     this.canvas = document.createElement('canvas')
     this.canvas.width = CANVAS_WIDTH
     this.canvas.height = CANVAS_HEIGHT
@@ -207,14 +224,25 @@ export class CallRecorder {
       if (ev.data.size > 0) this.writeChunk(ev.data)
     }
     // A recorder error leaves state "inactive"; flush whatever landed so
-    // a stop() always resolves and the caller can still save the file.
-    this.recorder.onerror = () => {
-      if (this.recorder?.state !== 'inactive') this.recorder?.stop()
+    // the file is never lost, and say why the recording ended.
+    this.recorder.onerror = (ev) => {
+      const error = (ev as { error?: DOMException }).error
+      this.endUnexpectedly(error?.message || error?.name || 'the recorder failed')
     }
     this.recorder.onstop = () => {
       const callback = this.stopped
       this.stopped = null
-      callback?.()
+      if (callback) {
+        callback()
+        return
+      }
+      // Nobody asked for this stop: the recorder gave up on its own.
+      void this.finish()
+    }
+    // A source that ends (the canvas capture or the audio mix stopped by
+    // the browser) ends the recording; keep the file and report it.
+    for (const track of tracks) {
+      track.addEventListener('ended', () => this.endUnexpectedly('a media source stopped'))
     }
 
     // Name the file after the container MediaRecorder actually picked,
@@ -223,19 +251,28 @@ export class CallRecorder {
     await this.openSink()
 
     this.recorder.start(CHUNK_MS)
-    this.frame = requestAnimationFrame(this.draw)
+    this.startedAt = performance.now()
+    this.pumpFrames()
     // rAF stops entirely in hidden tabs, which would freeze the picture
     // in a background recording for as long as the tab stays hidden;
     // audio timers keep running at a throttled rate, so repaint at 1fps
-    // to keep the grid current while the call is backgrounded.
+    // to keep the grid current while the call is backgrounded, and pick
+    // the frame loop back up the moment the tab is visible again.
     this.paintTimer = window.setInterval(() => {
-      if (this.active) this.paint()
+      if (!this.active) return
+      this.paint()
+      this.pumpFrames()
     }, 1000)
   }
 
   async stop(): Promise<void> {
     await this.starting?.catch(() => {})
     this.starting = null
+
+    if (this.finishing) {
+      await this.finishing
+      return
+    }
 
     const recorder = this.recorder
     if (!recorder || recorder.state === 'inactive') {
@@ -250,15 +287,42 @@ export class CallRecorder {
     await this.flushAndDispose()
   }
 
+  private finish(): Promise<void> {
+    this.finishing ??= (async () => {
+      const ended = this.ended
+      this.ended = null
+      const reason = this.endedReason || 'the recorder stopped'
+      await this.flushAndDispose()
+      ended?.(reason)
+    })()
+    return this.finishing
+  }
+
+  // endUnexpectedly ends the recording on its own terms and lets the
+  // page know, so a recorder that gives up after an hour is never a
+  // silent loss: the file downloads and the badge clears.
+  private endUnexpectedly(reason: string): void {
+    this.endedReason ||= reason
+    const recorder = this.recorder
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop()
+      return
+    }
+    void this.finish()
+  }
+
   private async openSink(): Promise<void> {
     try {
+      // A recording is worth far too much to lose to a browser that
+      // evicts origin storage under disk pressure mid-call.
+      void navigator.storage?.persist?.().catch(() => {})
       const root = await navigator.storage.getDirectory()
       const handle = await root.getFileHandle(this.filename, { create: true })
       const writable = await handle.createWritable()
       this.storageRoot = root
-      this.sink = { handle, writable }
+      this.sink = { handle, writable, writing: Promise.resolve() }
     } catch {
-      this.sink = { chunks: [] }
+      this.sink = { chunks: [], bytes: 0 }
     }
   }
 
@@ -266,14 +330,25 @@ export class CallRecorder {
     const sink = this.sink
     if (!sink) return
     if ('writable' in sink) {
-      sink.writable.write(chunk).catch(() => {
-        // Quota or stream failure: keep the recording alive by falling
-        // back to memory for the rest of the call.
-        this.sink = { chunks: [] }
-      })
+      // Writes are chained, never awaited inline: each chunk reaches the
+      // disk in order without holding the encoder, and without piling the
+      // whole call up in memory when the disk is slow.
+      sink.writing = sink.writing
+        .then(() => sink.writable.write(chunk))
+        .then(() => undefined)
+        .catch((err: unknown) => {
+          // The bytes written so far are a playable file; hand that over
+          // instead of restarting the buffer inside a doomed tab.
+          console.warn('recorder: writing the recording to disk', err)
+          this.endUnexpectedly('this browser could not keep writing the recording to disk')
+        })
       return
     }
     sink.chunks.push(chunk)
+    sink.bytes += chunk.size
+    if (sink.bytes > MEMORY_SINK_LIMIT_BYTES) {
+      this.endUnexpectedly('this browser cannot stream the file to disk and ran out of memory to buffer it')
+    }
   }
 
   private async flushAndDispose(): Promise<void> {
@@ -282,22 +357,81 @@ export class CallRecorder {
     this.sink = null
     try {
       if (sink && 'writable' in sink) {
+        await sink.writing.catch(() => {})
         await sink.writable.close()
         const file = await sink.handle.getFile()
-        if (file.size > 0) saveFile(file, this.filename)
-        // The download carries the bytes now; drop the origin-private
-        // copy so a recording never lives twice. Delayed long enough
-        // that the download's read has certainly finished.
-        const root = this.storageRoot
-        const name = this.filename
-        window.setTimeout(() => {
-          void root?.removeEntry(name).catch(() => {})
-        }, 10_000)
+        if (file.size > 0) {
+          const { blob, temporary } = await this.recordingWithDuration(file, mime)
+          saveFile(blob, this.filename)
+          // The download carries the bytes now; drop the origin-private
+          // copies so a recording never lives twice. Delayed long enough
+          // that the download's read has certainly finished.
+          const root = this.storageRoot
+          const names = temporary ? [this.filename, temporary] : [this.filename]
+          window.setTimeout(() => {
+            for (const name of names) void root?.removeEntry(name).catch(() => {})
+          }, 10_000)
+        }
       } else if (sink && sink.chunks.length > 0) {
-        saveFile(new Blob(sink.chunks, { type: mime || 'video/webm' }), this.filename)
+        const file = new Blob(sink.chunks, { type: mime || 'video/webm' })
+        const head = await this.headWithDuration(file, mime)
+        saveFile(head ? new Blob([head.bytes, file.slice(head.consumed)]) : file, this.filename)
       }
     } finally {
       this.dispose()
+    }
+  }
+
+  // headWithDuration rewrites the first bytes of the recording so they
+  // carry its length, and reports how many bytes of the original file
+  // those replace: inserting the Duration makes the head longer than what
+  // was read, and the tail must start where the head began.
+  private async headWithDuration(
+    blob: Blob,
+    mime?: string,
+  ): Promise<{ bytes: Uint8Array<ArrayBuffer>; consumed: number } | null> {
+    if (!(mime ?? blob.type).includes('webm')) return null
+    if (typeof blob.slice !== 'function') {
+      console.warn('recorder: this browser cannot read the recording back in slices, so it is saved without a duration')
+      return null
+    }
+    try {
+      const head = new Uint8Array(await blob.slice(0, DURATION_HEAD_BYTES).arrayBuffer())
+      const bytes = withDuration(head, this.startedAt > 0 ? performance.now() - this.startedAt : 0)
+      return { bytes, consumed: head.length }
+    } catch (err) {
+      console.warn('recorder: giving the recording a duration, keeping the file as recorded', err)
+      return null
+    }
+  }
+
+  // recordingWithDuration writes the patched head and then the untouched
+  // tail into a second origin-private file, so an hour-long recording is
+  // never held in memory and the download streams from disk.
+  private async recordingWithDuration(
+    file: File,
+    mime?: string,
+  ): Promise<{ blob: Blob; temporary: string | null }> {
+    const head = await this.headWithDuration(file, mime)
+    const root = this.storageRoot
+    if (!head || !root) return { blob: file, temporary: null }
+    const temporary = `${this.filename}.duration`
+    try {
+      const handle = await root.getFileHandle(temporary, { create: true })
+      const writable = await handle.createWritable()
+      try {
+        await writable.write(head.bytes)
+        for (let offset = head.consumed; offset < file.size; offset += COPY_CHUNK_BYTES) {
+          await writable.write(file.slice(offset, Math.min(offset + COPY_CHUNK_BYTES, file.size)))
+        }
+      } finally {
+        await writable.close()
+      }
+      return { blob: await handle.getFile(), temporary }
+    } catch (err) {
+      console.warn('recorder: writing the recording with its duration to disk, keeping the file as recorded', err)
+      await root.removeEntry(temporary).catch(() => {})
+      return { blob: file, temporary: null }
     }
   }
 
@@ -378,7 +512,18 @@ export class CallRecorder {
       this.lastPaint = now
       this.paint()
     }
-    if (this.active) this.frame = requestAnimationFrame(this.draw)
+    this.drawing = this.active
+    if (this.drawing) this.frame = requestAnimationFrame(this.draw)
+  }
+
+  // pumpFrames (re)starts the frame loop. A hidden tab stops rAF while
+  // the call keeps running, and the loop must come back on its own when
+  // the tab does; the paint timer calls this every second so a broken
+  // chain can never outlive the recording.
+  private pumpFrames(): void {
+    if (this.drawing || !this.active) return
+    this.drawing = true
+    this.frame = requestAnimationFrame(this.draw)
   }
 
   private paint(): void {
@@ -478,7 +623,9 @@ export class CallRecorder {
 
   private dispose(): void {
     cancelAnimationFrame(this.frame)
+    this.drawing = false
     window.clearInterval(this.paintTimer)
+    this.sink = null
     this.starting = null
     this.storageRoot = null
     for (const mixed of this.mixed.values()) this.disconnectMixed(mixed)
@@ -496,6 +643,7 @@ export class CallRecorder {
     for (const track of this.canvasStream?.getTracks() ?? []) track.stop()
     this.canvasStream = null
     this.recorder = null
+    this.startedAt = 0
     this.stopped = null
   }
 }

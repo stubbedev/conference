@@ -2,13 +2,13 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { MicOff, MonitorUp, Pin, PinOff, VideoOff, VolumeX } from 'lucide-react'
 
 import { useLatest } from '@/hooks/latest'
+import { useIsSpeaking } from '@/hooks/speaking'
 import { useTileDebug } from '@/hooks/tileDebug'
 import { Hint } from '@/components/Hint'
 import {
   aspectRatioChanged,
   playMediaElement,
   resumeAudio,
-  useIsSpeaking,
   useSplitStreams,
 } from '@/hooks/media'
 import { cn } from '@/lib/utils'
