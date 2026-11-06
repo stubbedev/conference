@@ -34,6 +34,14 @@ export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
   micGain: 1,
 }
 
+/** Whether this member goes out with microphone and camera on. */
+export interface AvPrefs {
+  mic: boolean
+  cam: boolean
+}
+
+export const DEFAULT_AV_PREFS: AvPrefs = { mic: true, cam: true }
+
 // Mic gain is stored linear (1 = untouched) but presented in dB; the
 // slider range keeps gain between a whisper and a runaway boost.
 export const MIN_MIC_GAIN_DB = -20
@@ -288,7 +296,7 @@ export function trackConstraints(
   }
   const size =
     resolution === 'auto'
-      ? { width: { ideal: 1280 }, height: { ideal: 720 } }
+      ? { width: { ideal: 1920 }, height: { ideal: 1080 } }
       : {
           width: { ideal: RESOLUTION_DIMENSIONS[resolution].width },
           height: { ideal: RESOLUTION_DIMENSIONS[resolution].height },
@@ -592,63 +600,4 @@ export async function createMicPipeline(rawTrack: MediaStreamTrack, gain: number
     console.error('media: building the microphone pipeline (gate and gain), sending the raw capture track', err)
     return null
   }
-}
-
-export function useIsSpeaking(stream: MediaStream | null): boolean {
-  const [speaking, setSpeaking] = useState<{ source: MediaStream | null; active: boolean }>({
-    source: null,
-    active: false,
-  })
-
-  useEffect(() => {
-    if (!stream) return
-    const ctx = audioContext()
-    if (!ctx) return
-
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 1024
-    let source: MediaStreamAudioSourceNode | null = null
-
-    const bind = () => {
-      if (source) return
-      const track = stream.getAudioTracks()[0]
-      if (!track) return
-      source = ctx.createMediaStreamSource(new MediaStream([track]))
-      source.connect(analyser)
-    }
-    bind()
-    stream.addEventListener('addtrack', bind)
-
-    const samples = new Uint8Array(analyser.fftSize)
-    let level = 0
-    let current = false
-    let frame = 0
-
-    const tick = () => {
-      analyser.getByteTimeDomainData(samples)
-      let sum = 0
-      for (const value of samples) {
-        const deviation = (value - 128) / 128
-        sum += deviation * deviation
-      }
-      const rms = Math.sqrt(sum / samples.length)
-      level = rms > 0.04 ? Math.min(1, level + 0.55) : level * 0.8
-      const next = level > 0.08
-      if (next !== current) {
-        current = next
-        setSpeaking({ source: stream, active: next })
-      }
-      frame = requestAnimationFrame(tick)
-    }
-    frame = requestAnimationFrame(tick)
-
-    return () => {
-      cancelAnimationFrame(frame)
-      stream.removeEventListener('addtrack', bind)
-      source?.disconnect()
-      analyser.disconnect()
-    }
-  }, [stream])
-
-  return speaking.source === stream && speaking.active
 }

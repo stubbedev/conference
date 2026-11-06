@@ -248,19 +248,24 @@ async function checkSimulcast(failures, publisher, viewer) {
   console.log(`simulcast sent: ${JSON.stringify(sent.value)}`)
   check(failures, 'simulcast', sent.ok, `publisher is not sending all three layers: ${JSON.stringify(sent.value)}`)
 
-  const steps = [
-    { name: 'grid of two', action: null, want: (w) => w >= 1280 },
-    { name: 'filmstrip', action: 'Pin to main view', want: (w) => w > 0 && w <= 320 },
-    { name: 'grid again', action: 'Unpin', want: (w) => w >= 1280 },
-  ]
-  for (const step of steps) {
-    if (step.action) {
-      check(failures, 'simulcast', await callJs(viewer, clickLocalPin, step.action), `no "${step.action}" button on the viewer's own tile`)
-    }
-    const got = await waitFor(viewer, remoteVideoWidth, step.want, 20000)
-    console.log(`simulcast ${step.name}: remote video ${got.value}px wide`)
-    check(failures, 'simulcast', got.ok, `${step.name}: remote video ${got.value}px wide, wrong layer`)
-  }
+  // Sizes are compared with each other, not with pixels: which resolution
+  // the capture and the encoder settle on is the browser's business, that
+  // a filmstrip tile gets a fraction of a pinned one is this app's.
+  const full = await waitFor(viewer, remoteVideoWidth, (width) => width >= 640, 20000)
+  console.log(`simulcast grid of two: remote video ${full.value}px wide`)
+  check(failures, 'simulcast', full.ok, `grid of two: remote video ${full.value}px wide, want the largest layer`)
+
+  check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Pin to main view'), 'no "Pin to main view" button on the viewer\'s own tile')
+
+  const filmstrip = await waitFor(viewer, remoteVideoWidth, (width) => width > 0 && width * 2 <= full.value, 20000)
+  console.log(`simulcast filmstrip: remote video ${filmstrip.value}px wide against ${full.value}px`)
+  check(failures, 'simulcast', filmstrip.ok, `filmstrip: remote video ${filmstrip.value}px wide, not a layer below ${full.value}px`)
+
+  check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
+
+  const back = await waitFor(viewer, remoteVideoWidth, (width) => width >= full.value, 20000)
+  console.log(`simulcast grid again: remote video ${back.value}px wide`)
+  check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, want ${full.value}px or more back`)
 }
 
 async function checkPinRoundTrip(failures, label, browser) {
@@ -353,7 +358,7 @@ async function main() {
 
     const hostRecordButton = await clickButtonByTitle(browsers[0], 'Record the call')
     check(failures, 'recording', hostRecordButton, 'record button missing on the privileged browser')
-    check(failures, 'recording', !(await evalJs(browsers[1], recordButtonPresent)), 'record button visible on the unprivileged browser')
+    check(failures, 'recording', await evalJs(browsers[1], recordButtonPresent), 'record button missing on the unprivileged browser')
 
     if (hostRecordButton) {
       check(failures, 'recording', await waitForBadge(browsers[0], true), 'recording badge missing on the recorder page')
@@ -369,8 +374,8 @@ async function main() {
       check(failures, 'recording', await waitForBadge(browsers[1], false), 'badge did not clear on the guest after the recorder left')
       check(failures, 'recording', await waitForBadge(late, false), 'badge did not clear on the late joiner after the recorder left')
 
-      // Round two: the late joiner holds a privileged session, so it
-      // becomes the recorder and must deliver a file when it stops.
+      // Round two: the late joiner becomes the recorder and must deliver
+      // a file when it stops.
       await late.cdp.send('Browser.setDownloadBehavior', {
         behavior: 'allow',
         downloadPath: dlDir,
@@ -403,6 +408,38 @@ async function main() {
         check(failures, 'recording', loudest !== null && loudest > REMOTE_VOICE_MIN_DB, `the guest's voice is not in the recording (loudest ${loudest} dB)`)
 
         console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
+
+        // Round three: a recording the browser ends on its own (the
+        // encoder failed, the way a long recording can die) must still
+        // hand over the file and clear the badge everywhere instead of
+        // silently recording nothing.
+        for (const name of readdirSync(dlDir)) rmSync(join(dlDir, name))
+
+        const again = await clickButtonByTitle(late, 'Record the call')
+        check(failures, 'recording', again, 'record button missing for the interrupted round')
+
+        if (again) {
+          check(failures, 'recording', await waitForBadge(late, true), 'recording badge missing before the interruption')
+          await sleep(5000)
+
+          const failed = await evalJs(
+            late,
+            `(() => {
+              const recorder = window.__mediaRecorders.at(-1)
+              if (!recorder) return false
+              const event = Object.assign(new Event('error'), { error: new DOMException('encoder failure', 'EncodingError') })
+              recorder.dispatchEvent(event)
+              return true
+            })()`,
+          )
+          check(failures, 'recording', failed, 'the recording has no MediaRecorder to interrupt')
+
+          const partial = await waitForDownload(dlDir)
+          check(failures, 'recording', partial !== null, 'a recording the browser ended was not saved')
+          check(failures, 'recording', await waitForBadge(late, false), 'badge stayed up on the recorder after its recording ended')
+          check(failures, 'recording', await waitForBadge(browsers[1], false), "badge stayed up on the guest after the recorder's recording ended")
+          console.log(`recording: interrupted by the browser, file ${partial ? `${partial.name} ${partial.size} bytes` : 'MISSING'}`)
+        }
       }
     }
 

@@ -18,6 +18,7 @@ import {
   type DevicePrefs,
 } from '@/hooks/media'
 import { Button } from '@/components/ui/button'
+import { Disclosure } from '@/components/Disclosure'
 import { Hint } from '@/components/Hint'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
@@ -208,9 +209,14 @@ export function DeviceSettingsPopover({
         <DeviceSettings {...props} />
         {translation && (
           <>
-            <Separator className="my-4" />
-            <p className="mb-3 text-sm font-medium">Live translation</p>
-            {translation}
+            <Separator className="my-3" />
+            <Disclosure
+              title="Live translation"
+              className="border-0"
+              contentClassName="px-0 pb-0"
+            >
+              {translation}
+            </Disclosure>
           </>
         )}
         <Separator className="my-4" />

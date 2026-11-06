@@ -8,6 +8,7 @@ import {
   aspectRatioChanged,
   CAMERA_RESOLUTIONS,
   createMicPipeline,
+  DEFAULT_AV_PREFS,
   DEFAULT_DEVICE_PREFS,
   DEVICE_LABELS,
   FALLBACK_ASPECT_RATIO,
@@ -21,6 +22,7 @@ import {
   trackConstraints,
   useMediaDevices,
   validDeviceId,
+  type AvPrefs,
   type CameraFacing,
   type CameraResolution,
   type DeviceKind,
@@ -42,6 +44,8 @@ import {
 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
 import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
+import { requestDisplay, SCREEN_AUDIO_KIND, screenTracks } from '@/lib/screen'
+import { tilesOfMembers } from '@/lib/reconnect'
 import { Translator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName, type Language } from '@/lib/translate/languages'
 import { isVoiceChoice, type LangPrefs, type RoomCaption, type TranslatorStatus } from '@/lib/translate/types'
@@ -90,6 +94,7 @@ const LOCAL_SOURCE = 'local'
 const NO_PIN = 'none'
 const RECOVER_BACKOFF_MS = 5000
 const RECONNECT_TOAST = 'reconnect'
+const RECORDING_HIDDEN_TOAST = 'recording-hidden'
 const TRANSLATION_KIND_PREFIX = 'translation-'
 // A final subtitle stays up this long; an interim one that never got its
 // final (the speaker trailed off) is dropped after the longer hold.
@@ -216,7 +221,17 @@ export default function Room() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null)
-  const [controls, setControls] = useState<Controls>({ mic: true, cam: true, sharing: false })
+  // Microphone and camera stay as the member last left them, across page
+  // reloads and other rooms: someone who joins muted stays muted.
+  const [avPrefs, setAvPrefs] = usePersistentState<AvPrefs>(
+    'conference:av',
+    DEFAULT_AV_PREFS,
+    (stored) => ({
+      mic: typeof stored.mic === 'boolean' ? stored.mic : true,
+      cam: typeof stored.cam === 'boolean' ? stored.cam : true,
+    }),
+  )
+  const [controls, setControls] = useState<Controls>({ mic: avPrefs.mic, cam: avPrefs.cam, sharing: false })
   const [mediaError, setMediaError] = useState('')
   const [mediaBusy, setMediaBusy] = useState(false)
   const [unread, setUnread] = useState(0)
@@ -343,10 +358,16 @@ export default function Room() {
 
   const updateControls = useCallback(
     (patch: Partial<Controls>) => {
-      controlsRef.current = { ...controlsRef.current, ...patch }
-      setControls(controlsRef.current)
+      const next = { ...controlsRef.current, ...patch }
+      controlsRef.current = next
+      setControls(next)
+      if (patch.mic !== undefined || patch.cam !== undefined) {
+        setAvPrefs((prev) =>
+          prev.mic === next.mic && prev.cam === next.cam ? prev : { mic: next.mic, cam: next.cam },
+        )
+      }
     },
-    [controlsRef],
+    [controlsRef, setAvPrefs],
   )
 
   // Returns the previous object when nothing in the patch differs, so
@@ -616,7 +637,17 @@ export default function Room() {
 
     let instance: CallRecorder
     try {
-      instance = new CallRecorder(slug)
+      instance = new CallRecorder(slug, (reason) => {
+        // The recorder gave up on its own (the browser stopped it, or it
+        // could not keep writing): the file is already downloading, so
+        // release the room's badge and say what happened instead of
+        // leaving a recording that looks like it is still running.
+        if (recorderRef.current !== instance) return
+        recorderRef.current = null
+        setRecording(false)
+        clientRef.current?.announceRecording(false)
+        toast.error(`Recording stopped: ${reason}. Everything captured until then has been saved.`)
+      })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Recording is unavailable.')
       return
@@ -829,12 +860,18 @@ export default function Room() {
           return
         }
         // A member's microphone and camera share one tile (and one
-        // MediaStream from the SFU); only a screen share gets its own.
-        const tileKind = kind === SCREEN_KIND ? SCREEN_KIND : CAMERA_KIND
+        // MediaStream from the SFU); a screen share gets its own, and
+        // its sound joins it there whatever order the tracks arrive in.
+        const tileKind = kind === SCREEN_KIND || kind === SCREEN_AUDIO_KIND ? SCREEN_KIND : CAMERA_KIND
         const key = `${sourceId}:${tileKind}`
         setTiles((prev) => {
+          const existing = prev.find((t) => t.key === key)
+          const stream =
+            tileKind === SCREEN_KIND
+              ? new MediaStream(screenTracks(existing?.stream?.getTracks() ?? [], stream_.getTracks()))
+              : stream_
           const rest = prev.filter((t) => t.key !== key)
-          return [...rest, { key, sourceId, kind: tileKind, stream: stream_ }]
+          return [...rest, { key, sourceId, kind: tileKind, stream }]
         })
       })
       client.on('chat', (message) => {
@@ -874,10 +911,10 @@ export default function Room() {
       client.on('error', ({ code, text }) => {
         toast.error(text)
         if (code === 'room-closed') endedRef.current = true
-        // A rejected announce (not host, or someone else got there
-        // first) rolls the local recorder back so the badge and the
-        // button match what the room actually accepted.
-        if ((code === 'not-allowed' || code === 'record-busy') && recorderRef.current) {
+        // A rejected announce (someone else got there first) rolls the
+        // local recorder back so the badge and the button match what the
+        // room actually accepted.
+        if (code === 'record-busy' && recorderRef.current) {
           void stopRecording()
         }
       })
@@ -930,34 +967,40 @@ export default function Room() {
       if (reconnectingRef.current) return
       reconnectingRef.current = true
       const resume = lost.resume
-      lost.leave()
+      lost.pause()
       clientRef.current = null
-      setTiles([])
-      setMembers([])
       toast.loading('Connection lost, reconnecting…', { id: RECONNECT_TOAST })
 
       try {
         for (let attempt = 0; attempt < RECONNECT_DELAYS_MS.length; attempt++) {
           await waitForRetry(RECONNECT_DELAYS_MS[attempt])
-          if (endedRef.current) return
+          if (endedRef.current) break
           try {
             await connectClient(resume)
+            // Whoever left during the gap is not on screen any more; the
+            // tiles of everyone who stayed have been replaced by the new
+            // connections' tracks.
+            setTiles((prev) => tilesOfMembers(prev, membersRef.current.map((member) => member.id)))
             toast.success('Reconnected', { id: RECONNECT_TOAST })
             return
           } catch (err) {
             if (err instanceof JoinError && err.final) break
           }
         }
-        if (endedRef.current) return
-        toast.error('The connection was lost.', { id: RECONNECT_TOAST })
-        endedRef.current = true
-        await stopRecording()
-        navigate('/')
       } finally {
+        lost.destroy()
         reconnectingRef.current = false
       }
+
+      setTiles([])
+      setMembers([])
+      if (endedRef.current) return
+      toast.error('The connection was lost.', { id: RECONNECT_TOAST })
+      endedRef.current = true
+      await stopRecording()
+      navigate('/')
     },
-    [connectClient, stopRecording, navigate],
+    [connectClient, membersRef, stopRecording, navigate],
   )
   useEffect(() => {
     reconnectRef.current = reconnect
@@ -1022,7 +1065,7 @@ export default function Room() {
     }
 
     try {
-      const display = await navigator.mediaDevices.getDisplayMedia({ video: true })
+      const display = await requestDisplay()
       screenStreamRef.current = display
       await client.addScreen(display)
       setScreenStream(display)
@@ -1515,6 +1558,26 @@ export default function Room() {
     recorderRef.current?.setTiles(recorderTiles)
   }, [recording, recorderTiles])
 
+  // A hidden tab records a slideshow: browsers throttle a page's capture
+  // pipeline to about a frame a second once it is out of sight, sound
+  // keeps flowing, and no compositor can talk them out of it. Say so the
+  // first time it happens rather than let someone discover it in the file.
+  useEffect(() => {
+    if (!recording) return
+
+    const onVisibility = () => {
+      if (document.visibilityState !== 'hidden') return
+
+      toast('Recording continues, but the video slows to about one frame a second while this tab is in the background.', {
+        id: RECORDING_HIDDEN_TOAST,
+      })
+    }
+
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [recording])
+
   // The recording plays as one conversation in the recorder's language:
   // other-language speakers are left out of the mix (above) and each
   // one's translated voice goes in.
@@ -1640,11 +1703,17 @@ export default function Room() {
           mediaError={mediaError}
           mediaBusy={mediaBusy}
           name={displayName}
+          mic={controls.mic}
+          cam={controls.cam}
           onNameChange={setDisplayName}
+          onToggleMic={toggleMic}
+          onToggleCam={toggleCam}
           onRetryMedia={() => void acquireMedia()}
           onJoin={() => void joinCall()}
           translation={
-            <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} prominent />
+            translationAvailable ? (
+              <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} prominent />
+            ) : undefined
           }
         />
       </>
@@ -1819,7 +1888,7 @@ export default function Room() {
         unread={unread}
         fullscreen={fullscreen}
         canShare={canShare}
-        canRecord={privileged && recorderSupported()}
+        canRecord={recorderSupported()}
         recording={recording}
         onMic={toggleMic}
         onCam={toggleCam}

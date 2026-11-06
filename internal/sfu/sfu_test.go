@@ -780,32 +780,25 @@ func TestRecordingAnnouncement(t *testing.T) {
 	host := newTestPeer(t, hub, engine, "host", true)
 	guest := newTestPeer(t, hub, engine, "guest", false)
 
-	// Unprivileged members cannot announce a recording.
+	// Any member may record, not only a privileged one. The announcement
+	// reaches everyone, the recorder included, so its own badge comes
+	// from the room rather than local state.
 	guest.member.Handle(sfu.Message{Type: record, On: true})
+	expectRecording(t, guest, guest.member.ID, true)
+	expectRecording(t, host, guest.member.ID, true)
 
-	if msg := guest.next(t, "error"); msg.Code != "not-allowed" {
-		t.Fatalf("guest expected not-allowed, got %q", msg.Code)
-	}
-
-	// The announcement reaches everyone, the announcing host included,
-	// so its own badge comes from the room rather than local state.
+	// A second recorder is rejected while one is announced, a host too.
 	host.member.Handle(sfu.Message{Type: record, On: true})
-	expectRecording(t, host, host.member.ID, true)
-	expectRecording(t, guest, host.member.ID, true)
 
-	// A second recorder is rejected while one is announced.
-	host2 := newTestPeer(t, hub, engine, "host2", true)
-	host2.member.Handle(sfu.Message{Type: record, On: true})
-
-	if msg := host2.next(t, "error"); msg.Code != "record-busy" {
-		t.Fatalf("host2 expected record-busy, got %q", msg.Code)
+	if msg := host.next(t, "error"); msg.Code != "record-busy" {
+		t.Fatalf("host expected record-busy, got %q", msg.Code)
 	}
 
 	// Late joiners get the flag replayed in the welcome.
 	late := newTestPeer(t, hub, engine, "late", false)
 
-	if msg := late.next(t, "welcome"); msg.Recorder != host.member.ID {
-		t.Fatalf("late joiner expected recorder %q, got %q", host.member.ID, msg.Recorder)
+	if msg := late.next(t, "welcome"); msg.Recorder != guest.member.ID {
+		t.Fatalf("late joiner expected recorder %q, got %q", guest.member.ID, msg.Recorder)
 	}
 }
 
@@ -935,10 +928,14 @@ func TestKeyframeRequestForwarding(t *testing.T) {
 	}
 }
 
-// watchRembOnPublisher closes capped once the publisher's video sender
-// receives a REMB at or below the cap.
-func watchRembOnPublisher(sender *webrtc.RTPSender, rembCap float64, capped chan<- struct{}) {
+// watchRembOnPublisher streams the bitrate of every REMB the publisher's
+// video sender receives, until the peer connection closes.
+func watchRembOnPublisher(sender *webrtc.RTPSender) <-chan float64 {
+	rembs := make(chan float64, 8)
+
 	go func() {
+		defer close(rembs)
+
 		for {
 			packets, _, readErr := sender.ReadRTCP()
 			if readErr != nil {
@@ -947,14 +944,56 @@ func watchRembOnPublisher(sender *webrtc.RTPSender, rembCap float64, capped chan
 
 			for _, packet := range packets {
 				remb, ok := packet.(*rtcp.ReceiverEstimatedMaximumBitrate)
-				if ok && float64(remb.Bitrate) <= rembCap*1.01 {
-					close(capped)
-
-					return
+				if !ok {
+					continue
 				}
+
+				rembs <- float64(remb.Bitrate)
 			}
 		}
 	}()
+
+	return rembs
+}
+
+// publisherVideoSender returns the publisher's video sender, the one the
+// hub throttles with REMB.
+func publisherVideoSender(t *testing.T, publisher *testPeer) *webrtc.RTPSender {
+	t.Helper()
+
+	for _, transceiver := range publisher.localPC().GetTransceivers() {
+		sender := transceiver.Sender()
+		if sender != nil && sender.Track() != nil && sender.Track().Kind() == webrtc.RTPCodecTypeVideo {
+			return sender
+		}
+	}
+
+	t.Fatal("publisher has no video sender")
+
+	return nil
+}
+
+// waitRemb waits for a REMB that accept takes, failing after the test
+// timeout.
+func waitRemb(t *testing.T, rembs <-chan float64, what string, accept func(float64) bool) float64 {
+	t.Helper()
+
+	deadline := time.After(testTimeout)
+
+	for {
+		select {
+		case bitrate, open := <-rembs:
+			if !open {
+				t.Fatalf("publisher's RTCP reader closed while waiting for %s", what)
+			}
+
+			if accept(bitrate) {
+				return bitrate
+			}
+		case <-deadline:
+			t.Fatalf("publisher never received %s", what)
+		}
+	}
 }
 
 // TestViewerRembCapsPublisher asserts that a viewer's REMB drives the REMB
@@ -984,16 +1023,7 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 
 	const rembCap = 200_000.0
 
-	capped := make(chan struct{})
-
-	for _, transceiver := range publisher.localPC().GetTransceivers() {
-		sender := transceiver.Sender()
-		if sender == nil || sender.Track() == nil || sender.Track().Kind() != webrtc.RTPCodecTypeVideo {
-			continue
-		}
-
-		watchRembOnPublisher(sender, rembCap, capped)
-	}
+	rembs := watchRembOnPublisher(publisherVideoSender(t, publisher))
 
 	err = viewer.localPC().WriteRTCP([]rtcp.Packet{
 		&rtcp.ReceiverEstimatedMaximumBitrate{
@@ -1006,12 +1036,124 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 		t.Fatalf("viewer remb: %v", err)
 	}
 
-	select {
-	case <-capped:
-	case <-time.After(testTimeout):
-		t.Fatal("publisher never received a viewer-capped REMB")
+	waitRemb(t, rembs, "a viewer-capped REMB", func(bitrate float64) bool { return bitrate <= rembCap*1.01 })
+}
+
+// TestScreenShareRembStartsAtCeiling asserts that a single-layer video
+// stream — a screen share, which has no simulcast layer to step down to —
+// is offered the whole uplink ceiling instead of the controller's low
+// starting guess, and is throttled only once loss shows up: a screen share
+// without that bitrate drops frames until it is a slideshow.
+func TestScreenShareRembStartsAtCeiling(t *testing.T) {
+	t.Parallel()
+
+	call := newScreenShareCall(t)
+
+	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its screen share", atCeiling)
+
+	call.report(t, 64)
+
+	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
+}
+
+// TestScreenShareRembRecoversAfterCongestion asserts the other half of
+// the controller: once the viewer reports a clean link and says its own
+// downlink is healthy again, the publisher's ceiling comes back on that
+// report. A screen share that only adapts downwards stays blurred by one
+// bad minute for the rest of the call.
+func TestScreenShareRembRecoversAfterCongestion(t *testing.T) {
+	t.Parallel()
+
+	call := newScreenShareCall(t)
+
+	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its screen share", atCeiling)
+
+	call.report(t, 64)
+
+	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
+
+	call.report(t, 0)
+	call.setREMB(t, screenShareCeiling)
+
+	waitRemb(t, call.rembs, "the ceiling back once the viewer's link recovered", atCeiling)
+}
+
+// screenShareCall is one member sharing a screen to one viewer, with the
+// publisher's RTCP watched for the bitrate the hub feeds it. A screen
+// share has no simulcast layers to move between, so it is the only video
+// stream the hub throttles with REMB.
+type screenShareCall struct {
+	viewer *testPeer
+	ssrc   uint32
+	rembs  <-chan float64
+}
+
+// screenShareCeiling is the room's default publish ceiling in bits per
+// second, which a single screen share may use in full.
+const screenShareCeiling = 2_500_000.0
+
+func newScreenShareCall(t *testing.T) screenShareCall {
+	t.Helper()
+
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	t.Cleanup(closeEngine)
+
+	hub := newTestHub(t, engine)
+
+	publisher := newTestPeer(t, hub, engine, "alice", false)
+	audio, screen := publisherOffer(t, publisher)
+
+	go pumpMedia(audio)
+	go pumpMedia(screen)
+
+	viewer := newTestPeer(t, hub, engine, "bob", false)
+	remote, _ := viewerSubscribe(t, viewer, engine)
+
+	return screenShareCall{
+		viewer: viewer,
+		ssrc:   uint32(remote.SSRC()),
+		rembs:  watchRembOnPublisher(publisherVideoSender(t, publisher)),
 	}
 }
+
+// report sends one receiver report, the viewer's account of what it lost.
+func (c screenShareCall) report(t *testing.T, fractionLost uint8) {
+	t.Helper()
+
+	packet := &rtcp.ReceiverReport{
+		SSRC:    1,
+		Reports: []rtcp.ReceptionReport{{SSRC: c.ssrc, FractionLost: fractionLost}},
+	}
+
+	err := c.viewer.localPC().WriteRTCP([]rtcp.Packet{packet})
+	if err != nil {
+		t.Fatalf("viewer receiver report: %v", err)
+	}
+}
+
+// setREMB sends the viewer's own estimate of its downlink.
+func (c screenShareCall) setREMB(t *testing.T, bitrate float64) {
+	t.Helper()
+
+	packet := &rtcp.ReceiverEstimatedMaximumBitrate{
+		SenderSSRC: 1,
+		Bitrate:    float32(bitrate),
+		SSRCs:      []uint32{c.ssrc},
+	}
+
+	err := c.viewer.localPC().WriteRTCP([]rtcp.Packet{packet})
+	if err != nil {
+		t.Fatalf("viewer remb: %v", err)
+	}
+}
+
+func atCeiling(bitrate float64) bool { return bitrate >= screenShareCeiling*0.99 }
+
+func belowCeiling(bitrate float64) bool { return !atCeiling(bitrate) }
 
 // TestWelcomeCarriesRelayCredentials checks that a member is handed
 // TURN credentials for the host it signaled on, and that the hub

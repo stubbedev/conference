@@ -109,7 +109,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.sessions.Add(1)
 	defer s.sessions.Done()
 
-	ctx, cancel := context.WithCancelCause(r.Context())
+	connCtx := r.Context()
+
+	ctx, cancel := context.WithCancelCause(connCtx)
 	defer cancel(nil)
 
 	defer s.live.claim(liveKey{room: claims.Room, member: claims.Member}, func(cause error) {
@@ -118,8 +120,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.sessions.Go(func() { _ = conn.Close(kickStatus(cause), cause.Error()) })
 	})()
 
-	current, err := newSession(ctx, s.settings, s.engines, claims.Member, func(ctx context.Context, message any) error {
-		err := write(ctx, conn, message)
+	current, err := newSession(ctx, s.settings, s.engines, claims.Member, func(message any) error {
+		err := write(connCtx, conn, message)
 		if err != nil {
 			cancel(fmt.Errorf("%w: %w", errConnectionLost, err))
 		}
@@ -136,7 +138,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.Print("session opened")
 
-	err = s.serve(r.Context(), ctx, conn, current)
+	err = s.serve(connCtx, ctx, conn, current)
 	cause := context.Cause(ctx)
 
 	cancel(nil)
@@ -239,9 +241,9 @@ func (l *liveSessions) close() {
 	}
 }
 
-func (s *Service) serve(readCtx, ctx context.Context, conn *websocket.Conn, current *session) error {
+func (s *Service) serve(connCtx, ctx context.Context, conn *websocket.Conn, current *session) error {
 	for {
-		kind, data, err := conn.Read(readCtx)
+		kind, data, err := conn.Read(connCtx)
 		if err != nil {
 			return fmt.Errorf("read: %w", err)
 		}
@@ -249,7 +251,7 @@ func (s *Service) serve(readCtx, ctx context.Context, conn *websocket.Conn, curr
 		if kind == websocket.MessageBinary {
 			err = audio(ctx, current, data)
 		} else {
-			err = handle(ctx, conn, current, data)
+			err = handle(connCtx, ctx, conn, current, data)
 		}
 
 		if err != nil {
@@ -280,7 +282,7 @@ func audio(ctx context.Context, current *session, data []byte) error {
 	return current.audio(ctx, header, pcm)
 }
 
-func handle(ctx context.Context, conn *websocket.Conn, current *session, data []byte) error {
+func handle(connCtx, ctx context.Context, conn *websocket.Conn, current *session, data []byte) error {
 	var message wire.Command
 
 	err := json.Unmarshal(data, &message)
@@ -292,7 +294,7 @@ func handle(ctx context.Context, conn *websocket.Conn, current *session, data []
 	case wire.TypeHello:
 		log.Printf("targets: %s", strings.Join(current.setTargets(message.Targets), ","))
 
-		return write(ctx, conn, wire.Command{Type: wire.TypeReady, Targets: nil, Speaker: ""})
+		return write(connCtx, conn, wire.Command{Type: wire.TypeReady, Targets: nil, Speaker: ""})
 	case wire.TypeEnd:
 		return current.end(ctx, message.Speaker)
 	default:

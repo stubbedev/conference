@@ -29,7 +29,7 @@ interface ControlsBarProps {
   fullscreen: boolean
   /** getDisplayMedia is missing on iOS Safari and some mobile browsers. */
   canShare?: boolean
-  /** Host-only: browsers without MediaRecorder canvas capture hide it too. */
+  /** Browsers without MediaRecorder canvas capture hide it. */
   canRecord?: boolean
   recording?: boolean
   /** Host-only. */

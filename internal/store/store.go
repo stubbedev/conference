@@ -21,8 +21,7 @@ type row interface {
 	Scan(dest ...any) error
 }
 
-// Room is the persisted state of a pre-created room. Rooms are immutable:
-// nothing updates a row after CreateRoom except DeleteRoom.
+// Room is the persisted state of a pre-created room.
 type Room struct {
 	Slug       string
 	Name       string
@@ -64,8 +63,9 @@ CREATE TABLE IF NOT EXISTS rooms (
 	keyblob     BLOB,
 	open_key    BLOB,
 	priv_hash   BLOB NOT NULL,
-	max_members INTEGER NOT NULL DEFAULT 0,
-	created_at  INTEGER NOT NULL
+	max_members    INTEGER NOT NULL DEFAULT 0,
+	created_at     INTEGER NOT NULL,
+	last_joined_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS sessions (
 	id         TEXT PRIMARY KEY,
@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 `
+
+const roomLastJoinedIndex = `CREATE INDEX IF NOT EXISTS rooms_last_joined ON rooms(last_joined_at)`
 
 // Open opens (creating if needed) the database at path.
 func Open(path string) (*Store, error) {
@@ -108,7 +110,76 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("store: schema: %w", err)
 	}
 
+	err = migrate(database)
+	if err != nil {
+		_ = database.Close()
+
+		return nil, err
+	}
+
 	return &Store{db: database}, nil
+}
+
+func migrate(database *sql.DB) error {
+	ctx := context.Background()
+
+	lastJoined, err := roomsHaveLastJoined(ctx, database)
+	if err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
+
+	if !lastJoined {
+		_, err = database.ExecContext(ctx,
+			`ALTER TABLE rooms ADD COLUMN last_joined_at INTEGER NOT NULL DEFAULT 0`)
+		if err != nil {
+			return fmt.Errorf("store: migrate: %w", err)
+		}
+
+		_, err = database.ExecContext(ctx, `UPDATE rooms SET last_joined_at = created_at`)
+		if err != nil {
+			return fmt.Errorf("store: migrate: %w", err)
+		}
+	}
+
+	_, err = database.ExecContext(ctx, roomLastJoinedIndex)
+	if err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
+
+	return nil
+}
+
+func roomsHaveLastJoined(ctx context.Context, database *sql.DB) (bool, error) {
+	rows, err := database.QueryContext(ctx, `PRAGMA table_info(rooms)`)
+	if err != nil {
+		return false, fmt.Errorf("store: table info: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			position, notNull, primaryKey int
+			name, kind                    string
+			fallback                      sql.NullString
+		)
+
+		err = rows.Scan(&position, &name, &kind, &notNull, &fallback, &primaryKey)
+		if err != nil {
+			return false, fmt.Errorf("store: table info: %w", err)
+		}
+
+		if name == "last_joined_at" {
+			return true, nil
+		}
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return false, fmt.Errorf("store: table info: %w", err)
+	}
+
+	return false, nil
 }
 
 // Close closes the underlying database.
@@ -124,10 +195,11 @@ func (s *Store) Close() error {
 // CreateRoom inserts a new room. The slug must not exist yet.
 func (s *Store) CreateRoom(ctx context.Context, r Room) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO rooms
-		(slug, name, auth_salt, auth_hash, key_salt, keyblob, open_key, priv_hash, max_members, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(slug, name, auth_salt, auth_hash, key_salt, keyblob, open_key, priv_hash,
+		 max_members, created_at, last_joined_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Slug, r.Name, r.AuthSalt, r.AuthHash, r.KeySalt, r.Keyblob,
-		r.OpenKey, r.PrivHash, r.MaxMembers, r.CreatedAt.Unix())
+		r.OpenKey, r.PrivHash, r.MaxMembers, r.CreatedAt.Unix(), r.CreatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("store: create room: %w", err)
 	}
@@ -217,9 +289,9 @@ func (s *Store) DeleteRoom(ctx context.Context, slug string) error {
 	return nil
 }
 
-// StaleRooms returns the slugs of rooms created before cutoff.
+// StaleRooms returns the slugs of rooms unused since cutoff.
 func (s *Store) StaleRooms(ctx context.Context, cutoff time.Time) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT slug FROM rooms WHERE created_at < ?`, cutoff.Unix())
+	rows, err := s.db.QueryContext(ctx, `SELECT slug FROM rooms WHERE last_joined_at < ?`, cutoff.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("store: stale rooms: %w", err)
 	}
@@ -273,6 +345,11 @@ func (s *Store) CreateSession(ctx context.Context, token, room string, priv bool
 		hex.EncodeToString(sum[:]), room, boolInt(priv), now.Add(ttl).Unix(), now.Unix())
 	if err != nil {
 		return fmt.Errorf("store: create session: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `UPDATE rooms SET last_joined_at = ? WHERE slug = ?`, now.Unix(), room)
+	if err != nil {
+		return fmt.Errorf("store: record join: %w", err)
 	}
 
 	return nil
