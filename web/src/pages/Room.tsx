@@ -182,10 +182,11 @@ function translationWarnings(status: TranslatorStatus, selfLang: string, languag
 }
 
 // Where this member's own voice stands, while they have chosen it.
-function ownVoiceLabel(status: TranslatorStatus): string {
+function ownVoiceLabel(status: TranslatorStatus, recorded: boolean): string {
   if (status.ownVoice === 'ready') return 'Your own voice is in use'
-  if (status.ownVoice === 'learning') return `Learning your voice… ${Math.round(status.ownVoiceSeconds)} s`
-  return 'Learning your voice…'
+  if (status.ownVoice === 'rejected') return 'Your recording was too short: record again (female voice for now)'
+  if (!recorded) return 'Record your voice in the settings (female voice for now)'
+  return 'Preparing your voice…'
 }
 
 function tileLabel(tile: Tile, displayName: string, members: MemberInfo[]): string {
@@ -1763,10 +1764,10 @@ export default function Room() {
             </Hint>
           )}
           {translatorStatus && translationBy && langPrefs.voiceChoice === 'own' && translation.ownVoice && (
-            <Hint label="Others hear your translations in a voice cloned from what you say in this call. It is kept only for this call." side="bottom">
+            <Hint label="Others hear your translations in a voice cloned from your recording." side="bottom">
               <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
                 <AudioLines className="size-3 shrink-0" />
-                <span className="truncate">{ownVoiceLabel(translatorStatus)}</span>
+                <span className="truncate">{ownVoiceLabel(translatorStatus, ownSample !== null)}</span>
               </span>
             </Hint>
           )}

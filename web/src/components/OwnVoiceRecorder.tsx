@@ -27,8 +27,8 @@ interface OwnVoiceRecorderProps extends OwnVoiceControls {
   lang: string
 }
 
-// Recording the speaker's own voice before the call, so it is in use from
-// their first sentence instead of being learned from the call.
+// Recording the speaker's own voice, before or during the call; their
+// translated voice is cloned from it.
 export function OwnVoiceRecorder({ lang, sample, remember, micTrack, onSample, onRemember }: OwnVoiceRecorderProps) {
   const [recording, setRecording] = useState<SampleRecorder | null>(null)
   const [seconds, setSeconds] = useState(0)
@@ -89,7 +89,7 @@ export function OwnVoiceRecorder({ lang, sample, remember, micTrack, onSample, o
         <>
           <p className="text-xs text-muted-foreground">
             Record yourself reading a few sentences ({SAMPLE_SECONDS} s), and others hear your voice from your first
-            sentence. Otherwise it is learned from what you say in the call.
+            sentence. Without a recording, they hear the female voice.
           </p>
           <Button size="sm" variant="secondary" onClick={record} disabled={!micTrack}>
             <Mic /> Record my voice

@@ -89,7 +89,6 @@ export class Translator {
     sameLanguage: false,
     failedTranslations: 0,
     ownVoice: 'off',
-    ownVoiceSeconds: 0,
     droppedVoices: 0,
   }
   private selfPrefs: LangPrefs
@@ -179,10 +178,10 @@ export class Translator {
     this.sendSample()
   }
 
-  // The speech service drops the speaker's own voice, recorded or learned, at once.
+  // The speech service drops the speaker's recorded voice at once.
   private forgetVoice(): void {
     this.sampleSent = false
-    this.setStatus({ ownVoice: 'off', ownVoiceSeconds: 0 })
+    this.setStatus({ ownVoice: 'off' })
     const speaker = this.client?.memberId
     if (!speaker || this.speech?.readyState !== WebSocket.OPEN) return
     this.speech.send(JSON.stringify({ type: 'forget-voice', speaker }))
@@ -336,7 +335,7 @@ export class Translator {
   }
 
   private onSpeechText(data: string): void {
-    let message: { type?: string; code?: string; seconds?: number } & Partial<CaptionLine>
+    let message: { type?: string; code?: string } & Partial<CaptionLine>
     try {
       message = JSON.parse(data) as typeof message
     } catch {
@@ -345,8 +344,6 @@ export class Translator {
     if (message.type === 'notice') {
       if (message.code === 'translation-failed') {
         this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
-      } else if (message.code === 'own-voice-learning') {
-        this.setStatus({ ownVoice: 'learning', ownVoiceSeconds: message.seconds ?? 0 })
       } else if (message.code === 'own-voice-ready') {
         this.setStatus({ ownVoice: 'ready' })
       } else if (message.code === 'own-voice-rejected') {

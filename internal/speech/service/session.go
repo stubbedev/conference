@@ -7,7 +7,6 @@ import (
 	"log"
 	"math"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,12 +21,9 @@ const (
 	queuedFinals = 8
 	contextKept  = 5
 
-	// A speaker's own voice is cloned from 12 to 20 s of their finished
-	// sentences; shorter ones, such as fillers, don't count.
-	ownVoiceMin      = 12 * vad.Rate
+	// A speaker's own voice is cloned from a sample they recorded: at
+	// least 6 s, at most 20 s is kept.
 	ownVoiceMax      = 20 * vad.Rate
-	ownVoiceSentence = vad.Rate
-	// A sample recorded before the call is read on purpose, so less will do.
 	ownVoicePrepared = 6 * vad.Rate
 )
 
@@ -43,7 +39,7 @@ type final struct {
 	lang  language
 	voice voiceChoice
 	audio []int16
-	// own is the speaker's own voice once it is learned (see learn).
+	// own is the speaker's recorded voice, when they chose it (see ownVoice).
 	own *reference
 }
 
@@ -57,25 +53,10 @@ type speaker struct {
 	interimBusy    atomic.Bool
 	interimSamples int
 	context        []string
-	// sampleMu guards sample: the worker learns into it, a forget-voice
-	// command clears it.
-	sampleMu sync.Mutex
-	sample   voiceSample
-	// incoming collects a voice sample recorded before the call while it
-	// arrives (read loop only); prepared is that sample once it is ready,
-	// and takes precedence over learning from the call.
+	// incoming collects a voice sample the speaker recorded while it
+	// arrives (read loop only); prepared is that sample once it is ready.
 	incoming []int16
 	prepared atomic.Pointer[reference]
-}
-
-// voiceSample collects a speaker's own voice from their finished
-// sentences in one language until it is long enough to clone. It lives
-// only in this session's memory and goes with it.
-type voiceSample struct {
-	lang  string
-	audio []int16
-	texts []string
-	ready *reference
 }
 
 // voiceTargets are the languages someone wants a translated voice in;
@@ -125,8 +106,6 @@ func newSession(ctx context.Context, settings Settings, engines speechEngines, m
 			interimBusy:    atomic.Bool{},
 			interimSamples: 0,
 			context:        nil,
-			sampleMu:       sync.Mutex{},
-			sample:         voiceSample{lang: "", audio: nil, texts: nil, ready: nil},
 			incoming:       nil,
 			prepared:       atomic.Pointer[reference]{},
 		},
@@ -275,7 +254,7 @@ func (s *session) prepare(ctx context.Context, current *speaker, audio []int16, 
 }
 
 // forgetVoice drops the speaker's own voice from this session at once:
-// a recorded sample, one still arriving, and one learned from the call.
+// the recorded sample, and one still arriving.
 func (s *session) forgetVoice(speakerID string) error {
 	current := s.speaker
 	if speakerID != current.id {
@@ -284,10 +263,6 @@ func (s *session) forgetVoice(speakerID string) error {
 
 	current.incoming = nil
 	current.prepared.Store(nil)
-
-	current.sampleMu.Lock()
-	current.sample = voiceSample{lang: "", audio: nil, texts: nil, ready: nil}
-	current.sampleMu.Unlock()
 
 	return nil
 }
@@ -382,7 +357,7 @@ func (s *session) final(ctx context.Context, current *speaker, job final) {
 
 	s.caption(ctx, current, job.seg, job.lang, job.lang, text, true)
 
-	job.own = s.learn(ctx, current, job, text)
+	job.own = s.ownVoice(current, job)
 
 	earlier := slices.Clone(current.context)
 	current.context = append(current.context, text)
@@ -404,56 +379,14 @@ func (s *session) final(ctx context.Context, current *speaker, job final) {
 		float64(len(job.audio))/vad.Rate, transcribed.Milliseconds(), time.Since(started).Milliseconds())
 }
 
-// learn adds a finished sentence to the speaker's own-voice sample while
-// they have chosen their own voice, and returns the reference once it is
-// long enough (nil before, or without a cloning voice engine).
-func (s *session) learn(ctx context.Context, current *speaker, job final, text string) *reference {
+// ownVoice is the speaker's recorded voice while they have chosen it,
+// or nil for the stock voice.
+func (s *session) ownVoice(current *speaker, job final) *reference {
 	if !s.settings.voiceCloning || job.voice != voiceOwn {
 		return nil
 	}
 
-	if prepared := current.prepared.Load(); prepared != nil {
-		return prepared
-	}
-
-	current.sampleMu.Lock()
-	defer current.sampleMu.Unlock()
-
-	sample := &current.sample
-	if sample.lang != job.lang.Code {
-		*sample = voiceSample{lang: job.lang.Code, audio: nil, texts: nil, ready: nil}
-	}
-
-	if sample.ready != nil {
-		return sample.ready
-	}
-
-	if len(job.audio) < ownVoiceSentence {
-		return nil
-	}
-
-	sample.audio = append(sample.audio, job.audio[:min(len(job.audio), ownVoiceMax-len(sample.audio))]...)
-	sample.texts = append(sample.texts, text)
-
-	if len(sample.audio) < ownVoiceMin {
-		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceLearning, Seconds: seconds(len(sample.audio))})
-
-		return nil
-	}
-
-	encoded, err := wav.Encode(sample.audio, vad.Rate)
-	if err != nil {
-		logFailure(ctx, "own voice", err)
-
-		return nil
-	}
-
-	sample.ready = &reference{wav: encoded, text: strings.Join(sample.texts, " ")}
-	sample.audio, sample.texts = nil, nil
-
-	s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceReady, Seconds: 0})
-
-	return sample.ready
+	return current.prepared.Load()
 }
 
 func seconds(samples int) float64 {

@@ -121,7 +121,7 @@ async function main() {
 
   await joinRoom(host, room.privUrl)
   // The guest records its voice on the join screen, so it is in use from its
-  // first sentence instead of being learned from the call.
+  // first sentence.
   await joinRoom(guest, room.url, null, async (browser) => {
     const recordButton = `[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Record my voice') && !b.disabled)`
     await waitFor(browser, `Boolean(${recordButton})`, Boolean, 15_000)
@@ -144,14 +144,8 @@ async function main() {
   const hostSees = await waitFor(host, tileState('Gerd'), (tile) => tile?.caption.startsWith('[en] de utterance'), TIMEOUT_MS)
   check('host subtitles', hostSees.ok, `no English subtitle on the guest's tile: ${JSON.stringify(hostSees.value)}`)
 
-  // In use right away: the recorded sample, not 12 s learned from the call.
-  let learning = false
-  const ownVoice = await waitFor(guest, `document.querySelector('header')?.innerText ?? ''`, (text) => {
-    learning ||= text.includes('Learning your voice')
-    return text.includes('Your own voice is in use')
-  }, TIMEOUT_MS)
+  const ownVoice = await waitFor(guest, `document.querySelector('header')?.innerText ?? ''`, (text) => text.includes('Your own voice is in use'), TIMEOUT_MS)
   check('own voice', ownVoice.ok, `the guest's recorded voice was never in use: ${JSON.stringify(ownVoice.value)}`)
-  check('own voice', !learning, 'the guest learned its voice from the call although it had recorded one')
 
   // The label only shows while a cloned voice plays, so poll quickly.
   let cloned = false

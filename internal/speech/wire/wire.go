@@ -18,22 +18,20 @@ const headerLength = 2
 const (
 	TypeHello = "hello"
 	TypeEnd   = "end"
-	// TypeVoiceSample ends a voice sample the speaker recorded before the
-	// call, sent ahead in audio frames marked Sample.
+	// TypeVoiceSample ends a voice sample the speaker recorded, sent
+	// ahead in audio frames marked Sample.
 	TypeVoiceSample = "voice-sample"
-	// TypeForgetVoice drops the speaker's own voice, recorded or learned,
-	// at once: they deleted it or chose a stock voice.
+	// TypeForgetVoice drops the speaker's recorded voice at once: they
+	// deleted it or chose a stock voice.
 	TypeForgetVoice       = "forget-voice"
 	TypeReady             = "ready"
 	TypeCaption           = "caption"
 	TypeNotice            = "notice"
 	NoticeTranslateFailed = "translation-failed"
-	// NoticeOwnVoiceLearning reports how many seconds of the speaker's
-	// own voice have been collected; NoticeOwnVoiceReady that it is in use.
-	NoticeOwnVoiceLearning = "own-voice-learning"
-	NoticeOwnVoiceReady    = "own-voice-ready"
+	// NoticeOwnVoiceReady: the speaker's recorded voice is in use.
+	NoticeOwnVoiceReady = "own-voice-ready"
 	// NoticeOwnVoiceRejected: a recorded voice sample was too short or
-	// held no speech; the voice is learned from the call instead.
+	// held no speech; the stock voice speaks.
 	NoticeOwnVoiceRejected = "own-voice-rejected"
 )
 
@@ -47,8 +45,8 @@ type AudioHeader struct {
 	Speaker string `json:"speaker"`
 	Lang    string `json:"lang"`
 	Voice   string `json:"voice"`
-	// Sample marks audio of a voice sample recorded before the call, not
-	// live speech.
+	// Sample marks audio of a voice sample the speaker recorded, not live
+	// speech.
 	Sample bool `json:"sample,omitempty"`
 }
 
@@ -89,7 +87,7 @@ type Caption struct {
 }
 
 // Notice tells the client about its stream without ending it: a
-// sentence sent untranslated, or how far its own voice has been learned.
+// sentence sent untranslated, or whether its recorded voice is in use.
 type Notice struct {
 	Type    string  `json:"type"`
 	Code    string  `json:"code"`

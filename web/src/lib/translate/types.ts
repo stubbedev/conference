@@ -54,10 +54,8 @@ export interface TranslatorStatus {
   sameLanguage: boolean
   /** Sentences the speech service could not translate and sent as said. */
   failedTranslations: number
-  /** This member's own voice: being learned from what they say, or in use. */
-  ownVoice: 'off' | 'learning' | 'ready' | 'rejected'
-  /** Seconds of speech collected for the own voice so far. */
-  ownVoiceSeconds: number
+  /** This member's recorded own voice: in use, or turned down as too short or silent. */
+  ownVoice: 'off' | 'ready' | 'rejected'
   /** Translated voices skipped because they would have played too late. */
   droppedVoices: number
 }

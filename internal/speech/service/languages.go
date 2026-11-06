@@ -12,9 +12,9 @@ type voiceChoice string
 const (
 	voiceFemale voiceChoice = "female"
 	voiceMale   voiceChoice = "male"
-	// voiceOwn is the speaker's own voice, cloned from what they say in
-	// the call (see voiceSample); until it is learned, or without a
-	// cloning voice engine, they are heard in the default voice.
+	// voiceOwn is the speaker's own voice, cloned from a sample they
+	// recorded (see session.ownVoice); without one, or without a cloning
+	// voice engine, they are heard in the default voice.
 	voiceOwn     voiceChoice = "own"
 	defaultVoice             = voiceFemale
 )

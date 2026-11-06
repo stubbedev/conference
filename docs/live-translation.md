@@ -105,21 +105,17 @@ of the female or male one; without it the app doesn't offer the option.
 Listeners see "AI voice (cloned)" on the tile while it plays, so nobody
 mistakes it for the person speaking that language.
 
-**Recorded before the meeting.** With My own voice chosen, the join
-screen (and the settings during the call) offers **Record my voice**: the
+**Recorded by the speaker.** With My own voice chosen, the join screen
+(and the settings during the call) offers **Record my voice**: the
 speaker reads a short, meeting-like text in their language (15 s; English,
 German, Swedish and Danish have texts written to cover each language's
 sounds and a question's intonation, other languages get a prompt to talk
 freely). When live translation starts, their browser sends the recording
 to the speech service, which transcribes it and uses it from their first
-sentence. A recording under 6 s, or one with no speech, is turned down.
-
-**Or learned from the call.** Without a recording, the service learns the
-voice from what they say: once 12 s of their finished sentences in one
-language are collected (filler under 1 s doesn't count, at most 20 s is
-kept). Until then, and whenever a cloned request fails, they are heard in
-the female voice; they see "Learning your voice…" and then "Your own
-voice is in use".
+sentence. Without a recording, or with one under 6 s or without speech,
+they are heard in the female voice and asked to record. The voice is
+never cloned from what they say in the call, only from a recording they
+made on purpose; it is the speaker's own action that turns it on.
 
 **Where the voice is, and when it's gone.** It comes only from the
 speaker's own microphone.
@@ -133,13 +129,20 @@ speaker's own microphone.
   dropped when the stream ends, and at once when the speaker deletes it
   or picks a stock voice (the browser sends `forget-voice`). Never logged
   or written to disk.
-- *The voice engine:* gets it inline with each request, so nothing has to
-  be stored or deleted there. audio.cpp keeps one prepared voice in memory
-  per model to save preparing it again for every sentence
-  (`conditionals_cache_slots` for Chatterbox, `prompt_cache_slots` for
-  VoxCPM2, both 1 by default); set them to 0 if no voice may outlive its
-  request, at the cost of preparing it each time. Keep its
-  `log_request_body` off, so request bodies aren't logged.
+- *The voice engine:* gets it inline with each request and stores nothing
+  on disk. audio.cpp does keep prepared voices in memory, so that it
+  doesn't prepare a voice again for every sentence (measured on an M1 Max:
+  2.2 s per sentence with the cache, 6.5 s without). Recommended:
+  - `conditionals_cache_slots` (Chatterbox) or `prompt_cache_slots`
+    (VoxCPM2) in the model's `session_options`, set to about the number
+    of speakers using their own voice at the same time (default 1: two
+    such speakers would keep evicting each other);
+  - `--idle-unload-ms 600000`, so after 10 minutes without a request the
+    models, and the prepared voices with them, leave memory;
+  - `log_request_body` off, so request bodies aren't logged.
+
+  Set the slots to 0 if no voice may outlive its request at all, at about
+  three times the time per sentence.
 
 The voice engine must accept audio.cpp's request fields:
 

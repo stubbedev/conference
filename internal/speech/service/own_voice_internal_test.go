@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/stubbe/conference/internal/speech/vad"
-	"github.com/stubbe/conference/internal/speech/wav"
 	"github.com/stubbe/conference/internal/speech/wire"
 )
 
@@ -59,113 +58,37 @@ func newOwnVoiceSession(t *testing.T, cloning string, engines speechEngines) (*s
 	return opened, out
 }
 
-func sentence(t *testing.T, opened *session, lang string, choice voiceChoice, seconds int) final {
+// sentence is a finished German sentence of this many seconds.
+func sentence(t *testing.T, opened *session, choice voiceChoice, seconds int) final {
 	t.Helper()
 
 	return final{
 		seg:   0,
-		lang:  mustLanguage(t, opened.settings, lang),
+		lang:  mustLanguage(t, opened.settings, "de"),
 		voice: choice,
 		audio: make([]int16, seconds*vad.Rate),
 		own:   nil,
 	}
 }
 
-func notices(out *outbox, code string) []wire.Notice {
-	var found []wire.Notice
-
-	for _, message := range out.snapshot() {
-		if notice, ok := message.(wire.Notice); ok && notice.Code == code {
-			found = append(found, notice)
-		}
-	}
-
-	return found
-}
-
-func TestOwnVoiceReportsItsProgress(t *testing.T) {
+func TestOwnVoiceOnlyWhenChosen(t *testing.T) {
 	t.Parallel()
 
 	opened, out := newOwnVoiceSession(t, "true", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
+	sendSample(t, opened, 8)
+	out.waitFor(t, noticeOf(wire.NoticeOwnVoiceReady))
 
-	for _, length := range []int{5, 5} {
-		if own := opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, length), "eins"); own != nil {
-			t.Fatalf("ready after %d s too early", length)
-		}
+	if own := opened.ownVoice(opened.speaker, sentence(t, opened, voiceMale, 1)); own != nil {
+		t.Fatal("spoke in the recorded voice for a speaker who chose a stock voice")
 	}
 
-	learning := notices(out, wire.NoticeOwnVoiceLearning)
-	if len(learning) != 2 || learning[0].Seconds != 5 || learning[1].Seconds != 10 {
-		t.Fatalf("learning notices %+v, want 5 s then 10 s", learning)
-	}
-}
-
-func TestOwnVoiceIsLearnedFromFinishedSentences(t *testing.T) {
-	t.Parallel()
-
-	opened, out := newOwnVoiceSession(t, "true", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
-
-	opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 5), "eins")
-	opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 5), "zwei")
-
-	own := opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 15), "drei")
-	if own == nil || own.text != "eins zwei drei" {
-		t.Fatalf("reference %+v, want the three sentences' text", own)
+	without, _ := newOwnVoiceSession(t, "", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
+	if own := without.ownVoice(without.speaker, sentence(t, without, voiceOwn, 1)); own != nil {
+		t.Fatal("an own voice without VOICE_CLONING")
 	}
 
-	samples, rate, err := wav.Decode(own.wav)
-	if err != nil || rate != vad.Rate || len(samples) != ownVoiceMax {
-		t.Fatalf("reference audio: %d samples at %d (%v), want capped at %d", len(samples), rate, err, ownVoiceMax)
-	}
-
-	if len(notices(out, wire.NoticeOwnVoiceReady)) != 1 {
-		t.Fatalf("no ready notice among %+v", out.snapshot())
-	}
-
-	if again := opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 3), "vier"); again != own {
-		t.Fatal("a learned voice must be kept, not grown")
-	}
-}
-
-func TestOwnVoiceSkipsFillersAndRestartsOnALanguageSwitch(t *testing.T) {
-	t.Parallel()
-
-	opened, out := newOwnVoiceSession(t, "true", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
-
-	opened.learn(t.Context(), opened.speaker, final{
-		seg: 0, lang: mustLanguage(t, opened.settings, "de"), voice: voiceOwn, audio: make([]int16, vad.Rate/2), own: nil,
-	}, "äh")
-
-	if len(notices(out, wire.NoticeOwnVoiceLearning)) != 0 {
-		t.Fatal("a half-second filler counted towards the voice")
-	}
-
-	opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 8), "hallo")
-	opened.learn(t.Context(), opened.speaker, sentence(t, opened, "en", voiceOwn, 8), "hello")
-
-	learning := notices(out, wire.NoticeOwnVoiceLearning)
-	if last := learning[len(learning)-1]; last.Seconds != 8 {
-		t.Fatalf("after switching language the sample holds %v s, want a fresh 8", last.Seconds)
-	}
-}
-
-func TestOwnVoiceNeedsCloningAndTheChoice(t *testing.T) {
-	t.Parallel()
-
-	stub := stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations}
-
-	without, out := newOwnVoiceSession(t, "", stub)
-	if own := without.learn(t.Context(), without.speaker, sentence(t, without, "de", voiceOwn, 15), "hallo"); own != nil {
-		t.Fatal("learned an own voice without VOICE_CLONING")
-	}
-
-	stock, _ := newOwnVoiceSession(t, "true", stub)
-	if own := stock.learn(t.Context(), stock.speaker, sentence(t, stock, "de", voiceMale, 15), "hallo"); own != nil {
-		t.Fatal("learned an own voice for a speaker who chose a stock voice")
-	}
-
-	if len(out.snapshot()) != 0 {
-		t.Fatalf("notices without cloning: %+v", out.snapshot())
+	if own := opened.ownVoice(opened.speaker, sentence(t, opened, voiceOwn, 10)); own == nil {
+		t.Fatal("no own voice after the sample was ready")
 	}
 }
 
@@ -178,7 +101,7 @@ func TestOwnVoiceFallsBackToTheStockVoice(t *testing.T) {
 	}
 	opened, out := newOwnVoiceSession(t, "true", engines)
 
-	job := sentence(t, opened, "de", voiceOwn, 1)
+	job := sentence(t, opened, voiceOwn, 1)
 	job.own = &reference{wav: []byte("RIFF"), text: "hallo"}
 
 	opened.translate(t.Context(), opened.speaker, job, mustLanguage(t, opened.settings, "en"), "hallo", nil)
@@ -205,7 +128,7 @@ func TestVoiceOnlyWhereSomeoneListens(t *testing.T) {
 	opened.setVoiceTargets([]string{})
 
 	english := mustLanguage(t, opened.settings, "en")
-	opened.translate(t.Context(), opened.speaker, sentence(t, opened, "de", voiceFemale, 1), english, "hallo", nil)
+	opened.translate(t.Context(), opened.speaker, sentence(t, opened, voiceFemale, 1), english, "hallo", nil)
 
 	out.waitFor(t, finalCaption("en"))
 
@@ -214,7 +137,7 @@ func TestVoiceOnlyWhereSomeoneListens(t *testing.T) {
 	}
 
 	opened.setVoiceTargets(nil)
-	opened.translate(t.Context(), opened.speaker, sentence(t, opened, "de", voiceFemale, 1), english, "hallo", nil)
+	opened.translate(t.Context(), opened.speaker, sentence(t, opened, voiceFemale, 1), english, "hallo", nil)
 
 	if calls := engines.seen(); len(calls) != 1 {
 		t.Fatalf("without voiceTargets every target is spoken; got %d calls", len(calls))
@@ -296,13 +219,9 @@ func TestRecordedVoiceIsUsedFromTheFirstSentence(t *testing.T) {
 	sendSample(t, opened, 8)
 	out.waitFor(t, noticeOf(wire.NoticeOwnVoiceReady))
 
-	own := opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 1), "hallo")
+	own := opened.ownVoice(opened.speaker, sentence(t, opened, voiceOwn, 1))
 	if own == nil || own.text != "said in sv" {
 		t.Fatalf("first sentence spoke with %+v, want the recorded sample and its transcript", own)
-	}
-
-	if len(notices(out, wire.NoticeOwnVoiceLearning)) != 0 {
-		t.Fatal("learned from the call although a sample was recorded")
 	}
 }
 
@@ -357,19 +276,17 @@ func TestForgetVoiceDropsEverything(t *testing.T) {
 
 	sendSample(t, opened, 8)
 	out.waitFor(t, noticeOf(wire.NoticeOwnVoiceReady))
-	opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 5), "eins")
 
 	err := opened.forgetVoice(anna)
 	if err != nil {
 		t.Fatalf("forget: %v", err)
 	}
 
-	if opened.speaker.prepared.Load() != nil || opened.speaker.incoming != nil || opened.speaker.sample.audio != nil ||
-		opened.speaker.sample.ready != nil {
+	if opened.speaker.prepared.Load() != nil || opened.speaker.incoming != nil {
 		t.Fatal("the voice survived forget-voice")
 	}
 
-	if own := opened.learn(t.Context(), opened.speaker, sentence(t, opened, "de", voiceOwn, 5), "zwei"); own != nil {
+	if own := opened.ownVoice(opened.speaker, sentence(t, opened, voiceOwn, 1)); own != nil {
 		t.Fatal("still spoke in the forgotten voice")
 	}
 
