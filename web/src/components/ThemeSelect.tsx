@@ -4,7 +4,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { THEME_LABELS, THEMES } from '@/lib/themes'
 
-// The themes by name, for the settings; ThemeToggle cycles the same list.
+// The themes by name, for the settings; the header's toggle cycles the two
+// that are listed for it, which is a shorter list than this one.
 export function ThemeSelect() {
   const { resolvedTheme, setTheme } = useTheme()
 
