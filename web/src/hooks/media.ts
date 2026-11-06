@@ -296,7 +296,7 @@ export function trackConstraints(
   }
   const size =
     resolution === 'auto'
-      ? { width: { ideal: 1280 }, height: { ideal: 720 } }
+      ? { width: { ideal: 1920 }, height: { ideal: 1080 } }
       : {
           width: { ideal: RESOLUTION_DIMENSIONS[resolution].width },
           height: { ideal: RESOLUTION_DIMENSIONS[resolution].height },

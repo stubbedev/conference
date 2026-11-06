@@ -6,7 +6,13 @@
 // relays ciphertext.
 
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
-import { SCREEN_AUDIO_KIND, screenSenderParameters } from '@/lib/screen'
+import {
+  CAMERA_LAYERS,
+  CAMERA_SHARING_LAYERS,
+  relayerParameters,
+  screenSenderParameters,
+} from '@/lib/encodings'
+import { SCREEN_AUDIO_KIND } from '@/lib/screen'
 import { isLangPrefs, isRoomCaption, type LangPrefs, type RoomCaption } from '@/lib/translate/types'
 
 export interface MemberInfo {
@@ -177,13 +183,9 @@ async function tuneScreenSender(sender: RTCRtpSender): Promise<void> {
 }
 
 // The camera is published as three encodings so the SFU can give each
-// viewer the one its layout and network can use. Screen shares stay a
-// single full-quality stream: text must stay legible.
-const CAMERA_LAYERS: readonly RTCRtpEncodingParameters[] = [
-  { rid: 'l', scaleResolutionDownBy: 4, maxBitrate: 150_000 },
-  { rid: 'm', scaleResolutionDownBy: 2, maxBitrate: 500_000 },
-  { rid: 'h', scaleResolutionDownBy: 1, maxBitrate: 1_500_000 },
-]
+// viewer the one its layout and network can use; the encodings live in
+// encodings.ts, next to the share's.
+export { CAMERA_LAYERS } from '@/lib/encodings'
 
 export class RoomClient {
   private ws: WebSocket | null = null
@@ -388,6 +390,7 @@ export class RoomClient {
     }
 
     this.state = { ...this.state, sharing: true }
+    void this.tuneCamera(CAMERA_SHARING_LAYERS)
     this.sendState()
     await this.sendUpOffer()
   }
@@ -407,8 +410,23 @@ export class RoomClient {
     this.screenSenders = []
 
     this.state = { ...this.state, sharing: false }
+    void this.tuneCamera(CAMERA_LAYERS)
     this.sendState()
     await this.sendUpOffer()
+  }
+
+  // tuneCamera retunes the camera's encodings in place. A browser that
+  // refuses the parameters keeps its own caps, which is a worse picture
+  // during a share, never a broken one.
+  private async tuneCamera(layers: readonly RTCRtpEncodingParameters[]): Promise<void> {
+    const sender = this.camSender
+    if (!sender) return
+
+    try {
+      await sender.setParameters(relayerParameters(sender.getParameters(), layers))
+    } catch (err) {
+      console.warn('sfu: tuning the camera encoder', err)
+    }
   }
 
   async replaceLocalTrack(kind: 'mic' | 'cam', track: MediaStreamTrack): Promise<void> {
