@@ -123,6 +123,10 @@ async function main() {
   // The guest records its voice on the join screen, so it is in use from its
   // first sentence.
   await joinRoom(guest, room.url, null, async (browser) => {
+    // Language and subtitles are folded on the join screen; open them like a person would.
+    const section = `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Language and subtitles')`
+    await waitFor(browser, `Boolean(${section})`, Boolean, 15_000)
+    await evalJs(browser, `${section}?.click()`)
     const recordButton = `[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Record my voice') && !b.disabled)`
     await waitFor(browser, `Boolean(${recordButton})`, Boolean, 15_000)
     await evalJs(browser, `${recordButton}?.click()`)
