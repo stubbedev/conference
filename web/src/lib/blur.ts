@@ -30,11 +30,12 @@ const SEGMENT_LONG_EDGE = 256
 const SEGMENT_SMOOTHING = 0.3
 
 /**
- * The background is blurred at this fraction of the frame's size: a
- * Gaussian that large costs real time per pixel, and a fraction of it
- * still reads as a room out of focus once it is scaled back up.
+ * The background is blurred at this fraction of the frame's size. It is
+ * going to be unreadable anyway, so it is drawn where the blur is cheap:
+ * the radius is a fraction of the frame, and the same cut looks the same
+ * at any working size.
  */
-const BLUR_DOWNSCALE = 2
+const BLUR_DOWNSCALE = 4
 
 /**
  * How far a plain bilinear upscale has to shrink the background instead,
@@ -73,11 +74,13 @@ class CanvasBlur implements BlurPipeline {
   private readonly subject = document.createElement('canvas')
   private readonly segmentInput = document.createElement('canvas')
   private readonly maskCanvas = document.createElement('canvas')
+  private readonly stencil = document.createElement('canvas')
   private readonly outputCtx = context(this.output, false)
   private readonly backgroundCtx = context(this.background, false)
   private readonly subjectCtx = context(this.subject, true)
   private readonly segmentCtx = context(this.segmentInput, false)
   private readonly maskCtx = context(this.maskCanvas, true)
+  private readonly stencilCtx = context(this.stencil, true)
   private readonly options: BlurOptions
   private readonly stream: MediaStream
   private readonly canFilter: boolean
@@ -91,6 +94,7 @@ class CanvasBlur implements BlurPipeline {
   private maskBuffers: [Float32Array, Float32Array] | null = null
   private maskBuffer = 0
   private maskImage: ImageData | null = null
+  private stencilDirty = false
   private frameRequest = 0
   private timer = 0
   private stopped = false
@@ -160,6 +164,10 @@ class CanvasBlur implements BlurPipeline {
     const height = this.video.videoHeight
     if (width === 0 || height === 0) return
 
+    // A camera that is switched off sends nothing, and repainting its last
+    // frame every thirty-third of a second buys no picture, only battery.
+    if (this.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
+
     this.resize(width, height)
 
     const shape = modelFor(width, height)
@@ -209,7 +217,10 @@ class CanvasBlur implements BlurPipeline {
     const fresh = this.segment(width, height)
     const took = performance.now() - started
 
-    if (fresh) this.mask = this.stabilise(fresh)
+    if (fresh) {
+      this.mask = this.stabilise(fresh)
+      this.stencilDirty = true
+    }
 
     this.segmentMs = this.segmentMs === 0 ? took : this.segmentMs * (1 - SEGMENT_SMOOTHING) + took * SEGMENT_SMOOTHING
   }
@@ -253,7 +264,11 @@ class CanvasBlur implements BlurPipeline {
     this.backgroundCtx.filter = 'none'
 
     this.outputCtx.imageSmoothingEnabled = true
-    this.outputCtx.imageSmoothingQuality = 'high'
+    // The background has just been blurred into an unreadable wash at a
+    // quarter of this size, so a sampler that spends time on detail has no
+    // detail left to find: the plain bilinear upscale is the same picture
+    // for a third of the work.
+    this.outputCtx.imageSmoothingQuality = 'low'
     this.outputCtx.drawImage(
       this.background,
       this.plan.pad,
@@ -274,19 +289,39 @@ class CanvasBlur implements BlurPipeline {
     const mask = this.mask
     if (!mask) return
 
+    if (this.stencilDirty) this.buildStencil(mask)
+
+    this.subjectCtx.globalCompositeOperation = 'destination-in'
+    this.subjectCtx.imageSmoothingEnabled = true
+    // The stencil's edge is already a gentle ramp, so the cheap upscale
+    // reproduces it exactly; the expensive one would only add ringing to
+    // the alpha, which shows up as a pale line around the person.
+    this.subjectCtx.imageSmoothingQuality = 'low'
+    this.subjectCtx.drawImage(this.stencil, 0, 0, mask.width, mask.height, 0, 0, width, height)
+    this.subjectCtx.globalCompositeOperation = 'source-over'
+  }
+
+  // buildStencil turns the newest mask into the feathered shape the person
+  // is cut out with, once per mask rather than once per frame: the mask
+  // already changes only a few times a frame at most, and the blur that
+  // makes the edge soft is the most expensive thing in the composite. It is
+  // drawn at the mask's own size, where a couple of pixels is the same fade
+  // as a dozen at the frame's, and upscaled by the browser as it is used.
+  private buildStencil(mask: Mask): void {
     const image = this.maskImageFor(mask)
     writeMaskAlpha(mask.values, image.data)
     this.maskCtx.putImageData(image, 0, 0)
 
-    this.subjectCtx.globalCompositeOperation = 'destination-in'
-    this.subjectCtx.imageSmoothingEnabled = true
-    this.subjectCtx.imageSmoothingQuality = 'high'
-    // The fade is drawn with the mask, so the person's edge meets the room
-    // over a few pixels instead of on a line the eye can follow.
-    this.subjectCtx.filter = this.canFilter ? `blur(${featherRadius(width)}px)` : 'none'
-    this.subjectCtx.drawImage(this.maskCanvas, 0, 0, mask.width, mask.height, 0, 0, width, height)
-    this.subjectCtx.filter = 'none'
-    this.subjectCtx.globalCompositeOperation = 'source-over'
+    if (this.stencil.width !== mask.width || this.stencil.height !== mask.height) {
+      this.stencil.width = mask.width
+      this.stencil.height = mask.height
+    }
+    this.stencilCtx.clearRect(0, 0, mask.width, mask.height)
+    this.stencilCtx.filter = this.canFilter ? `blur(${featherRadius(mask.width)}px)` : 'none'
+    this.stencilCtx.drawImage(this.maskCanvas, 0, 0)
+    this.stencilCtx.filter = 'none'
+
+    this.stencilDirty = false
   }
 
   // maskImageFor keeps one ImageData per mask shape: the model's answer is
