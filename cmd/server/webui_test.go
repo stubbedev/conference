@@ -48,9 +48,11 @@ func newTestUI(t *testing.T) http.Handler {
 	t.Helper()
 
 	frontend, err := newWebUI(testConfig(primaryOrigin, otherOrigin), fstest.MapFS{
-		indexPage:             file(indexFixture),
-		"assets/index-abc.js": file("console.log(1)"),
-		"logo.svg":            file("<svg/>"),
+		indexPage:                          file(indexFixture),
+		"assets/index-abc.js":              file("console.log(1)"),
+		"logo.svg":                         file("<svg/>"),
+		"vision/selfie_segmenter.tflite":   file("model"),
+		"vision/wasm/vision_wasm_internal": file("runtime"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -119,6 +121,13 @@ func TestWebUIServesFiles(t *testing.T) {
 	rec = get(handler, http.MethodHead, "/logo.svg", "meet.example.com")
 	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "" {
 		t.Fatalf("logo: status %d Cache-Control %q", rec.Code, rec.Header().Get("Cache-Control"))
+	}
+
+	for _, target := range []string{"/vision/selfie_segmenter.tflite", "/vision/wasm/vision_wasm_internal"} {
+		rec = get(handler, http.MethodGet, target, "meet.example.com")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
+			t.Fatalf("%s: status %d Cache-Control %q", target, rec.Code, rec.Header().Get("Cache-Control"))
+		}
 	}
 }
 

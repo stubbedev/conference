@@ -33,9 +33,12 @@ const (
 	reapTimeout       = 30 * time.Second
 	indexPage         = "index.html"
 	assetsDir         = "assets/"
-	apiPrefix         = "/api/"
-	signalingPath     = "/ws"
-	speechPath        = "/ws/speech"
+	// The blur model and its runtime never change under the same path, and
+	// they are megabytes: a browser that has them should keep them.
+	visionDir     = "vision/"
+	apiPrefix     = "/api/"
+	signalingPath = "/ws"
+	speechPath    = "/ws/speech"
 )
 
 func main() {
@@ -317,7 +320,7 @@ func (ui *webUI) serveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(path, assetsDir) {
+	if strings.HasPrefix(path, assetsDir) || strings.HasPrefix(path, visionDir) {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
 
