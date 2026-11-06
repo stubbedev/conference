@@ -205,7 +205,8 @@ func serveUntilShutdown(srv *http.Server, hub *sfu.Hub, speech *service.Service)
 }
 
 // reapLoop periodically deletes expired session grants and, when a
-// room TTL is configured, rooms older than it — skipping live rooms.
+// room TTL is configured, rooms nobody has joined for longer than it —
+// skipping live rooms.
 func reapLoop(database *store.Store, hub *sfu.Hub, ttl time.Duration) {
 	reapOnce(database, hub, ttl)
 
@@ -256,7 +257,7 @@ func reapOnce(database *store.Store, hub *sfu.Hub, ttl time.Duration) {
 	}
 
 	if removed > 0 {
-		log.Printf("reap: removed %d room(s) older than %s", removed, ttl)
+		log.Printf("reap: removed %d room(s) unused for %s", removed, ttl)
 	}
 }
 

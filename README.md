@@ -97,7 +97,7 @@ All settings are environment variables.
 | `API_KEYS`          | empty           | Comma-separated keys needed to create, list and delete rooms; empty means anyone may create |
 | `JOIN_ONLY`         | `false`         | Hide room creation on the home page so people can only join; requires `API_KEYS`          |
 | `OPEN_CREATE_HOSTS` | —               | Hostnames where anyone may create rooms despite `API_KEYS`/`JOIN_ONLY`                    |
-| `ROOM_TTL_DAYS`     | `365`           | Delete rooms older than this (checked hourly, live rooms are skipped); `0` keeps them forever |
+| `ROOM_TTL_DAYS`     | `365`           | Delete rooms nobody has joined for this long (checked hourly, live rooms are skipped); `0` keeps them forever |
 | `ICE_UDP_PORT`      | `5000`          | The single UDP port for all video and audio                                               |
 | `EXTERNAL_IPS`      | —               | Comma-separated public IPs to advertise when behind NAT                                   |
 | `TURN_PORT`         | `3478`          | UDP and TCP port of the built-in relay                                                    |
@@ -135,8 +135,9 @@ then one a minute; key holders are never limited. Behind a reverse
 proxy, set `TRUSTED_PROXIES` to its address so each visitor is counted
 separately (the bundled compose file already does).
 
-Old rooms are cleaned up automatically after `ROOM_TTL_DAYS`, together
-with their sessions. A room in use is never deleted.
+Rooms nobody has joined for `ROOM_TTL_DAYS` are cleaned up
+automatically, together with their sessions. A room in use is never
+deleted, and neither is one that was joined recently, however old it is.
 
 ### Start meetings from Slack
 

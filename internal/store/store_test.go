@@ -187,6 +187,77 @@ func TestStaleRooms(t *testing.T) {
 	}
 }
 
+func TestStaleRoomsByInactivity(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	storage := openTest(t)
+
+	inUse := passwordRoom("in-use", "p")
+	inUse.CreatedAt = time.Now().Add(-staleRoomAge)
+
+	err := storage.CreateRoom(ctx, inUse)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = storage.CreateSession(ctx, "tok", "in-use", false, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	untouched := passwordRoom("untouched", "p")
+	untouched.CreatedAt = time.Now().Add(-staleRoomAge)
+
+	err = storage.CreateRoom(ctx, untouched)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	slugs, err := storage.StaleRooms(ctx, time.Now().Add(-reapCutoff))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(slugs) != 1 || slugs[0] != "untouched" {
+		t.Fatalf("stale = %v, want [untouched]", slugs)
+	}
+}
+
+func TestStaleRoomsIgnoreCreationAge(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	storage := openTest(t)
+
+	room := passwordRoom("weekly-meeting", "p")
+	room.CreatedAt = time.Now().Add(-staleRoomAge)
+
+	err := storage.CreateRoom(ctx, room)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = storage.CreateSession(ctx, "tok", "weekly-meeting", true, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cutoff := time.Now().Add(-reapCutoff)
+	if !room.CreatedAt.Before(cutoff) {
+		t.Fatalf("created_at = %s, not before the cutoff %s", room.CreatedAt, cutoff)
+	}
+
+	slugs, err := storage.StaleRooms(ctx, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(slugs) != 0 {
+		t.Fatalf("stale = %v, want none for a room joined after the cutoff", slugs)
+	}
+}
+
 func TestSessions(t *testing.T) {
 	t.Parallel()
 
