@@ -34,6 +34,14 @@ export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
   micGain: 1,
 }
 
+/** Whether this member goes out with microphone and camera on. */
+export interface AvPrefs {
+  mic: boolean
+  cam: boolean
+}
+
+export const DEFAULT_AV_PREFS: AvPrefs = { mic: true, cam: true }
+
 // Mic gain is stored linear (1 = untouched) but presented in dB; the
 // slider range keeps gain between a whisper and a runaway boost.
 export const MIN_MIC_GAIN_DB = -20

@@ -1,8 +1,10 @@
 import { useState, type ReactNode } from 'react'
-import { Loader2, RotateCcw, ShieldCheck } from 'lucide-react'
+import { Loader2, Mic, MicOff, RotateCcw, ShieldCheck, Video, VideoOff } from 'lucide-react'
 
 import { FALLBACK_ASPECT_RATIO } from '@/hooks/media'
 import { Button } from '@/components/ui/button'
+import { Disclosure } from '@/components/Disclosure'
+import { Hint } from '@/components/Hint'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { VideoTile } from '@/components/VideoTile'
@@ -14,13 +16,21 @@ interface PrejoinProps {
   mediaError: string
   mediaBusy: boolean
   name: string
+  mic: boolean
+  cam: boolean
   onNameChange: (name: string) => void
+  onToggleMic: () => void
+  onToggleCam: () => void
   onRetryMedia: () => void
   onJoin: () => void
   /** Live-translation settings, when the server offers it. */
   translation?: ReactNode
 }
 
+// Joining asks for a name and one click. Microphone and camera keep the
+// state they were left in, so the two buttons here are enough to change
+// that; everything else that can be adjusted (devices, quality, volumes,
+// language) lives in the call, where it is actually used.
 export function Prejoin({
   roomName,
   slug,
@@ -28,7 +38,11 @@ export function Prejoin({
   mediaError,
   mediaBusy,
   name,
+  mic,
+  cam,
   onNameChange,
+  onToggleMic,
+  onToggleCam,
   onRetryMedia,
   onJoin,
   translation,
@@ -68,6 +82,28 @@ export function Prejoin({
                 mirrored
                 onAspectRatio={(_tileKey, ratio) => setRatio(ratio)}
               />
+              <div className="absolute inset-x-0 bottom-3 z-20 flex items-center justify-center gap-2">
+                <Hint label={mic ? 'Mute microphone' : 'Unmute microphone'} side="top">
+                  <Button
+                    variant={mic ? 'secondary' : 'destructive'}
+                    size="icon"
+                    aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}
+                    onClick={onToggleMic}
+                  >
+                    {mic ? <Mic /> : <MicOff />}
+                  </Button>
+                </Hint>
+                <Hint label={cam ? 'Turn off camera' : 'Turn on camera'} side="top">
+                  <Button
+                    variant={cam ? 'secondary' : 'destructive'}
+                    size="icon"
+                    aria-label={cam ? 'Turn off camera' : 'Turn on camera'}
+                    onClick={onToggleCam}
+                  >
+                    {cam ? <Video /> : <VideoOff />}
+                  </Button>
+                </Hint>
+              </div>
             </div>
           )}
         </div>
@@ -94,7 +130,7 @@ export function Prejoin({
             />
           </div>
 
-          {translation}
+          {translation && <Disclosure title="Language and subtitles">{translation}</Disclosure>}
 
           <Button size="lg" onClick={onJoin} disabled={!canJoin}>
             {mediaBusy ? (

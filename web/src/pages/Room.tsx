@@ -8,6 +8,7 @@ import {
   aspectRatioChanged,
   CAMERA_RESOLUTIONS,
   createMicPipeline,
+  DEFAULT_AV_PREFS,
   DEFAULT_DEVICE_PREFS,
   DEVICE_LABELS,
   FALLBACK_ASPECT_RATIO,
@@ -21,6 +22,7 @@ import {
   trackConstraints,
   useMediaDevices,
   validDeviceId,
+  type AvPrefs,
   type CameraFacing,
   type CameraResolution,
   type DeviceKind,
@@ -198,7 +200,17 @@ export default function Room() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null)
-  const [controls, setControls] = useState<Controls>({ mic: true, cam: true, sharing: false })
+  // Microphone and camera stay as the member last left them, across page
+  // reloads and other rooms: someone who joins muted stays muted.
+  const [avPrefs, setAvPrefs] = usePersistentState<AvPrefs>(
+    'conference:av',
+    DEFAULT_AV_PREFS,
+    (stored) => ({
+      mic: typeof stored.mic === 'boolean' ? stored.mic : true,
+      cam: typeof stored.cam === 'boolean' ? stored.cam : true,
+    }),
+  )
+  const [controls, setControls] = useState<Controls>({ mic: avPrefs.mic, cam: avPrefs.cam, sharing: false })
   const [mediaError, setMediaError] = useState('')
   const [mediaBusy, setMediaBusy] = useState(false)
   const [unread, setUnread] = useState(0)
@@ -321,10 +333,16 @@ export default function Room() {
 
   const updateControls = useCallback(
     (patch: Partial<Controls>) => {
-      controlsRef.current = { ...controlsRef.current, ...patch }
-      setControls(controlsRef.current)
+      const next = { ...controlsRef.current, ...patch }
+      controlsRef.current = next
+      setControls(next)
+      if (patch.mic !== undefined || patch.cam !== undefined) {
+        setAvPrefs((prev) =>
+          prev.mic === next.mic && prev.cam === next.cam ? prev : { mic: next.mic, cam: next.cam },
+        )
+      }
     },
-    [controlsRef],
+    [controlsRef, setAvPrefs],
   )
 
   // Returns the previous object when nothing in the patch differs, so
@@ -1591,11 +1609,17 @@ export default function Room() {
           mediaError={mediaError}
           mediaBusy={mediaBusy}
           name={displayName}
+          mic={controls.mic}
+          cam={controls.cam}
           onNameChange={setDisplayName}
+          onToggleMic={toggleMic}
+          onToggleCam={toggleCam}
           onRetryMedia={() => void acquireMedia()}
           onJoin={() => void joinCall()}
           translation={
-            <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+            translationAvailable ? (
+              <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+            ) : undefined
           }
         />
       </>
