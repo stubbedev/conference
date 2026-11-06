@@ -960,15 +960,9 @@ func (m *Member) handleChat(msg Message) {
 // Recording itself happens entirely in the announcing browser — the SFU
 // never sees plaintext media — so the flag exists only to drive the
 // consent badge every participant must see. It is therefore tracked
-// like any other room state: one recorder at a time, host-gated,
-// replayed to late joiners and cleared when the recorder leaves.
+// like any other room state: one recorder at a time, open to every
+// member, replayed to late joiners and cleared when the recorder leaves.
 func (m *Member) handleRecord(msg Message) {
-	if !m.priv {
-		m.fail("not-allowed", ErrForbidden)
-
-		return
-	}
-
 	if msg.On {
 		changed, allowed := m.room.claimRecording(m.ID)
 		if !allowed {

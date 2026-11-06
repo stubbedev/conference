@@ -740,32 +740,25 @@ func TestRecordingAnnouncement(t *testing.T) {
 	host := newTestPeer(t, hub, engine, "host", true)
 	guest := newTestPeer(t, hub, engine, "guest", false)
 
-	// Unprivileged members cannot announce a recording.
+	// Any member may record, not only a privileged one. The announcement
+	// reaches everyone, the recorder included, so its own badge comes
+	// from the room rather than local state.
 	guest.member.Handle(sfu.Message{Type: record, On: true})
+	expectRecording(t, guest, guest.member.ID, true)
+	expectRecording(t, host, guest.member.ID, true)
 
-	if msg := guest.next(t, "error"); msg.Code != "not-allowed" {
-		t.Fatalf("guest expected not-allowed, got %q", msg.Code)
-	}
-
-	// The announcement reaches everyone, the announcing host included,
-	// so its own badge comes from the room rather than local state.
+	// A second recorder is rejected while one is announced, a host too.
 	host.member.Handle(sfu.Message{Type: record, On: true})
-	expectRecording(t, host, host.member.ID, true)
-	expectRecording(t, guest, host.member.ID, true)
 
-	// A second recorder is rejected while one is announced.
-	host2 := newTestPeer(t, hub, engine, "host2", true)
-	host2.member.Handle(sfu.Message{Type: record, On: true})
-
-	if msg := host2.next(t, "error"); msg.Code != "record-busy" {
-		t.Fatalf("host2 expected record-busy, got %q", msg.Code)
+	if msg := host.next(t, "error"); msg.Code != "record-busy" {
+		t.Fatalf("host expected record-busy, got %q", msg.Code)
 	}
 
 	// Late joiners get the flag replayed in the welcome.
 	late := newTestPeer(t, hub, engine, "late", false)
 
-	if msg := late.next(t, "welcome"); msg.Recorder != host.member.ID {
-		t.Fatalf("late joiner expected recorder %q, got %q", host.member.ID, msg.Recorder)
+	if msg := late.next(t, "welcome"); msg.Recorder != guest.member.ID {
+		t.Fatalf("late joiner expected recorder %q, got %q", guest.member.ID, msg.Recorder)
 	}
 }
 

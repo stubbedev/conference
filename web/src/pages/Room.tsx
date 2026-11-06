@@ -835,10 +835,10 @@ export default function Room() {
       client.on('error', ({ code, text }) => {
         toast.error(text)
         if (code === 'room-closed') endedRef.current = true
-        // A rejected announce (not host, or someone else got there
-        // first) rolls the local recorder back so the badge and the
-        // button match what the room actually accepted.
-        if ((code === 'not-allowed' || code === 'record-busy') && recorderRef.current) {
+        // A rejected announce (someone else got there first) rolls the
+        // local recorder back so the badge and the button match what the
+        // room actually accepted.
+        if (code === 'record-busy' && recorderRef.current) {
           void stopRecording()
         }
       })
@@ -1767,7 +1767,7 @@ export default function Room() {
         unread={unread}
         fullscreen={fullscreen}
         canShare={canShare}
-        canRecord={privileged && recorderSupported()}
+        canRecord={recorderSupported()}
         recording={recording}
         onMic={toggleMic}
         onCam={toggleCam}

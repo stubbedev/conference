@@ -486,7 +486,7 @@ export class RoomClient {
   }
 
   // announceRecording claims (or releases) the room's recording badge.
-  // The server arbitrates: host-only, one recorder, cleared if the
+  // The server arbitrates: one recorder at a time, cleared if the
   // recorder drops. The denial arrives as an error event.
   announceRecording(on: boolean): void {
     this.send({ type: 'record', on })

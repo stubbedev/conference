@@ -24,9 +24,10 @@
   controls.
 - 🖥️ **Screen sharing and chat**, with mute and camera controls for
   every participant.
-- 🎥 **Recording that stays with you.** The host can record the meeting
-  in their own browser and download the video afterwards. The recording
-  never touches the server, and everyone sees a badge while it runs.
+- 🎥 **Recording that stays with you.** Anyone in the meeting can
+  record it in their own browser and download the video afterwards, one
+  person at a time. The recording never touches the server, and everyone
+  sees a badge while it runs.
 - 🗣️ **Live translation, if you want it.** Everyone picks their language;
   speech in other languages arrives as subtitles and a translated voice
   in yours, on speech engines you choose. See
@@ -187,8 +188,8 @@ hear them in. A host then turns on **Live translation** in the call:
 - Subtitles appear on each speaker's tile in your language.
 - Someone speaking another language is heard through their translated
   voice instead of their own, so the call sounds like one conversation
-  in your language. A recording does the same in the recording host's
-  language.
+  in your language. A recording does the same in the language of
+  whoever records it.
 - Everyone sees **Live translation** while it runs, with the state of
   their own translation and anything that keeps their speech from being
   translated, such as nobody else in the call speaking another language.
@@ -273,7 +274,7 @@ an external service".
   and revokes them when the member leaves. It only forwards to the SFU
   itself, so it cannot be abused as an open proxy.
 - Recording composites every tile plus one mixed audio track in the
-  host's browser and mirrors the host's layout (pinned tile large, others
+  recorder's browser and mirrors their layout (pinned tile large, others
   in a strip, screen shares pinned automatically). Long calls stream to
   the origin-private file system so memory stays flat. The container
   follows the browser: WebM on Chrome and Firefox, MP4 on Safari.
