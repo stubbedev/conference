@@ -56,10 +56,16 @@ services:
       VOICE_NAME: ${VOICE_NAME:-}
       INTERNAL_DOMAINS: ${INTERNAL_DOMAINS:-}
       GLOSSARY: ${GLOSSARY:-}
+      SPEECH_RUNTIME: ${SPEECH_RUNTIME:-server}
+      SPEECH_MODEL_DIR: ${SPEECH_MODEL_DIR:-/models}
+      SPEECH_MODELS_FILE: ${SPEECH_MODELS_FILE:-/models/models.json}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
       - data:/data
+      # Browser mode (SPEECH_RUNTIME=browser): a model directory filled on
+      # the host, e.g. ./models, which the browsers load from.
+      # - ./models:/models:ro
     ports:
       - "5000:5000/udp"
       - "3478:3478/udp"

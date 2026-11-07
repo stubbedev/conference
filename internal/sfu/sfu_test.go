@@ -35,7 +35,7 @@ func newTestHub(t *testing.T, engine *sfu.Engine) *sfu.Hub {
 		t.Fatal(err)
 	}
 
-	return sfu.NewHub(sfu.HubConfig{Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500, Speech: nil})
+	return sfu.NewHub(sfu.HubConfig{Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500, Speech: nil, Translate: false})
 }
 
 // testPeer wires one test-side peer connection to one hub member. The

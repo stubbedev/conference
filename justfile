@@ -22,6 +22,18 @@ lint:
 web:
     cd web && npm ci && npm run build
 
+# Copy what the browser speech engines need into web/public: ONNX
+# Runtime's wasm and WebGPU builds and Piper's phonemizer.
+speech-files:
+    cd web && node scripts/vendor-speech.mjs
+
+# Download the models and Piper voices the browser speech engines load
+# into DIR, with a models.json naming them (see
+# docs/live-translation.md); option: languages, as in
+# `just speech-models /srv/speech-models en,de,da`.
+speech-models dir languages="en":
+    node web/scripts/fetch-speech-models.mjs {{dir}} --languages={{languages}}
+
 # oxlint over the web UI; any warning fails.
 web-lint:
     cd web && npm run lint
@@ -129,9 +141,19 @@ release level:
 
 # Live translation end to end with stand-in speech engines: two headless
 # Chromes must get each other's subtitles and translated voice. Needs
-# Chrome.
+# Chrome. SPEECH_RUNTIME=browser runs the engines in the browsers instead,
+# on the same stand-ins.
 e2e-translate:
     node web/e2e/translate.mjs
+
+# The same test where every browser runs the speech engines itself.
+e2e-translate-browser:
+    SPEECH_RUNTIME=browser node web/e2e/translate.mjs
+
+# Voice detection in a browser, on the model and ONNX Runtime the build
+# vendors: no download, no GPU. Needs Chrome and a built UI (just web).
+e2e-speech:
+    node web/e2e/speech-vad.mjs
 
 # Live-translation demo: you (English, real mic) and a guest; options: hear, sv, male, openai.
 translate-demo *args:

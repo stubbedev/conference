@@ -61,3 +61,24 @@ func TestConfigTranslationAvailable(t *testing.T) {
 		t.Fatalf("got %+v", status)
 	}
 }
+
+// TestConfigTranslationInTheBrowser checks the mode the app switches on:
+// the browsers run the engines, which the server reports with what they
+// load and without any of its own engines set up.
+func TestConfigTranslationInTheBrowser(t *testing.T) {
+	t.Parallel()
+
+	server := newTranslatingAPI(t, testConfig(), speechStatus(t, map[string]string{
+		"SPEECH_RUNTIME": "browser",
+		"SPEECH_ENGINES": "fake",
+	}))
+
+	status := translationStatus(t, routes(server))
+	if !status.Available || status.Mode != "browser" || !status.Fake || status.Models == nil || status.External {
+		t.Fatalf("got %+v", status)
+	}
+
+	if status.Models.Base != "" {
+		t.Fatalf("base %q, want none on stand-in engines", status.Models.Base)
+	}
+}

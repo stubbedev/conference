@@ -34,7 +34,8 @@
   sees a badge while it runs.
 - 🗣️ **Live translation, if you want it.** Everyone picks their language;
   speech in other languages arrives as subtitles and a translated voice
-  in yours, on speech engines you choose. See
+  in yours, on speech engines you choose, on your server or in every
+  browser with no GPU server. See
   [Live translation](#live-translation).
 - 🌐 **Works on tricky networks.** A built-in relay gets people through
   firewalls and corporate networks, including over port 443.

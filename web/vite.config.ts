@@ -43,9 +43,23 @@ export default defineConfig({
     outDir: 'dist/app',
   },
   resolve: {
-    alias: {
-      '@': path.resolve(import.meta.dirname, './src'),
-    },
+    alias: [
+      { find: '@', replacement: path.resolve(import.meta.dirname, './src') },
+      // The speech workers run models on the GPU, and only this build of
+      // ONNX Runtime carries the WebGPU backend.
+      { find: /^onnxruntime-web$/, replacement: 'onnxruntime-web/webgpu' },
+    ],
+    // Load ONNX Runtime's WebAssembly itself from /ort/, which the build
+    // script fills, rather than bundling a second copy of it into the app.
+    conditions: ['onnxruntime-web-use-extern-wasm'],
+  },
+  optimizeDeps: {
+    // Both ship WebAssembly glued to their JavaScript, which the dependency
+    // pre-bundler rewrites into something that cannot find its .wasm files.
+    exclude: ['@huggingface/transformers', 'onnxruntime-web'],
+  },
+  worker: {
+    format: 'es',
   },
   server: {
     proxy: {

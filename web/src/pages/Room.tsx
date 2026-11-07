@@ -46,8 +46,13 @@ import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/l
 import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
 import { requestDisplay, SCREEN_AUDIO_KIND, screenTracks } from '@/lib/screen'
 import { tilesOfMembers } from '@/lib/reconnect'
-import { Translator } from '@/lib/translate/bridge'
+import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName, type Language } from '@/lib/translate/languages'
+import { browserEngines } from '@/lib/speech/browser'
+import { StandInEngines } from '@/lib/speech/standin'
+import { LocalTranslator } from '@/lib/speech/local'
+import { speechModels } from '@/lib/speech/models'
+import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { isVoiceChoice, type LangPrefs, type RoomCaption, type TranslatorStatus } from '@/lib/translate/types'
 import {
   JoinError,
@@ -107,12 +112,14 @@ const CAPTION_PRUNE_MS = 500
 const TRANSLATION_CHECKING: TranslationConfig = {
   available: false,
   reason: 'Checking whether live translation is available…',
+  mode: 'server',
   languages: [],
   external: false,
 }
 const TRANSLATION_UNKNOWN: TranslationConfig = {
   available: false,
   reason: 'Live translation is unavailable: the server configuration could not be read.',
+  mode: 'server',
   languages: [],
   external: false,
 }
@@ -169,9 +176,33 @@ function supportsE2EE(): boolean {
 // The name a tile carries, on screen and in the recording composite;
 // screens are labeled by their owner, since the picture alone does not
 // say whose it is.
-// What keeps this member's speech from being translated, in words.
+// The bridge for this room's runtime: the server's speech service, or the
+// member's own browser on the models the server names.
+function buildTranslator(
+  config: TranslationConfig,
+  prefs: LangPrefs,
+  events: TranslatorEvents,
+): Translator | null {
+  if (config.mode !== 'browser') return new ServerTranslator(prefs, events)
+  if (config.fake) return new LocalTranslator(prefs, events, new StandInEngines())
+
+  const models = speechModels(config)
+  if (!models) return null
+  return new LocalTranslator(prefs, events, browserEngines(models))
+}
+
+// What live translation is doing, in a few words, for the room's badge.
+function translationLabel(config: TranslationConfig): string {
+  if (config.mode === 'browser') return 'Live translation in your browser'
+  return config.external ? 'Live translation via an external service' : 'Live translation'
+}
+
+// Why this member's speech is not translated, in words.
 function translationWarnings(status: TranslatorStatus, selfLang: string, languages: readonly Language[]): string[] {
   const warnings: string[] = []
+  if (status.state === 'failed' && status.detail) {
+    warnings.push(status.detail)
+  }
   if (status.sameLanguage) {
     warnings.push(`Everyone here speaks ${languageName(languages, selfLang)}: nothing to translate`)
   }
@@ -181,8 +212,7 @@ function translationWarnings(status: TranslatorStatus, selfLang: string, languag
   return warnings
 }
 
-function tileLabel(tile: Tile, displayName: string, members: MemberInfo[]): string {
-  if (tile.sourceId === LOCAL_SOURCE) {
+function tileLabel(tile: Tile, displayName: string, members: MemberInfo[]): string {  if (tile.sourceId === LOCAL_SOURCE) {
     return tile.kind === SCREEN_KIND ? 'Your screen' : `${displayName} (you)`
   }
   const name = members.find((member) => member.id === tile.sourceId)?.name ?? 'Guest'
@@ -813,7 +843,7 @@ export default function Room() {
     (client: RoomClient) => {
       if (translatorRef.current) return
       setTranslationFailure('')
-      const translator = new Translator(langPrefsRef.current, {
+      const events: TranslatorEvents = {
         onCaption: handleRoomCaption,
         onFailure: (reason) => {
           toast.error(reason, { duration: 10_000 })
@@ -821,12 +851,25 @@ export default function Room() {
           void stopTranslation()
         },
         onStatus: setTranslatorStatus,
-      })
+        onStream: (speaker, lang, track) =>
+          setTranslationStreams((prev) => ({
+            ...prev,
+            [speaker]: { ...prev[speaker], [lang]: new MediaStream([track]) },
+          })),
+      }
+
+      const translator = buildTranslator(translation, langPrefsRef.current, events)
+      if (!translator) {
+        const reason = 'Live translation is set to run in the browser, but the server names no models to run it with.'
+        events.onFailure(reason)
+        return
+      }
+
       translatorRef.current = translator
       translator.attach(client)
       translator.start(localMicTrack(localStreamRef.current))
     },
-    [langPrefsRef, handleRoomCaption, stopTranslation],
+    [translation, langPrefsRef, handleRoomCaption, stopTranslation],
   )
 
   // The host's switch for the whole room; each browser's bridge follows
@@ -948,7 +991,11 @@ export default function Room() {
         if (on) toast(`${name} started recording this call`)
         else toast(`${name} stopped recording`)
       })
-      client.on('caption', ({ caption }) => handleRoomCaption(caption))
+      client.on('caption', ({ caption }) => {
+        const translator = translatorRef.current
+        if (translator) translator.receive(caption)
+        else handleRoomCaption(caption)
+      })
       client.on('lang', ({ from, prefs }) => setMemberLangs((prev) => ({ ...prev, [from]: prefs.lang })))
       client.on('translating', ({ from, on }) => {
         setTranslationBy(on ? from : null)
@@ -1822,7 +1869,7 @@ export default function Room() {
               <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
                 <Languages className="size-3 shrink-0" />
                 <span className="truncate">
-                  {translation.external ? 'Live translation via an external service' : 'Live translation'}
+                  {translationLabel(translation)}
                   {translatorStatus && ` · ${TRANSLATOR_STATE_LABELS[translatorStatus.state]}`}
                 </span>
               </span>

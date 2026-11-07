@@ -1,3 +1,4 @@
+import type { SpeechModels } from '@/lib/speech/models'
 import type { Language } from '@/lib/translate/languages'
 
 export interface ServerConfig {
@@ -8,15 +9,23 @@ export interface ServerConfig {
   translation: TranslationConfig
 }
 
+/** The machine that runs the speech engines. */
+export type SpeechRuntime = 'server' | 'browser'
+
 export interface TranslationConfig {
-  /** All the speech engines are set up. */
+  /** All the speech engines are set up, or the browsers have their models. */
   available: boolean
   /**
-   * What the server is missing before it can translate. For whoever runs it
-   * to read, in /api/config: the app shows nothing about translation until
-   * this is empty.
+   * What is missing before it can translate. For whoever runs it to read, in
+   * /api/config: the app shows nothing about translation until this is empty.
    */
   reason?: string
+  /** Whether this server transcribes, or every member's browser does. */
+  mode: SpeechRuntime
+  /** The stand-in engines, which answer without a model or a GPU. */
+  fake?: boolean
+  /** The models the browsers load, when they run the engines. */
+  models?: SpeechModels
   /** The languages the speech service speaks. */
   languages: Language[]
   /** Speech or text goes to a service outside the server's network. */

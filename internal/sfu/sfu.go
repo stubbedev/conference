@@ -196,8 +196,14 @@ type HubConfig struct {
 	MaxMembers     int
 	MaxPublishKbps int
 
-	// Speech enables live translation; nil turns it off.
+	// Speech streams a member's speech to the speech service; nil means
+	// no server-side streams, as when every browser translates on its
+	// own machine.
 	Speech SpeechTokens
+
+	// Translate lets a room switch live translation on. It is about the
+	// room mode, not about which machine runs the engines.
+	Translate bool
 }
 
 // NewHub creates an empty hub.

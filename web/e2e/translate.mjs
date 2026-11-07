@@ -12,9 +12,14 @@
 // the host: after the host leaves, a joiner still gets the guest's
 // speech in its own language.
 //
+// SPEECH_RUNTIME=browser runs the same test against the browsers' own
+// engines, on the same stand-ins: no audio leaves either browser, the
+// subtitles and the tone come from the code that runs the models.
+//
 // Needs Chrome (CHROME=…) and Go, which builds the server.
 //
 //   node web/e2e/translate.mjs
+
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -25,6 +30,7 @@ import { createRoom, evalJs, findChrome, freePort, joinRoom, launchChrome, sleep
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const chrome = process.env.CHROME ?? findChrome()
+const runtime = process.env.SPEECH_RUNTIME === 'browser' ? 'browser' : 'server'
 const TIMEOUT_MS = 45_000
 
 const failures = []
@@ -70,6 +76,7 @@ async function startServer(bin) {
         TURN_PORT: String(await freePort()),
         DB_PATH: join(dir, 'translate.db'),
         SPEECH_ENGINES: 'fake',
+        SPEECH_RUNTIME: runtime,
         GORACE: 'halt_on_error=1',
       },
       stdio: 'inherit',
@@ -118,8 +125,17 @@ async function main() {
 
   await joinRoom(host, room.privUrl)
   await joinRoom(guest, room.url)
-  // Enabled once /api/config reports the speech engines ready.
-  const button = await waitFor(host, `document.querySelector('[aria-label="Start live translation"]')?.getAttribute('aria-disabled')`, (v) => v === 'false', 15_000)
+  // Enabled once /api/config reports live translation can run.
+  const button = await waitFor(
+    host,
+    `(() => {
+      const button = document.querySelector('[aria-label="Start live translation"]')
+      if (!button) return null
+      return button.disabled ? 'disabled' : 'enabled'
+    })()`,
+    (state) => state === 'enabled',
+    15_000,
+  )
   check('start', button.ok, `no enabled "Start live translation" button for the host: ${JSON.stringify(button.value)}`)
   // One click: a second one would toggle translation off again.
   await evalJs(host, `document.querySelector('[aria-label="Start live translation"]')?.click()`)
@@ -170,6 +186,7 @@ if (failures.length) {
   for (const f of failures) console.error('  - ' + f)
   code = 1
 } else {
-  console.log('\nTRANSLATE E2E OK: each side translates its own speech, and translation outlives the host')
+  console.log(`runtime: ${runtime}`)
+console.log(`\nTRANSLATE E2E OK (${runtime}): each side translates its own speech, and translation outlives the host`)
 }
 process.exit(code)

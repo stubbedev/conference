@@ -1,16 +1,20 @@
 # Live translation
 
-The speech service behind live translation runs inside the conference
-server, at `/ws/speech` on the server's own address and TLS. Each
-speaking member's browser streams its own microphone there while a host
-has live translation switched on. For every finished sentence it sends
-back subtitles in the speaker's language and every listener's language,
-and a translated voice per listener language.
+Live translation runs on one of two runtimes. By default it runs inside
+the conference server, at `/ws/speech` on the server's own address and
+TLS: each speaking member's browser streams its own microphone there
+while a host has live translation switched on, and for every finished
+sentence it sends back subtitles in the speaker's language and every
+listener's language, and a translated voice per listener language.
 
 ```
 browser ──16 kHz audio──► voice detection ─► transcription ─► translation ─► voice
         ◄── subtitles, translated voice ──────────────────────────────────────┘
 ```
+
+With `SPEECH_RUNTIME=browser` the same three engines run in every
+member's own browser instead, on WebGPU, and no GPU server is needed at
+all. See [In the browser](#in-the-browser).
 
 - **No extra service.** Voice detection runs in the server itself: the
   Silero VAD model in pure Go
@@ -51,6 +55,8 @@ its default.
 
 | Setting | Default | |
 |---|---|---|
+| `SPEECH_RUNTIME` | `server` | `server` runs the engines on this server, `browser` runs them in every member's browser |
+| `SPEECH_MODEL_DIR`, `SPEECH_MODELS_FILE` | none | The models the browsers load, and the JSON that names them; both are required in browser mode |
 | `TRANSCRIBE_URL`, `TRANSCRIBE_API_KEY`, `TRANSCRIBE_MODEL` | OpenAI, `OPENAI_API_KEY`, none | Transcription: an OpenAI-compatible `/audio/transcriptions` |
 | `TRANSCRIBE_RESPONSE_FORMAT` | `json` | `verbose_json` drops what Whisper marks as non-speech (below) |
 | `INTERIM_MS` | 600, or 0 for an external transcription engine | How often to subtitle a sentence still being spoken; 0 turns it off |
@@ -62,7 +68,7 @@ its default.
 | `INTERNAL_DOMAINS` | none | Domains on your network, e.g. `corp.example.com`, so their engines don't count as external |
 | `GLOSSARY` | none | Term translations the translator must use, e.g. `Kontainer = Kontainer` |
 | `LANGUAGES_FILE` | built in | Your own language list (below) |
-| `SPEECH_ENGINES` | `real` | `fake` swaps all three engines for stand-ins, for tests |
+| `SPEECH_ENGINES` | `real` | `fake` swaps all three engines for stand-ins, for tests, in either runtime |
 
 OpenAI-compatible means OpenAI itself, Azure OpenAI, Mistral, Groq or
 OpenRouter, or a server of your own:
@@ -99,6 +105,93 @@ transcription models accept only `json`, the default.
 for 3 s, so fast talkers are cut at their pauses) and at 12 s at the
 latest.
 
+## In the browser
+
+Set `SPEECH_RUNTIME=browser` and every member's browser runs the engines
+itself, on WebGPU and WebAssembly, so no GPU server is needed. The server
+no longer uses `TRANSCRIBE_*`, `TRANSLATE_*` or `VOICE_*`, and nothing
+leaves the member's machine.
+
+The operator gives two settings: `SPEECH_MODEL_DIR`, the directory the
+browsers load from, and `SPEECH_MODELS_FILE`, a JSON file naming the
+exports and the voice for each language:
+
+```json
+{
+  "asr": { "model": "onnx-community/whisper-large-v3-turbo", "dtype": "q4f16" },
+  "mt": { "model": "Xenova/m2m100_418M", "dtype": "q4" },
+  "tts": { "en": "en_US-lessac-medium", "de": "de_DE-thorsten-medium" }
+}
+```
+
+Transcription is a Whisper model such as whisper-large-v3-turbo through
+transformers.js, translation a multilingual model such as m2m100, and the
+voice a Piper voice per language: the one voice that language is spoken
+in, so the choice between a male and a female voice is the operator's,
+not the speaker's. A language without a voice gets subtitles and no
+voice, and the other engines carry on. `asr.languages` names a model a
+language loads instead of the default one, which is how a room with a
+Danish fine-tune gets one without moving every other language off the
+shared model.
+
+The directory holds each model in the layout transformers.js loads it
+from, `<model dir>/<owner>/<model>/config.json` with
+`onnx/<name>_<dtype>.onnx` beside it, and each voice as
+`<model dir>/piper/<voice>.onnx` with `<model dir>/piper/<voice>.onnx.json`
+beside it. The server checks every file at start and names the one that
+is missing.
+
+The models are large: whisper-large-v3-turbo at q4f16 is about 537 MB,
+m2m100_418M at q4 about 1.3 GB, and a Piper medium voice about 60 MB per
+language. A browser downloads each once and caches it from then on.
+Transcription needs WebGPU; a member without it transcribes nothing and
+is heard untranslated.
+
+`node web/scripts/fetch-speech-models.mjs` fills that directory without
+the operator looking up a file name: it reads each model's file list from
+the Hugging Face API at the commit the script pins, downloads the export
+for the dtype it is asked for, picks a Piper voice for every language it
+is given, and writes `models.json` naming the models, the dtypes and each
+voice, for `SPEECH_MODELS_FILE`. Mount the directory into the container
+and point both settings at it; English comes to about 1.9 GB, and every
+further language about 65 MB.
+
+```sh
+node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da
+```
+
+Voices are chosen by quality first, medium before high, low and x_low,
+and the first one whose model card is CC0 or Apache-2.0 wins. A language
+with no such voice still gets its best one, with the license it carries
+named on stderr, so French ships a CC0 low voice and Italian a medium one
+under a license to read before shipping it. Each run downloads the same
+bytes, since the revisions are pinned, and a file already in place with
+the right size is left alone.
+
+Every model and voice file is served from the server's own origin under
+`/speech/`, with immutable caching, so nothing comes from a model hub or
+CDN at call time. `SPEECH_ENGINES=fake` gives stand-in engines with no
+files at all, which the browser tests use.
+
+What moves between browsers is the text of what each member said, sealed
+with the room's chat key, exactly as the server runtime's subtitles are:
+each listener translates it into their own language on their own machine
+and speaks it there. A room of ten languages therefore costs the speaker
+nothing extra, and the translated voice never travels. Two things follow
+from that: there are no interim subtitles, since a sentence is
+recognised once it has ended, and a listener whose browser has no WebGPU
+still reads every subtitle, because only transcription needs a GPU.
+
+The web UI carries the pieces every install needs rather than asking for
+them: ONNX Runtime's WebAssembly builds, the Silero voice detection
+model, and Piper's phonemizer, which together add about 65 MB to the
+server binary. `just speech-files` fills `web/public` with them at build
+time.
+
+`just e2e-speech` checks the voice detection model in a real browser
+against a recording, and `just e2e-translate-browser` runs the whole
+pipeline in two browsers on the stand-in engines.
+
 ## Streams
 
 The server hands each member a token over the call's signaling
@@ -114,6 +207,9 @@ open more streams, each spending on paid engines.
 A stream translates into the languages its `hello` names, and into
 nothing before it. If the browser goes away, the stream ends at once,
 and any sentence still being translated for it is dropped.
+
+With `SPEECH_RUNTIME=browser` there are no tokens and no streams: the
+server never sees a member's speech to translate.
 
 ## Languages
 

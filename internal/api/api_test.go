@@ -84,6 +84,7 @@ func newTranslatingAPI(t *testing.T, cfg *config.Config, translation service.Sta
 		MaxMembers:     0,
 		MaxPublishKbps: 0,
 		Speech:         nil,
+		Translate:      false,
 	})
 
 	return api.New(storage, hub, cfg, translation)

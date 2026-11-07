@@ -66,6 +66,23 @@ func New(settings Settings, originPatterns func(*http.Request) []string) *Servic
 	}
 }
 
+// Start builds what this server runs for live translation: its speech
+// service, nil when every browser runs the engines itself, and the
+// handler that serves the models the browsers load, nil when they load
+// none from here.
+func Start(settings Settings, originPatterns func(*http.Request) []string) (*Service, http.Handler) {
+	if settings.runtime != runInBrowser {
+		return New(settings, originPatterns), nil
+	}
+
+	dir := settings.ModelDir()
+	if dir == "" {
+		return nil, nil
+	}
+
+	return nil, newModelFiles(dir)
+}
+
 // Token admits member of room to a stream for the next hour.
 func (s *Service) Token(room, member string) (string, error) {
 	minted, err := token.Mint(s.key, token.Claims{Room: room, Member: member, Exp: s.now().Add(tokenTTL).Unix()})

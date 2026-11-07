@@ -44,7 +44,7 @@ func newTranslateHub(t *testing.T) (*sfu.Hub, *sfu.Engine) {
 
 	return sfu.NewHub(sfu.HubConfig{
 		Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500,
-		Speech: roomTokens{},
+		Speech: roomTokens{}, Translate: true,
 	}), engine
 }
 
@@ -98,6 +98,41 @@ func TestTranslationUnavailableWithoutSpeechEngines(t *testing.T) {
 	if msg := host.next(t, "error"); msg.Code != "translate-unavailable" {
 		t.Fatalf("expected translate-unavailable, got %q", msg.Code)
 	}
+}
+
+// TestTranslationWithoutSpeechStreams checks the room mode where the
+// browsers run the engines: the switch works with no speech service to
+// stream to, and no member is handed a token for one.
+func TestTranslationWithoutSpeechStreams(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	creds, err := relay.NewCredentials(relay.Config{Port: testTURNPort, TLSHost: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hub := sfu.NewHub(sfu.HubConfig{
+		Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500,
+		Speech: nil, Translate: true,
+	})
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	host.member.Handle(sfu.Message{Type: translate, On: true})
+	expectTranslating(t, guest, host.member.ID, true)
+
+	joiner := newTestPeer(t, hub, engine, "joiner", false)
+	expectNo(t, host, msgToken)
+	expectNo(t, guest, msgToken)
+	expectNo(t, joiner, msgToken)
 }
 
 // TestTranslationMode checks the room mode: host-gated, announced to

@@ -22,8 +22,8 @@ const (
 	maxCaptionCiphertext = 4 << 10
 )
 
-// ErrTranslationUnavailable rejects translation when the speech engines
-// are not set up.
+// ErrTranslationUnavailable rejects translation when it cannot run, on
+// the server or in the browsers.
 var ErrTranslationUnavailable = errors.New("sfu: live translation is not available")
 
 // SpeechTokens admits a member of a room to the speech stream.
@@ -75,7 +75,8 @@ func (m *Member) handleCaption(msg Message) {
 // handleTranslate switches the room's live translation on or off. It is
 // a room mode, host-gated, replayed to late joiners and kept when the
 // host who started it leaves. While it is on every member, joiners
-// included, gets its own token for the speech service.
+// included, gets its own token for the speech service, when the server
+// runs one.
 func (m *Member) handleTranslate(msg Message) {
 	if !m.priv {
 		m.fail("not-allowed", ErrForbidden)
@@ -83,7 +84,7 @@ func (m *Member) handleTranslate(msg Message) {
 		return
 	}
 
-	if msg.On && m.room.cfg.Speech == nil {
+	if msg.On && !m.room.cfg.Translate {
 		m.fail("translate-unavailable", ErrTranslationUnavailable)
 
 		return

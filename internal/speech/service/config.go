@@ -38,12 +38,24 @@ const (
 	formatVerbose responseFormat = "verbose_json"
 )
 
+// runtime is the machine that runs the speech engines: this server, or
+// every member's own browser.
+type runtime string
+
+const (
+	runOnServer  runtime = "server"
+	runInBrowser runtime = "browser"
+)
+
 const (
 	openAIURL        = "https://api.openai.com/v1"
 	defaultOllamaURL = "http://localhost:11434"
 	defaultInterim   = 600 * time.Millisecond
 
+	envRuntime           = "SPEECH_RUNTIME"
 	envEngines           = "SPEECH_ENGINES"
+	envModelDir          = "SPEECH_MODEL_DIR"
+	envModelsFile        = "SPEECH_MODELS_FILE"
 	envLanguagesFile     = "LANGUAGES_FILE"
 	envOpenAIKey         = "OPENAI_API_KEY"
 	envInternalDomains   = "INTERNAL_DOMAINS"
@@ -76,6 +88,7 @@ type namedEngine struct {
 
 // Settings configure the speech service; FromEnv reads them.
 type Settings struct {
+	runtime          runtime
 	transcription    engine
 	transcribeFormat responseFormat
 	translation      engine
@@ -84,11 +97,20 @@ type Settings struct {
 	interim          time.Duration
 	glossary         string
 	languages        languages
+	models           Models
+	modelDir         string
 }
 
-// LogEngines says which engines are not set up yet, which send audio or
-// text off this network, and whether interim subtitles are on.
+// LogEngines says which runtime runs the engines, which engines are not
+// set up yet, which send audio or text off this network, and whether
+// interim subtitles are on.
 func (s Settings) LogEngines() {
+	if s.runtime == runInBrowser {
+		s.logBrowserRuntime()
+
+		return
+	}
+
 	for _, entry := range s.engines() {
 		switch {
 		case !entry.engine.ready():
@@ -106,6 +128,16 @@ func (s Settings) LogEngines() {
 	}
 }
 
+// ModelDir is the directory the browsers load their models from, empty
+// when they load none from this server.
+func (s Settings) ModelDir() string {
+	if s.models.Base == "" {
+		return ""
+	}
+
+	return s.modelDir
+}
+
 func (s Settings) engines() []namedEngine {
 	return []namedEngine{
 		{purpose: transcription, engine: s.transcription},
@@ -114,16 +146,44 @@ func (s Settings) engines() []namedEngine {
 	}
 }
 
+// logBrowserRuntime says what the browsers load, since no engine on this
+// server is used.
+func (s Settings) logBrowserRuntime() {
+	if s.standIn() {
+		log.Print("live translation runs in the browsers, on stand-in engines")
+
+		return
+	}
+
+	log.Printf("live translation runs in the browsers, which load %s transcribe and %s translate from %s, with voices for %d languages",
+		s.models.ASR.Model, s.models.MT.Model, envModelDir, len(s.models.Voices))
+}
+
+// standIn reports whether the engines are stand-ins. In the browser they
+// stand in for the models too, which are then no files at all.
+func (s Settings) standIn() bool {
+	return s.transcription.provider == fake
+}
+
 func (s Settings) ready() bool {
+	if s.runtime == runInBrowser {
+		return s.models.problem == ""
+	}
+
 	return s.transcription.ready() && s.translation.ready() && s.voice.ready()
 }
 
 func (s Settings) external() bool {
+	if s.runtime == runInBrowser {
+		return false
+	}
+
 	return s.transcription.external || s.translation.external || s.voice.external
 }
 
 var (
 	errEnginesMode    = errors.New(envEngines + " must be real or fake")
+	errRuntimeMode    = errors.New(envRuntime + " must be server or browser")
 	errTranslateValue = errors.New(envTranslateProvider + " must be ollama or openai-compatible")
 	errFormatValue    = errors.New(envTranscribeFormat + " must be json or verbose_json")
 	errNegative       = errors.New("must not be negative")
@@ -134,6 +194,11 @@ var (
 // FromEnv reads the settings from the environment that getenv looks up.
 func FromEnv(getenv func(string) string) (Settings, error) {
 	env := environment(getenv)
+
+	mode, err := env.runtime()
+	if err != nil {
+		return Settings{}, err
+	}
 
 	langs, err := env.languages()
 	if err != nil {
@@ -146,6 +211,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	}
 
 	settings := Settings{
+		runtime:          mode,
 		transcription:    standIn(),
 		transcribeFormat: format,
 		translation:      standIn(),
@@ -154,12 +220,16 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		interim:          0,
 		glossary:         env("GLOSSARY"),
 		languages:        langs,
+		models:           noModels(""),
+		modelDir:         env(envModelDir),
 	}
 
 	settings, err = env.chosenEngines(settings)
 	if err != nil {
 		return Settings{}, err
 	}
+
+	settings.models = env.loadModels(settings.modelDir, env(envModelsFile), langs)
 
 	interimDefault := defaultInterim
 	if settings.transcription.external {
@@ -172,6 +242,17 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	}
 
 	return settings, nil
+}
+
+// runtime reads which machine runs the engines: this server, as it always
+// did, or every member's own browser.
+func (env environment) runtime() (runtime, error) {
+	switch mode := runtime(env.or(envRuntime, string(runOnServer))); mode {
+	case runOnServer, runInBrowser:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%w, not %q", errRuntimeMode, mode)
+	}
 }
 
 func (env environment) chosenEngines(settings Settings) (Settings, error) {
