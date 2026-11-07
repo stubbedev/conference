@@ -98,6 +98,7 @@ const SCREEN_KIND = 'screen'
 const CAMERA_KIND = 'camera'
 const LOCAL_SOURCE = 'local'
 const NO_PIN = 'none'
+const NO_LANGUAGES: Language[] = []
 const RECOVER_BACKOFF_MS = 5000
 const RECONNECT_TOAST = 'reconnect'
 const RECORDING_HIDDEN_TOAST = 'recording-hidden'
@@ -1641,6 +1642,7 @@ export default function Room() {
   const toggleMic = useCallback(() => toggleTrack('mic'), [toggleTrack])
   const toggleCam = useCallback(() => toggleTrack('cam'), [toggleTrack])
   const toggleScreen = useCallback(() => void toggleShare(), [toggleShare])
+  const onBlur = useCallback(() => void toggleBlur(), [toggleBlur])
 
   const selfMember: MemberInfo = useMemo(
     () => ({
@@ -2014,7 +2016,7 @@ export default function Room() {
                     selfId={selfMember.id}
                     canModerate={privileged}
                     onModerate={moderateMember}
-                    languages={translation.available ? translation.languages : []}
+                    languages={translation.available ? translation.languages : NO_LANGUAGES}
                     memberLangs={memberLangs}
                     onSetLanguage={setMemberLanguage}
                   />
@@ -2036,7 +2038,7 @@ export default function Room() {
         sharing={controls.sharing}
         blur={devicePrefs.blur}
         canBlur={canBlur}
-        onBlur={() => void toggleBlur()}
+        onBlur={onBlur}
         chatOpen={chatOpen}
         unread={unread}
         fullscreen={fullscreen}
