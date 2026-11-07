@@ -505,10 +505,22 @@ function clickLocalPin(label) {
   return true
 }
 
+const LAYER_PAUSE_MS = 9000
+
+async function layerGrows(publisher, rid, ms) {
+  const before = (await evalJs(publisher, sentLayers))[rid]?.bytes ?? 0
+  await sleep(ms)
+  return ((await evalJs(publisher, sentLayers))[rid]?.bytes ?? 0) > before
+}
+
+// The publisher encodes only the layers some viewer wants (and always the
+// lowest): in a grid of two nobody needs the middle one, so it is paused.
 async function checkSimulcast(failures, publisher, viewer) {
-  const sent = await waitFor(publisher, sentLayers, (layers) => ['l', 'm', 'h'].every((rid) => layers[rid]?.bytes > 0), 20000)
+  const sent = await waitFor(publisher, sentLayers, (layers) => ['l', 'h'].every((rid) => layers[rid]?.bytes > 0), 20000)
   console.log(`simulcast sent: ${JSON.stringify(sent.value)}`)
-  check(failures, 'simulcast', sent.ok, `publisher is not sending all three layers: ${JSON.stringify(sent.value)}`)
+  check(failures, 'simulcast', sent.ok, `publisher is not sending the lowest and the wanted layer: ${JSON.stringify(sent.value)}`)
+  await sleep(LAYER_PAUSE_MS)
+  check(failures, 'simulcast', !(await layerGrows(publisher, 'm', 3000)), 'the middle layer is still encoded although nobody in a grid of two wants it')
 
   // Sizes are compared with each other, not with pixels: which resolution
   // the capture and the encoder settle on is the browser's business, that
@@ -522,6 +534,8 @@ async function checkSimulcast(failures, publisher, viewer) {
   const filmstrip = await waitFor(viewer, remoteVideoWidth, (width) => width > 0 && width * 2 <= full.value, 20000)
   console.log(`simulcast filmstrip: remote video ${filmstrip.value}px wide against ${full.value}px`)
   check(failures, 'simulcast', filmstrip.ok, `filmstrip: remote video ${filmstrip.value}px wide, not a layer below ${full.value}px`)
+  await sleep(LAYER_PAUSE_MS)
+  check(failures, 'simulcast', !(await layerGrows(publisher, 'h', 3000)), 'the top layer is still encoded although the only viewer shows a thumbnail')
 
   check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
 

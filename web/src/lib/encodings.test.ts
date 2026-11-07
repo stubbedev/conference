@@ -3,6 +3,7 @@ import { test } from 'node:test'
 
 import {
   cameraLayers,
+  demandParameters,
   PUBLISH_CEILING_BPS,
   relayerParameters,
   SCREEN_SHARE_FPS,
@@ -111,4 +112,25 @@ test('relayering leaves what the layers do not describe alone', () => {
   assert.equal(sent.encodings[0]?.maxFramerate, 10)
   assert.equal(sent.encodings[0]?.maxBitrate, 150_000)
   assert.equal(sent.transactionId, 'tx')
+})
+
+test('layers nobody watches are paused and the ones someone wants run', () => {
+  const sent = demandParameters(parameters(HD.map((layer) => ({ ...layer, active: true }))), [true, false, true])
+  assert.deepEqual(
+    sent.encodings.map((encoding) => [encoding.rid, encoding.active]),
+    [['l', true], ['m', false], ['h', true]],
+  )
+})
+
+test('layer demand is matched by rid and leaves the bitrate caps alone', () => {
+  const sent = demandParameters(parameters([{ rid: 'h', maxBitrate: 1 }, { rid: 'l', maxBitrate: 2 }]), [true, true, false])
+  assert.deepEqual(
+    sent.encodings.map((encoding) => [encoding.rid, encoding.active, encoding.maxBitrate]),
+    [['h', false, 1], ['l', true, 2]],
+  )
+})
+
+test('an encoding without a layer rid is left as it is', () => {
+  const sent = demandParameters(parameters([{ maxBitrate: 5 }]), [false, false, false])
+  assert.deepEqual(sent.encodings, [{ maxBitrate: 5 }])
 })

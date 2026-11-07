@@ -175,6 +175,11 @@ type Message struct {
 	// layer (Member names the source, Layer is a simulcast rid)
 	Layer string `json:"layer,omitempty"`
 
+	// layers: which encodings of the publisher's track (Mid) any viewer
+	// wants, indexed low to high
+	Mid    string `json:"mid,omitempty"`
+	Active []bool `json:"active,omitempty"`
+
 	// moderate
 	Target string `json:"target,omitempty"`
 	Action string `json:"action,omitempty"`
@@ -666,8 +671,14 @@ func (r *Room) adaptLayers() {
 		}
 
 		for _, track := range up.trackSnapshot() {
-			if track.simulcast {
-				r.requestLayerKeyframes(source, track, track.retarget(now, true))
+			if !track.simulcast {
+				continue
+			}
+
+			r.requestLayerKeyframes(source, track, track.retarget(now, true))
+
+			if wanted, changed := track.updateDemand(now); changed {
+				source.send(Message{Type: "layers", Mid: track.mid, Active: wanted[:]})
 			}
 		}
 	}
@@ -1400,6 +1411,7 @@ type UpTrack struct {
 	mu      sync.RWMutex
 	layers  [layerCount]*upLayer
 	viewers map[string]*upViewer
+	demand  layerDemand
 	stop    chan struct{}
 }
 
@@ -1716,6 +1728,20 @@ func (v *upViewer) retarget(active [layerCount]bool, tick bool) (int, bool) {
 	return v.target, v.target >= 0 && v.target != v.current
 }
 
+func (ut *UpTrack) updateDemand(now time.Time) ([layerCount]bool, bool) {
+	ut.mu.Lock()
+	defer ut.mu.Unlock()
+
+	desired := make([]int, 0, len(ut.viewers))
+	for _, viewer := range ut.viewers {
+		viewer.mu.Lock()
+		desired = append(desired, min(viewer.preferred, viewer.steps.ceiling))
+		viewer.mu.Unlock()
+	}
+
+	return ut.demand.update(desired, now)
+}
+
 func (ut *UpTrack) setViewerPreference(viewerID string, layer int) {
 	ut.mu.RLock()
 	viewer := ut.viewers[viewerID]
@@ -1993,6 +2019,7 @@ func (up *UpPeer) trackFor(mid string, receiver *webrtc.RTPReceiver, track *webr
 		mu:        sync.RWMutex{},
 		layers:    [layerCount]*upLayer{},
 		viewers:   map[string]*upViewer{},
+		demand:    layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false},
 		stop:      make(chan struct{}),
 	}
 	up.tracks[mid] = upTrack

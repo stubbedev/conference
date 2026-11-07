@@ -15,7 +15,7 @@ import {
   type Layer as LayerName,
   type QualityState,
 } from '@/lib/quality'
-import { cameraLayers, relayerParameters, screenSenderParameters, sharingLayers } from '@/lib/encodings'
+import { cameraLayers, demandParameters, LAYER_RIDS, relayerParameters, screenSenderParameters, sharingLayers } from '@/lib/encodings'
 import { SCREEN_AUDIO_KIND } from '@/lib/screen'
 import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
@@ -157,6 +157,8 @@ interface WireMessage {
   resume?: string
   replaces?: string
   layer?: LayerName
+  mid?: string
+  active?: unknown
   translatingBy?: string
   token?: string
 }
@@ -256,6 +258,7 @@ export class RoomClient {
   private localCam: MediaStreamTrack | null = null
   private micSender: RTCRtpSender | null = null
   private camSender: RTCRtpSender | null = null
+  private retuning: Promise<void> = Promise.resolve()
   private state = { mic: true, cam: true, sharing: false }
   private e2eeStats: E2EEStats | null = null
   private e2eeFailureReported = { send: false, recv: false }
@@ -462,18 +465,27 @@ export class RoomClient {
   // sends and whether a screen is shared. A browser that refuses the
   // parameters keeps its own caps, which is a worse picture, never a
   // broken one.
-  private async tuneCamera(): Promise<void> {
+  private tuneCamera(): Promise<void> {
     const sender = this.camSender
     const track = sender?.track
-    if (!sender || !track) return
+    if (!sender || !track) return Promise.resolve()
 
     const layers = cameraLayers(track.getSettings())
+    return this.retune(sender, 'tuning the camera encoder', (parameters) =>
+      relayerParameters(parameters, this.state.sharing ? sharingLayers(layers) : layers),
+    )
+  }
 
-    try {
-      await sender.setParameters(relayerParameters(sender.getParameters(), this.state.sharing ? sharingLayers(layers) : layers))
-    } catch (err) {
-      console.warn('sfu: tuning the camera encoder', err)
-    }
+  private demandLayers(mid: string, active: boolean[]): void {
+    const sender = this.up?.getTransceivers().find((transceiver) => transceiver.mid === mid)?.sender
+    if (!sender) return
+    void this.retune(sender, 'pausing and resuming camera layers', (parameters) => demandParameters(parameters, active))
+  }
+
+  private retune(sender: RTCRtpSender, doing: string, change: (parameters: RTCRtpSendParameters) => RTCRtpSendParameters): Promise<void> {
+    const next = this.retuning.then(() => sender.setParameters(change(sender.getParameters())))
+    this.retuning = next.catch((err: unknown) => console.warn(`sfu: ${doing}`, err))
+    return this.retuning
   }
 
   async replaceLocalTrack(kind: 'mic' | 'cam', track: MediaStreamTrack): Promise<void> {
@@ -869,6 +881,13 @@ export class RoomClient {
       case 'kicked':
         this.emit('kicked', {})
         return
+      case 'layers': {
+        const active = msg.active
+        if (typeof msg.mid !== 'string' || !Array.isArray(active)) return
+        if (active.length !== LAYER_RIDS.length || !active.every((value) => typeof value === 'boolean')) return
+        this.demandLayers(msg.mid, active as boolean[])
+        return
+      }
       default:
         return
     }

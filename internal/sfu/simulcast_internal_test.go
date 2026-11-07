@@ -264,3 +264,55 @@ func TestLadderBacksOffALayerItCannotHold(t *testing.T) {
 		t.Fatalf("waited %d ticks after holding a layer for a minute, want the wait forgiven back to %d", again, upswitchCleanTicks)
 	}
 }
+
+func TestLayerDemandKeepsTheLowestLayerAndWhatViewersWant(t *testing.T) {
+	t.Parallel()
+
+	var demand layerDemand
+
+	start := time.Unix(1000, 0)
+
+	wanted, changed := demand.update(nil, start)
+	if !changed || wanted != [layerCount]bool{true, false, false} {
+		t.Fatalf("with nobody watching only the lowest layer is wanted, got %v (changed %v)", wanted, changed)
+	}
+
+	wanted, changed = demand.update([]int{layerHigh}, start.Add(time.Second))
+	if !changed || wanted != [layerCount]bool{true, false, true} {
+		t.Fatalf("a viewer of the top layer wants it at once, got %v (changed %v)", wanted, changed)
+	}
+
+	if _, changed = demand.update([]int{layerHigh}, start.Add(2*time.Second)); changed {
+		t.Fatal("the same demand is not announced twice")
+	}
+}
+
+func TestLayerDemandLingersBeforeALayerIsPaused(t *testing.T) {
+	t.Parallel()
+
+	var demand layerDemand
+
+	start := time.Unix(1000, 0)
+	demand.update([]int{layerMid, layerHigh}, start)
+
+	wanted, _ := demand.update([]int{layerMid}, start.Add(layerDemandLinger-time.Second))
+	if !wanted[layerHigh] {
+		t.Fatal("a layer someone just stopped wanting is kept for the linger, so a viewer flipping back does not wait for it")
+	}
+
+	wanted, changed := demand.update([]int{layerMid}, start.Add(layerDemandLinger+time.Second))
+	if !changed || wanted != [layerCount]bool{true, true, false} {
+		t.Fatalf("a layer nobody wanted for the whole linger is paused, got %v (changed %v)", wanted, changed)
+	}
+}
+
+func TestLayerDemandIgnoresViewersWithoutALayer(t *testing.T) {
+	t.Parallel()
+
+	var demand layerDemand
+
+	wanted, _ := demand.update([]int{-1}, time.Unix(1000, 0))
+	if wanted != [layerCount]bool{true, false, false} {
+		t.Fatalf("a viewer with no layer yet wants nothing above the lowest, got %v", wanted)
+	}
+}

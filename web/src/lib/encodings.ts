@@ -12,10 +12,12 @@ export const PUBLISH_CEILING_BPS = 4_000_000
 /** One share may use the whole ceiling: it is the only video it sends. */
 export const SCREEN_SHARE_MAX_BITRATE = PUBLISH_CEILING_BPS
 
+export const LAYER_RIDS = ['l', 'm', 'h'] as const
+
 const CAMERA_LAYER_SCALES = [
-  { rid: 'l', scaleResolutionDownBy: 4 },
-  { rid: 'm', scaleResolutionDownBy: 2 },
-  { rid: 'h', scaleResolutionDownBy: 1 },
+  { rid: LAYER_RIDS[0], scaleResolutionDownBy: 4 },
+  { rid: LAYER_RIDS[1], scaleResolutionDownBy: 2 },
+  { rid: LAYER_RIDS[2], scaleResolutionDownBy: 1 },
 ] as const
 
 const LAYER_BITRATES: readonly { shortSide: number; maxBitrate: number }[] = [
@@ -90,6 +92,17 @@ export function relayerParameters(
       const layer = layers.find((candidate) => candidate.rid === encoding.rid) ?? layers[index]
 
       return layer?.maxBitrate ? { ...encoding, maxBitrate: layer.maxBitrate } : encoding
+    }),
+  }
+}
+
+export function demandParameters(parameters: RTCRtpSendParameters, active: readonly boolean[]): RTCRtpSendParameters {
+  return {
+    ...parameters,
+    encodings: parameters.encodings.map((encoding) => {
+      const index = LAYER_RIDS.findIndex((rid) => rid === encoding.rid)
+      const wanted = active[index]
+      return index < 0 || wanted === undefined ? encoding : { ...encoding, active: wanted }
     }),
   }
 }

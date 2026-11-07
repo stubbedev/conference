@@ -387,3 +387,32 @@ func chooseLayer(active [layerCount]bool, preferred, ceiling int) int {
 
 	return -1
 }
+
+const layerDemandLinger = 5 * time.Second
+
+type layerDemand struct {
+	lastWanted [layerCount]time.Time
+	sent       [layerCount]bool
+	announced  bool
+}
+
+func (d *layerDemand) update(desired []int, now time.Time) ([layerCount]bool, bool) {
+	for _, layer := range desired {
+		if layer >= layerLow && layer < layerCount {
+			d.lastWanted[layer] = now
+		}
+	}
+
+	var wanted [layerCount]bool
+
+	wanted[layerLow] = true
+	for layer := layerLow + 1; layer < layerCount; layer++ {
+		wanted[layer] = !d.lastWanted[layer].IsZero() && now.Sub(d.lastWanted[layer]) < layerDemandLinger
+	}
+
+	changed := !d.announced || wanted != d.sent
+	d.sent = wanted
+	d.announced = true
+
+	return wanted, changed
+}
