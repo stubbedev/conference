@@ -44,6 +44,16 @@ export interface RemoteTrack {
 
 export type ModerateAction = 'mute' | 'cam' | 'screen' | 'kick'
 
+const TRANSLATION_KIND_PREFIX = 'translation-'
+
+function translationKind(lang: string): string {
+  return `${TRANSLATION_KIND_PREFIX}${lang}`
+}
+
+export function translationKindLang(kind: string): string | null {
+  return kind.startsWith(TRANSLATION_KIND_PREFIX) ? kind.slice(TRANSLATION_KIND_PREFIX.length) : null
+}
+
 /** Simulcast layer of a camera, as the SFU names the encodings. */
 export type { Layer } from '@/lib/quality'
 
@@ -754,7 +764,7 @@ export class RoomClient {
   private kindOf(track: MediaStreamTrack | null): string {
     if (!track) return 'camera'
     const translationLang = this.translationTrackLangs.get(track.id)
-    if (translationLang) return `translation-${translationLang}`
+    if (translationLang) return translationKind(translationLang)
     if (this.screenTrackIds.has(track.id)) return track.kind === 'audio' ? SCREEN_AUDIO_KIND : 'screen'
     if (track.kind === 'audio') return 'audio'
     return 'camera'
@@ -888,7 +898,7 @@ export class RoomClient {
         const labelled = this.downKinds.get(key)
         const kind =
           ev.track.kind === 'audio'
-            ? labelled?.startsWith('translation-')
+            ? labelled !== undefined && translationKindLang(labelled) !== null
               ? labelled
               : labelled === SCREEN_AUDIO_KIND
                 ? SCREEN_AUDIO_KIND
@@ -898,7 +908,7 @@ export class RoomClient {
         // terms, never as part of the speaker's camera stream, so each
         // gets a stream of its own.
         const stream =
-          kind.startsWith('translation-') || kind === SCREEN_AUDIO_KIND
+          translationKindLang(kind) !== null || kind === SCREEN_AUDIO_KIND
             ? new MediaStream([ev.track])
             : (ev.streams[0] ?? new MediaStream([ev.track]))
         this.emit('track', { sourceId, stream, kind })
