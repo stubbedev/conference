@@ -73,9 +73,9 @@ export function useRoomConnection({
 
   const connectClient = useCallback(
     async (resume: string): Promise<RoomClient> => {
-      const stream = localStreamRef.current
+      const stream = localStreamRef.current ?? new MediaStream()
       const roomKey = roomKeyRef.current
-      if (!stream || !roomKey) throw new Error('Local media or the room key is missing.')
+      if (!roomKey) throw new Error('The room key is missing.')
 
       const [mediaKey, chatKey] = await Promise.all([
         deriveMediaKeyMaterial(roomKey),

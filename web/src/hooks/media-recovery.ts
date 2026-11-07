@@ -1,10 +1,22 @@
 import { useEffect, useRef } from 'react'
 
-import { isMobileDevice } from '@/hooks/media'
+import { isMobileDevice, type TrackKind } from '@/hooks/media'
 import type { useLocalMedia } from '@/hooks/local-media'
 
 const RECOVER_BACKOFF_MS = 5000
 const DEVICE_POLL_MS = 3000
+
+const PERMISSION_NAMES: Record<TrackKind, PermissionName> = { mic: 'microphone', cam: 'camera' }
+
+async function permission(kind: TrackKind): Promise<PermissionStatus | null> {
+  if (!navigator.permissions) return null
+  return navigator.permissions.query({ name: PERMISSION_NAMES[kind] }).catch(() => null)
+}
+
+async function mayReopen(kind: TrackKind): Promise<boolean> {
+  const status = await permission(kind)
+  return status === null || status.state === 'granted'
+}
 
 export function useMediaRecovery(active: boolean, media: ReturnType<typeof useLocalMedia>) {
   const { devices, localStream, localStreamRef, mediaBusy, switchDevice, prefsRef, refreshDevices } = media
@@ -24,15 +36,15 @@ export function useMediaRecovery(active: boolean, media: ReturnType<typeof useLo
     recoverLockRef.current = true
     void (async () => {
       try {
-        if (wantsCam) {
+        if (wantsCam && (await mayReopen('cam'))) {
           const prefs = prefsRef.current
           await switchDevice('cam', prefs.cam, undefined, {
-            silent: true,
+            mode: 'recover',
             ...(isMobileDevice() && prefs.camFacing ? { facing: prefs.camFacing } : {}),
           })
         }
-        if (!localStreamRef.current?.getAudioTracks().length && devices.mics.length > 0) {
-          await switchDevice('mic', prefsRef.current.mic, undefined, { silent: true })
+        if (!localStreamRef.current?.getAudioTracks().length && devices.mics.length > 0 && (await mayReopen('mic'))) {
+          await switchDevice('mic', prefsRef.current.mic, undefined, { mode: 'recover' })
         }
       } finally {
         recoverLockRef.current = false
@@ -55,10 +67,23 @@ export function useMediaRecovery(active: boolean, media: ReturnType<typeof useLo
       if (document.visibilityState === 'visible' && missingTrack()) void refreshDevices()
     }
     document.addEventListener('visibilitychange', onVisibility)
+    const watched: PermissionStatus[] = []
+    let disposed = false
+    const onPermission = () => void refreshDevices()
+    void Promise.all([permission('mic'), permission('cam')]).then((statuses) => {
+      for (const status of statuses) {
+        if (!status) continue
+        if (disposed) return
+        status.addEventListener('change', onPermission)
+        watched.push(status)
+      }
+    })
 
     return () => {
+      disposed = true
       window.clearInterval(poll)
       document.removeEventListener('visibilitychange', onVisibility)
+      for (const status of watched) status.removeEventListener('change', onPermission)
     }
   }, [active, localStream, localStreamRef, refreshDevices])
 }

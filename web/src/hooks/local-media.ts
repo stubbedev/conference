@@ -32,9 +32,15 @@ export interface Controls {
   sharing: boolean
 }
 
+export type SwitchMode = 'switch' | 'recover' | 'enable'
+
 export interface SwitchOptions {
-  silent?: boolean
+  mode?: SwitchMode
   facing?: CameraFacing
+}
+
+function blockedMessage(kind: TrackKind): string {
+  return `Your browser is blocking the ${DEVICE_LABELS[kind].toLowerCase()}. Allow it in the site settings next to the address bar, then try again.`
 }
 
 function migrateAvPrefs(stored: AvPrefs): AvPrefs {
@@ -264,14 +270,26 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         }
       }
       void refreshDevices()
+      const client = clientRef.current
+      if (client) {
+        for (const [kind, track] of [['mic', outboundMic], ['cam', outboundCam]] as const) {
+          if (!track) continue
+          await client.replaceLocalTrack(kind, track)
+          client.setTrackEnabled(kind, controlsRef.current[kind])
+        }
+      }
     } finally {
       setMediaBusy(false)
     }
-  }, [refreshDevices, controlsRef, prefsRef, devicesRef, updateDevicePrefs, watchLocalTrack, cameraTrackFor])
+  }, [clientRef, refreshDevices, controlsRef, prefsRef, devicesRef, updateDevicePrefs, watchLocalTrack, cameraTrackFor])
 
   const switchDevice = useCallback(
     async (kind: TrackKind, deviceId: string, resolution?: CameraResolution, opts: SwitchOptions = {}) => {
-      const silent = opts.silent === true
+      const mode = opts.mode ?? 'switch'
+      const failed = () => {
+        if (mode === 'switch') toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
+        if (mode === 'enable') toast.error(blockedMessage(kind))
+      }
       const prefs = prefsRef.current
       const requestedFacing =
         kind === 'cam' && isMobileDevice()
@@ -309,7 +327,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
           previousOpen.facing,
         )
         if (restored.track) {
-          if (!silent) toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
+          failed()
           opened = { ...restored, fallback: true }
           deviceId = ''
         }
@@ -320,10 +338,10 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
           live.removeTrack(previous)
           setLocalStream(new MediaStream(live.getTracks()))
         }
-        if (!silent) toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
+        failed()
         return
       }
-      if (deviceId && fallback && !silent) {
+      if (deviceId && fallback && mode !== 'recover') {
         toast(
           `That ${DEVICE_LABELS[kind].toLowerCase()} is unavailable here, using the system default.`,
         )
@@ -393,22 +411,27 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       void refreshDevices()
       await clientRef.current?.replaceLocalTrack(kind, outbound)
       clientRef.current?.setTrackEnabled(kind, controlsRef.current[kind])
-      if (silent) toast.success(`${DEVICE_LABELS[kind]} is back in the call`)
+      if (mode === 'recover') toast.success(`${DEVICE_LABELS[kind]} is back in the call`)
     },
     [clientRef, updateDevicePrefs, refreshDevices, controlsRef, prefsRef, devicesRef, watchLocalTrack, cameraTrackFor],
   )
 
   const toggleTrack = useCallback(
     (kind: TrackKind) => {
-      const enabled = !controlsRef.current[kind]
       const current = localStreamRef.current
-      const tracks = kind === 'mic' ? current?.getAudioTracks() : current?.getVideoTracks()
-      for (const track of tracks ?? []) track.enabled = enabled
+      const tracks = (kind === 'mic' ? current?.getAudioTracks() : current?.getVideoTracks()) ?? []
+      if (tracks.length === 0) {
+        updateControls(kind === 'mic' ? { mic: true } : { cam: true })
+        void switchDevice(kind, prefsRef.current[kind], undefined, { mode: 'enable' })
+        return
+      }
+      const enabled = !controlsRef.current[kind]
+      for (const track of tracks) track.enabled = enabled
       if (kind === 'mic') micPipelineRef.current?.setInputEnabled(enabled)
       clientRef.current?.setTrackEnabled(kind, enabled)
       updateControls(kind === 'mic' ? { mic: enabled } : { cam: enabled })
     },
-    [clientRef, updateControls, controlsRef],
+    [clientRef, updateControls, controlsRef, switchDevice, prefsRef],
   )
 
   const toggleMic = useCallback(() => toggleTrack('mic'), [toggleTrack])
@@ -460,6 +483,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     mediaError,
     mediaBusy,
     hasMic: Boolean(localStream?.getAudioTracks().length),
+    hasCam: Boolean(localStream?.getVideoTracks().length),
     acquireMedia,
     switchDevice,
     toggleTrack,

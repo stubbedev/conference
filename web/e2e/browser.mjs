@@ -89,7 +89,7 @@ function devToolsEndpoint(proc, idx) {
   })
 }
 
-export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless = true, fakeDevices = true, gpu = false } = {}) {
+export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless = true, fakeDevices = true, fakeUi = true, gpu = false } = {}) {
   const profile = mkdtempSync(join(dir, `chrome-${idx}-`))
   const proc = spawn(
     chrome,
@@ -100,7 +100,7 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
       '--no-first-run',
       ...(gpu ? ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan'] : ['--disable-gpu']),
       ...(fakeDevices ? ['--use-fake-device-for-media-stream'] : []),
-      '--use-fake-ui-for-media-stream',
+      ...(fakeUi ? ['--use-fake-ui-for-media-stream'] : []),
       '--autoplay-policy=no-user-gesture-required',
       '--remote-debugging-port=0',
       `--user-data-dir=${profile}`,
@@ -241,7 +241,14 @@ export const probe = `
 })()
 `
 
+const joinButton = (label) => `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled)`
+
+const previewLive = `[...document.querySelectorAll('video')].some((v) => v.srcObject && v.srcObject.getVideoTracks().some((t) => t.readyState === 'live'))`
+
+export const clickJoin = (label) => `(() => { const b = ${joinButton(label)}; if (b) { b.click(); return true } return false })()`
+
 // beforeJoin, if given, runs on the join screen before "Join call" is clicked.
+// Joining waits for the camera preview, so the call starts with media.
 export async function joinRoom(browser, url, relayTransport = null, beforeJoin = null) {
   const s = browser.sessionId
   await browser.cdp.send('Page.enable', {}, s)
@@ -249,7 +256,7 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
   await browser.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook(relayTransport) }, s)
   await browser.cdp.send('Page.navigate', { url }, s)
   if (beforeJoin) {
-    const ready = `[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Join call' && !b.disabled)`
+    const ready = `Boolean(${joinButton('Join call')}) && ${previewLive}`
     for (let t = 0; t < 80 && !(await evalJs(browser, ready)); t++) await sleep(250)
     await beforeJoin(browser)
   }
@@ -257,7 +264,7 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
     const r = await browser.cdp.send(
       'Runtime.evaluate',
       {
-        expression: `(() => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Join call'); if (b && !b.disabled) { b.click(); return true; } return false; })()`,
+        expression: `${previewLive} && ${clickJoin('Join call')}`,
         returnByValue: true,
       },
       s,

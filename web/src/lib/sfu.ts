@@ -397,7 +397,7 @@ export class RoomClient {
     this.camSender = this.localCam ? this.addCamera(pc, this.localCam, stream) : null
 
     for (const sender of pc.getSenders()) this.installSenderTransform(sender)
-    await this.sendUpOffer()
+    if (pc.getSenders().length > 0) await this.sendUpOffer()
 
     this.state = {
       mic: this.localMic?.enabled ?? false,
@@ -557,7 +557,8 @@ export class RoomClient {
   setTrackEnabled(kind: 'mic' | 'cam', enabled: boolean): void {
     const track = kind === 'mic' ? this.localMic : this.localCam
     if (track) track.enabled = enabled
-    this.state = kind === 'mic' ? { ...this.state, mic: enabled } : { ...this.state, cam: enabled }
+    const on = track !== null && enabled
+    this.state = kind === 'mic' ? { ...this.state, mic: on } : { ...this.state, cam: on }
     this.sendState()
   }
 

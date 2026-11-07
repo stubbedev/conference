@@ -142,11 +142,7 @@ export default function Room() {
 
   const diagnostics = useDiagnostics(() => void copyInvite())
 
-  const joinCall = () => {
-    const stream = localStreamRef.current
-    if (!stream || stream.getTracks().length === 0) return
-    void join(() => connectClient(''))
-  }
+  const joinCall = () => void join(() => connectClient(''))
 
   const settingsPopover = useMemo(
     () => (
@@ -290,6 +286,8 @@ export default function Room() {
         onTogglePeople={panel.togglePeople}
         mic={controls.mic}
         cam={controls.cam}
+        micAvailable={media.hasMic}
+        camAvailable={media.hasCam}
         sharing={controls.sharing}
         blur={devicePrefs.blur}
         canBlur={canBlur}

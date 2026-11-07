@@ -26,6 +26,7 @@ import {
   callJs,
   check,
   checkCall,
+  clickJoin,
   createRoom,
   evalJs,
   findChrome,
@@ -277,6 +278,58 @@ async function checkNewMeeting(failures, dir, base) {
   }
 }
 
+const inboundVideoFrames = `(async () => {
+  let frames = 0
+  for (const pc of window.__pcs) {
+    if (pc.connectionState === 'closed') continue
+    for (const r of (await pc.getStats()).values()) if (r.type === 'inbound-rtp' && r.kind === 'video') frames += r.framesDecoded || 0
+  }
+  return frames
+})()`
+
+// Someone whose browser blocks the camera and microphone can still join,
+// receives the others, and is published into the call as soon as access
+// is granted, without rejoining.
+async function checkJoinWithoutMedia(failures, dir, base) {
+  const label = 'join without media'
+  const room = await createRoom(base, 'no-media')
+  const origin = new URL(base).origin
+  const blocked = await launchChrome(chromeBinary, 7, dir, [], { fakeUi: false })
+  const other = await launch(8, dir)
+  try {
+    const setMedia = (setting) =>
+      Promise.all(
+        ['camera', 'microphone'].map((name) =>
+          blocked.cdp.send('Browser.setPermission', { permission: { name }, setting, origin }),
+        ),
+      )
+    await setMedia('denied')
+    const session = blocked.sessionId
+    await blocked.cdp.send('Page.enable', {}, session)
+    await blocked.cdp.send('Runtime.enable', {}, session)
+    await blocked.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook() }, session)
+    await blocked.cdp.send('Page.navigate', { url: room.url }, session)
+    const joined = await waitFor(blocked, clickJoin('Join without camera and microphone'), Boolean, 20000)
+    check(failures, label, joined.ok, 'no way to join with the camera and microphone blocked')
+    if (!joined.ok) return
+
+    await joinRoom(other, room.url)
+    const allow = await waitFor(blocked, `Boolean(document.querySelector('button[aria-label="Allow camera"]'))`, Boolean, 15000)
+    check(failures, label, allow.ok, 'the call does not show that the camera is blocked')
+    const seesOther = await waitFor(blocked, inboundVideoFrames, (frames) => frames > 0, 20000)
+    check(failures, label, seesOther.ok, 'the member without media does not receive the others')
+    const leaked = await evalJs(other, inboundVideoFrames)
+    check(failures, label, leaked === 0, `${leaked} video frames arrived from a member whose camera is blocked`)
+
+    await setMedia('granted')
+    const published = await waitFor(other, inboundVideoFrames, (frames) => frames > 0, 30000)
+    check(failures, label, published.ok, 'granting access mid-call did not publish the camera')
+  } finally {
+    await stopProcess(blocked.proc)
+    await stopProcess(other.proc)
+  }
+}
+
 async function checkBackgroundBlur(failures, dir, base) {
   const camera = join(dir, 'blur-camera.y4m')
   writeNoiseVideo(camera)
@@ -504,6 +557,7 @@ async function main() {
 
     await checkNewMeeting(failures, dir, `http://127.0.0.1:${port}`)
     await checkBackgroundBlur(failures, dir, `http://127.0.0.1:${port}`)
+    await checkJoinWithoutMedia(failures, dir, `http://127.0.0.1:${port}`)
 
     await evalJs(browsers[1], 'window.__sockets.at(-1).close()')
     await checkCall(failures, browsers, ['dropped signaling 0', 'dropped signaling 1'], { seconds })

@@ -5,19 +5,16 @@ import {
   Languages,
   Maximize2,
   MessageSquare,
-  Mic,
-  MicOff,
   Minimize2,
   MonitorUp,
   MonitorX,
   MoreVertical,
   PhoneOff,
   Users,
-  Video,
-  VideoOff,
 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
+import { DeviceToggle } from '@/components/DeviceToggle'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Hint } from '@/components/Hint'
 import { MeetingClock } from '@/components/MeetingClock'
@@ -27,6 +24,8 @@ interface ControlsBarProps {
   roomName: string
   mic: boolean
   cam: boolean
+  micAvailable: boolean
+  camAvailable: boolean
   sharing: boolean
   blur: boolean
   canBlur?: boolean
@@ -62,6 +61,8 @@ export const ControlsBar = memo(function ControlsBar({
   roomName,
   mic,
   cam,
+  micAvailable,
+  camAvailable,
   sharing,
   blur = false,
   canBlur = false,
@@ -147,28 +148,8 @@ export const ControlsBar = memo(function ControlsBar({
       </div>
 
       <div className="flex items-center gap-2 sm:gap-3">
-        <Hint label={mic ? 'Mute microphone (M)' : 'Unmute microphone (M)'}>
-          <Button
-            variant={mic ? 'secondary' : 'destructive'}
-            size="icon"
-            className={ROUND}
-            onClick={onMic}
-            aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}
-          >
-            {mic ? <Mic /> : <MicOff />}
-          </Button>
-        </Hint>
-        <Hint label={cam ? 'Turn camera off (V)' : 'Turn camera on (V)'}>
-          <Button
-            variant={cam ? 'secondary' : 'destructive'}
-            size="icon"
-            className={ROUND}
-            onClick={onCam}
-            aria-label={cam ? 'Turn camera off' : 'Turn camera on'}
-          >
-            {cam ? <Video /> : <VideoOff />}
-          </Button>
-        </Hint>
+        <DeviceToggle kind="mic" on={mic} available={micAvailable} onToggle={onMic} withShortcut className={ROUND} />
+        <DeviceToggle kind="cam" on={cam} available={camAvailable} onToggle={onCam} withShortcut className={ROUND} />
         {canShare && (
           <Hint label={sharing ? 'Stop sharing' : 'Share your screen'}>
             <Button

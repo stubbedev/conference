@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from 'react'
-import { Contrast, Loader2, Mic, MicOff, RotateCcw, ShieldCheck, Video, VideoOff } from 'lucide-react'
+import { Contrast, Loader2, RotateCcw, ShieldCheck } from 'lucide-react'
 
 import { FALLBACK_ASPECT_RATIO } from '@/hooks/media'
 import { Button } from '@/components/ui/button'
+import { DeviceToggle } from '@/components/DeviceToggle'
 import { Disclosure } from '@/components/Disclosure'
 import { Hint } from '@/components/Hint'
 import { Input } from '@/components/ui/input'
@@ -55,7 +56,9 @@ export function Prejoin({
   translation,
 }: PrejoinProps) {
   const [ratio, setRatio] = useState(FALLBACK_ASPECT_RATIO)
-  const canJoin = !mediaBusy && !mediaError && Boolean(stream)
+  const hasMic = Boolean(stream?.getAudioTracks().length)
+  const hasCam = Boolean(stream?.getVideoTracks().length)
+  const joinLabel = mediaBusy || hasMic || hasCam ? 'Join call' : 'Join without camera and microphone'
 
   return (
     <div className="relative grid h-dvh place-items-center overflow-y-auto bg-muted/40 p-4">
@@ -70,6 +73,7 @@ export function Prejoin({
           {mediaError ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
               <p className="text-sm font-medium">{mediaError}</p>
+              <p className="text-sm text-muted-foreground">You can still join, and turn them on in the call.</p>
               <Button variant="secondary" size="sm" onClick={onRetryMedia}>
                 <RotateCcw /> Retry
               </Button>
@@ -80,6 +84,9 @@ export function Prejoin({
                 <div className="absolute inset-0 z-10 grid place-content-center justify-items-center gap-3 bg-background/60 text-sm text-muted-foreground">
                   <Loader2 className="size-6 animate-spin" />
                   Starting your camera and microphone…
+                  <span className="max-w-64 text-center text-xs">
+                    If your browser asks, allow access. You can also join now and turn them on later.
+                  </span>
                 </div>
               )}
               <VideoTile
@@ -91,28 +98,20 @@ export function Prejoin({
                 onAspectRatio={(_tileKey, ratio) => setRatio(ratio)}
               />
               <div className="absolute inset-x-0 bottom-4 z-20 flex items-center justify-center gap-3">
-                <Hint label={mic ? 'Mute microphone' : 'Unmute microphone'} side="top">
-                  <Button
-                    variant={mic ? 'secondary' : 'destructive'}
-                    size="icon"
-                    className="size-12 rounded-full [&_svg]:size-5"
-                    aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}
-                    onClick={onToggleMic}
-                  >
-                    {mic ? <Mic /> : <MicOff />}
-                  </Button>
-                </Hint>
-                <Hint label={cam ? 'Turn off camera' : 'Turn on camera'} side="top">
-                  <Button
-                    variant={cam ? 'secondary' : 'destructive'}
-                    size="icon"
-                    className="size-12 rounded-full [&_svg]:size-5"
-                    aria-label={cam ? 'Turn off camera' : 'Turn on camera'}
-                    onClick={onToggleCam}
-                  >
-                    {cam ? <Video /> : <VideoOff />}
-                  </Button>
-                </Hint>
+                <DeviceToggle
+                  kind="mic"
+                  on={mic}
+                  available={hasMic || mediaBusy}
+                  onToggle={onToggleMic}
+                  className="size-12 rounded-full [&_svg]:size-5"
+                />
+                <DeviceToggle
+                  kind="cam"
+                  on={cam}
+                  available={hasCam || mediaBusy}
+                  onToggle={onToggleCam}
+                  className="size-12 rounded-full [&_svg]:size-5"
+                />
                 {canBlur && onToggleBlur && (
                   <Hint label={blur ? 'Turn off background blur' : 'Blur background'} side="top">
                     <Button
@@ -157,14 +156,8 @@ export function Prejoin({
 
           {translation && <Disclosure title="Language and subtitles">{translation}</Disclosure>}
 
-          <Button size="lg" className="h-12 rounded-full text-base" onClick={onJoin} disabled={!canJoin}>
-            {mediaBusy ? (
-              <>
-                <Loader2 className="animate-spin" /> Setting up…
-              </>
-            ) : (
-              'Join call'
-            )}
+          <Button size="lg" className="h-12 rounded-full text-base" onClick={onJoin}>
+            {joinLabel}
           </Button>
         </div>
       </div>
