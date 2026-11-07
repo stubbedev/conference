@@ -149,6 +149,27 @@ function maxVolume(file) {
   return match ? Number(match[1]) : null
 }
 
+// The video frames of a recording whose timestamps fall in [from, to) seconds (needs ffprobe).
+function framesBetween(file, from, to) {
+  const res = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', file], { encoding: 'utf8' })
+  if (res.error) throw new Error('ffprobe is needed to check the recording: install ffmpeg or put it on PATH')
+  return res.stdout.split('\n').map(Number).filter((t) => Number.isFinite(t) && t >= from && t < to).length
+}
+
+// A hidden tab: another tab in front of it, which is what throttles a page's
+// timers and stops its animation frames.
+async function hideTab(browser) {
+  const { targetId } = await browser.cdp.send('Target.createTarget', { url: 'about:blank' })
+  await browser.cdp.send('Target.activateTarget', { targetId })
+  return async () => {
+    await browser.cdp.send('Target.closeTarget', { targetId })
+  }
+}
+
+const RECORDING_VISIBLE_S = 5
+const RECORDING_HIDDEN_S = 8
+const HIDDEN_RECORDING_MIN_FPS = 10
+
 const recordingBadgePresent = `(() => { const h = document.querySelector('header'); return Boolean(h && [...h.querySelectorAll('span')].some(s => s.textContent.trim() === 'Recording')); })()`
 
 // A camera whose pixels change at random from frame to frame: what a test
@@ -497,7 +518,14 @@ async function main() {
       if (reRecord) {
         check(failures, 'recording', await waitForBadge(late, true), 'recording badge missing on the second recorder')
         check(failures, 'recording', await waitForBadge(browsers[1], true), 'recording badge missing on the guest for the second recorder')
-        await sleep(5000)
+        await sleep(RECORDING_VISIBLE_S * 1000)
+        const hiddenState = await evalJs(late, 'document.visibilityState')
+        const show = await hideTab(late)
+        const hidden = await evalJs(late, 'document.visibilityState')
+        await sleep(RECORDING_HIDDEN_S * 1000)
+        await show()
+        await sleep(2000)
+        check(failures, 'recording', hiddenState === 'visible' && hidden === 'hidden', `the recorder's tab did not go from visible to hidden (${hiddenState} → ${hidden})`)
 
         const stopped = await clickButtonByTitle(late, 'Stop recording')
         check(failures, 'recording', stopped, 'stop button missing while recording')
@@ -515,7 +543,18 @@ async function main() {
         const loudest = download ? maxVolume(join(dlDir, download.name)) : null
         check(failures, 'recording', loudest !== null && loudest > REMOTE_VOICE_MIN_DB, `the guest's voice is not in the recording (loudest ${loudest} dB)`)
 
-        console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
+        const hiddenFrom = RECORDING_VISIBLE_S + 1
+        const hiddenTo = RECORDING_VISIBLE_S + RECORDING_HIDDEN_S - 1
+        const hiddenFps = download ? framesBetween(join(dlDir, download.name), hiddenFrom, hiddenTo) / (hiddenTo - hiddenFrom) : 0
+        const visibleFps = download ? framesBetween(join(dlDir, download.name), 1, RECORDING_VISIBLE_S) / (RECORDING_VISIBLE_S - 1) : 0
+        check(
+          failures,
+          'recording',
+          hiddenFps >= HIDDEN_RECORDING_MIN_FPS && hiddenFps >= visibleFps / 2,
+          `the recording's picture slowed to ${hiddenFps.toFixed(1)} fps while its tab was hidden, from ${visibleFps.toFixed(1)} fps`,
+        )
+
+        console.log(`recording: late-joiner replay, recorder-leave clearing, ${visibleFps.toFixed(1)} fps visible and ${hiddenFps.toFixed(1)} fps hidden, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
 
         // Round three: a recording the browser ends on its own (the
         // encoder failed, the way a long recording can die) must still

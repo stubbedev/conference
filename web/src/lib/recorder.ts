@@ -38,11 +38,44 @@ const MIME_CANDIDATES = [
   'video/mp4',
 ]
 
+interface FrameReader {
+  read(): Promise<{ value?: VideoFrame; done: boolean }>
+  cancel(): Promise<void>
+}
+
+interface TrackProcessor {
+  readable: { getReader(): FrameReader }
+}
+
+interface FrameWriter {
+  write(frame: VideoFrame): Promise<void>
+  close(): Promise<void>
+}
+
+interface TrackGenerator extends MediaStreamTrack {
+  writable: { getWriter(): FrameWriter }
+}
+
+interface FrameApis {
+  MediaStreamTrackProcessor: new (init: { track: MediaStreamTrack }) => TrackProcessor
+  MediaStreamTrackGenerator: new (init: { kind: 'video' }) => TrackGenerator
+}
+
+function frameApis(): FrameApis | null {
+  const scope = globalThis as unknown as Partial<FrameApis>
+  if (!scope.MediaStreamTrackProcessor || !scope.MediaStreamTrackGenerator || typeof OffscreenCanvas === 'undefined') return null
+  return scope as FrameApis
+}
+
 export function recorderSupported(): boolean {
   return (
     typeof MediaRecorder !== 'undefined' &&
-    typeof HTMLCanvasElement.prototype.captureStream === 'function'
+    (frameApis() !== null || typeof HTMLCanvasElement.prototype.captureStream === 'function')
   )
+}
+
+export function recorderKeepsPaceHidden(): boolean {
+  return frameApis() !== null
 }
 
 export function saveFile(file: Blob, filename: string): void {
@@ -54,12 +87,93 @@ export function saveFile(file: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
+interface VideoSource {
+  readonly image: CanvasImageSource | null
+  readonly width: number
+  readonly height: number
+  close(): void
+}
+
+class ElementSource implements VideoSource {
+  private readonly video = document.createElement('video')
+
+  constructor(track: MediaStreamTrack) {
+    this.video.muted = true
+    this.video.playsInline = true
+    this.video.srcObject = new MediaStream([track])
+    void this.video.play().catch(() => {})
+  }
+
+  get image(): CanvasImageSource | null {
+    return this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA ? this.video : null
+  }
+
+  get width(): number {
+    return this.video.videoWidth
+  }
+
+  get height(): number {
+    return this.video.videoHeight
+  }
+
+  close(): void {
+    this.video.pause()
+    this.video.srcObject = null
+  }
+}
+
+class FrameSource implements VideoSource {
+  private frame: VideoFrame | null = null
+  private readonly reader: FrameReader
+  private closed = false
+
+  constructor(apis: FrameApis, track: MediaStreamTrack, onFrame: () => void) {
+    this.reader = new apis.MediaStreamTrackProcessor({ track }).readable.getReader()
+    void this.pump(onFrame)
+  }
+
+  get image(): CanvasImageSource | null {
+    return this.frame
+  }
+
+  get width(): number {
+    return this.frame?.displayWidth ?? 0
+  }
+
+  get height(): number {
+    return this.frame?.displayHeight ?? 0
+  }
+
+  close(): void {
+    this.closed = true
+    void this.reader.cancel().catch(() => {})
+    this.frame?.close()
+    this.frame = null
+  }
+
+  private async pump(onFrame: () => void): Promise<void> {
+    for (;;) {
+      const { value, done } = await this.reader.read().catch(() => ({ value: undefined, done: true }))
+      if (done || !value) return
+      if (this.closed) {
+        value.close()
+        return
+      }
+      this.frame?.close()
+      this.frame = value
+      onFrame()
+    }
+  }
+}
+
 interface RecorderEntry {
   name: string
-  video: HTMLVideoElement
+  source: VideoSource
   track: MediaStreamTrack
   pinned: boolean
 }
+
+type Canvas2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
 
 // One track mixed into the recording. In WebKit browsers remote tracks
 // route through a detached <audio> element and a
@@ -109,8 +223,12 @@ const MEMORY_SINK_LIMIT_BYTES = 1024 * 1024 * 1024
 export class CallRecorder {
   private slug: string
   private ended: ((reason: string) => void) | null
-  private canvas: HTMLCanvasElement
-  private ctx: CanvasRenderingContext2D
+  private readonly apis = frameApis()
+  private canvas: HTMLCanvasElement | OffscreenCanvas
+  private ctx: Canvas2D
+  private generator: TrackGenerator | null = null
+  private writer: FrameWriter | null = null
+  private writing = false
   private entries = new Map<string, RecorderEntry>()
   private latest: RecorderTile[] = []
   private mixed = new Map<MediaStreamTrack, MixedSource>()
@@ -135,10 +253,14 @@ export class CallRecorder {
   constructor(slug: string, ended?: (reason: string) => void) {
     this.slug = slug
     this.ended = ended ?? null
-    this.canvas = document.createElement('canvas')
-    this.canvas.width = CANVAS_WIDTH
-    this.canvas.height = CANVAS_HEIGHT
-    const ctx = this.canvas.getContext('2d')
+    if (this.apis) {
+      this.canvas = new OffscreenCanvas(CANVAS_WIDTH, CANVAS_HEIGHT)
+    } else {
+      this.canvas = document.createElement('canvas')
+      this.canvas.width = CANVAS_WIDTH
+      this.canvas.height = CANVAS_HEIGHT
+    }
+    const ctx = this.canvas.getContext('2d') as Canvas2D | null
     if (!ctx) throw new Error('Canvas 2D is unavailable in this browser.')
     this.ctx = ctx
   }
@@ -158,12 +280,7 @@ export class CallRecorder {
 
       let entry = this.entries.get(tile.key)
       if (!entry) {
-        const video = document.createElement('video')
-        video.muted = true
-        video.playsInline = true
-        video.srcObject = new MediaStream([track])
-        void video.play().catch(() => {})
-        entry = { name: tile.name, video, track, pinned: tile.pinned }
+        entry = { name: tile.name, source: this.sourceFor(track), track, pinned: tile.pinned }
         this.entries.set(tile.key, entry)
       } else {
         if (entry.name !== tile.name) entry.name = tile.name
@@ -171,19 +288,46 @@ export class CallRecorder {
         // A device switch replaces the tile's track under the same key;
         // re-bind so the composite follows the live capture.
         if (entry.track !== track) {
+          entry.source.close()
           entry.track = track
-          entry.video.srcObject = new MediaStream([track])
+          entry.source = this.sourceFor(track)
         }
       }
     }
     for (const [key, entry] of this.entries) {
       if (seen.has(key)) continue
-      entry.video.pause()
-      entry.video.srcObject = null
+      entry.source.close()
       this.entries.delete(key)
     }
 
     this.connectAudio(tiles)
+  }
+
+  private sourceFor(track: MediaStreamTrack): VideoSource {
+    return this.apis ? new FrameSource(this.apis, track, this.frameArrived) : new ElementSource(track)
+  }
+
+  private frameArrived = (): void => {
+    if (!this.active || performance.now() - this.lastPaint < 1000 / CANVAS_FPS - 1) return
+    this.emitFrame()
+  }
+
+  private emitFrame(): void {
+    const writer = this.writer
+    if (!writer || !(this.canvas instanceof OffscreenCanvas) || this.writing) return
+    this.lastPaint = performance.now()
+    this.paint()
+    const frame = new VideoFrame(this.canvas, { timestamp: Math.round(this.lastPaint * 1000) })
+    this.writing = true
+    writer
+      .write(frame)
+      .catch((err: unknown) => {
+        frame.close()
+        this.endUnexpectedly(`the recording's picture could not be written: ${err instanceof Error ? err.message : String(err)}`)
+      })
+      .finally(() => {
+        this.writing = false
+      })
   }
 
   start(): Promise<void> {
@@ -215,8 +359,16 @@ export class CallRecorder {
 
     const mime = MIME_CANDIDATES.find((candidate) => MediaRecorder.isTypeSupported(candidate))
 
-    this.canvasStream = this.canvas.captureStream(CANVAS_FPS)
-    const tracks: MediaStreamTrack[] = [...this.canvasStream.getVideoTracks()]
+    let video: MediaStreamTrack
+    if (this.apis) {
+      this.generator = new this.apis.MediaStreamTrackGenerator({ kind: 'video' })
+      this.writer = this.generator.writable.getWriter()
+      video = this.generator
+    } else {
+      this.canvasStream = (this.canvas as HTMLCanvasElement).captureStream(CANVAS_FPS)
+      video = this.canvasStream.getVideoTracks()[0]
+    }
+    const tracks: MediaStreamTrack[] = [video]
     if (this.mixer) tracks.push(...this.mixer.stream.getAudioTracks())
 
     this.recorder = new MediaRecorder(new MediaStream(tracks), mime ? { mimeType: mime } : undefined)
@@ -252,6 +404,13 @@ export class CallRecorder {
 
     this.recorder.start(CHUNK_MS)
     this.startedAt = performance.now()
+    if (this.apis) {
+      this.emitFrame()
+      this.paintTimer = window.setInterval(() => {
+        if (this.active && performance.now() - this.lastPaint >= 1000) this.emitFrame()
+      }, 1000)
+      return
+    }
     this.pumpFrames()
     // rAF stops entirely in hidden tabs, which would freeze the picture
     // in a background recording for as long as the tab stays hidden;
@@ -543,9 +702,7 @@ export class CallRecorder {
 
     // A video without decoded frames yet would draw nothing and leave a
     // black cell; skipping it keeps the grid packed instead.
-    const entries = [...this.entries.values()].filter(
-      (entry) => entry.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
-    )
+    const entries = [...this.entries.values()].filter((entry) => entry.source.image !== null)
     if (entries.length === 0) return
 
     const cols = Math.ceil(Math.sqrt(entries.length))
@@ -556,7 +713,7 @@ export class CallRecorder {
     entries.forEach((entry, index) => {
       const x = (index % cols) * cellWidth
       const y = Math.floor(index / cols) * cellHeight
-      this.drawCover(entry.video, x, y, cellWidth, cellHeight)
+      this.drawCover(entry.source, x, y, cellWidth, cellHeight)
       this.drawLabel(entry.name, x, y, cellWidth, cellHeight)
     })
   }
@@ -570,8 +727,8 @@ export class CallRecorder {
 
     // The pinned cell stays black until frames arrive; the layout does
     // not jump around while it decodes.
-    if (pinned.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-      this.drawCover(pinned.video, 0, 0, canvas.width, mainHeight)
+    if (pinned.source.image) {
+      this.drawCover(pinned.source, 0, 0, canvas.width, mainHeight)
       this.drawLabel(pinned.name, 0, 0, canvas.width, mainHeight)
     }
 
@@ -582,22 +739,23 @@ export class CallRecorder {
     for (const entry of others) {
       // Overflow clips like the live strip's horizontal scroll.
       if (x >= canvas.width) break
-      if (entry.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) continue
-      this.drawCover(entry.video, x, canvas.height - stripHeight, cellWidth, stripHeight)
+      if (!entry.source.image) continue
+      this.drawCover(entry.source, x, canvas.height - stripHeight, cellWidth, stripHeight)
       this.drawLabel(entry.name, x, canvas.height - stripHeight, cellWidth, stripHeight)
       x += cellWidth + gap
     }
   }
 
-  private drawCover(video: HTMLVideoElement, x: number, y: number, w: number, h: number): void {
-    const videoWidth = video.videoWidth
-    const videoHeight = video.videoHeight
-    if (!videoWidth || !videoHeight) return
+  private drawCover(source: VideoSource, x: number, y: number, w: number, h: number): void {
+    const image = source.image
+    const videoWidth = source.width
+    const videoHeight = source.height
+    if (!image || !videoWidth || !videoHeight) return
 
     const scale = Math.max(w / videoWidth, h / videoHeight)
     const drawWidth = videoWidth * scale
     const drawHeight = videoHeight * scale
-    this.ctx.drawImage(video, x + (w - drawWidth) / 2, y + (h - drawHeight) / 2, drawWidth, drawHeight)
+    this.ctx.drawImage(image, x + (w - drawWidth) / 2, y + (h - drawHeight) / 2, drawWidth, drawHeight)
   }
 
   private drawLabel(name: string, x: number, y: number, w: number, h: number): void {
@@ -634,11 +792,12 @@ export class CallRecorder {
     this.translationsMixed = []
     this.translations = []
     this.mixer = null
-    for (const entry of this.entries.values()) {
-      entry.video.pause()
-      entry.video.srcObject = null
-    }
+    for (const entry of this.entries.values()) entry.source.close()
     this.entries.clear()
+    void this.writer?.close().catch(() => {})
+    this.writer = null
+    this.generator?.stop()
+    this.generator = null
     this.latest = []
     for (const track of this.canvasStream?.getTracks() ?? []) track.stop()
     this.canvasStream = null

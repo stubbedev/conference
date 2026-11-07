@@ -43,7 +43,7 @@ import {
   toB64,
 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
-import { CallRecorder, recorderSupported, type RecorderTile } from '@/lib/recorder'
+import { CallRecorder, recorderKeepsPaceHidden, recorderSupported, type RecorderTile } from '@/lib/recorder'
 import { requestDisplay, SCREEN_AUDIO_KIND, screenTracks } from '@/lib/screen'
 import { tilesOfMembers } from '@/lib/reconnect'
 import { ServerTranslator } from '@/lib/translate/bridge'
@@ -1711,12 +1711,12 @@ export default function Room() {
     recorderRef.current?.setTiles(recorderTiles)
   }, [recording, recorderTiles])
 
-  // A hidden tab records a slideshow: browsers throttle a page's capture
-  // pipeline to about a frame a second once it is out of sight, sound
-  // keeps flowing, and no compositor can talk them out of it. Say so the
-  // first time it happens rather than let someone discover it in the file.
+  // Where the recorder has to composite on a page canvas, a hidden tab
+  // records a slideshow: the browser throttles the canvas capture to about
+  // a frame a second. Say so the first time it happens rather than let
+  // someone discover it in the file.
   useEffect(() => {
-    if (!recording) return
+    if (!recording || recorderKeepsPaceHidden()) return
 
     const onVisibility = () => {
       if (document.visibilityState !== 'hidden') return
