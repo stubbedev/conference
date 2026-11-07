@@ -7,14 +7,15 @@
 //
 // What travels to the room is the text of what this member said, sealed
 // with the room's chat key, exactly as the speech service's subtitles
-// do. For each language, the member who translates best translates every
-// sentence into it and shares the translation the same way, whichever
-// language that member speaks; the others show it, and translate a
-// sentence themselves, as well as they can, when no translation arrives.
+// do. The languages are shared out among the members who translate best,
+// each translating every sentence into the languages it was given and
+// sharing the translations the same way, whichever language it speaks;
+// the others show them, and translate a sentence themselves, as well as
+// they can, when no translation arrives.
 
 import type { RoomClient } from '@/lib/sfu'
 import { clauses } from '@/lib/speech/clauses'
-import { translatorFor, type Candidate } from '@/lib/speech/election'
+import { assignTranslators, translatorFor, type Candidate } from '@/lib/speech/election'
 import type { Engines, Segmenter } from '@/lib/speech/engines'
 import { invented } from '@/lib/speech/invented'
 import { Pace } from '@/lib/speech/pace'
@@ -34,6 +35,14 @@ const EARLIER_SENTENCES = 8
 const NO_WEBGPU = 'This browser cannot transcribe: it needs WebGPU, and this server has no smaller model for the CPU.'
 
 type Translation = Pick<CaptionLine, 'speaker' | 'segId' | 'sourceLang' | 'lang' | 'text' | 'final'>
+
+interface Awaited {
+  timer: ReturnType<typeof setTimeout> | null
+  latest: CaptionLine
+  earlier: readonly string[]
+  arrived: boolean
+  taken: boolean
+}
 
 function translatedId(segId: string, target: string): string {
   return `${segId}-${target}`
@@ -56,7 +65,7 @@ export class LocalTranslator implements Translator {
   private canTranscribe = true
   private translates: TranslationLevel = 'none'
   private readonly earlier = new Map<string, string[]>()
-  private readonly awaited = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly awaited = new Map<string, Awaited>()
   private readonly interims = new Map<string, CaptionLine>()
   private readonly interimBusy = new Set<string>()
   private readonly spoken = new Set<string>()
@@ -129,7 +138,7 @@ export class LocalTranslator implements Translator {
   async stop(): Promise<void> {
     this.stopped = true
     this.detach()
-    for (const timer of this.awaited.values()) clearTimeout(timer)
+    for (const { timer } of this.awaited.values()) if (timer) clearTimeout(timer)
     this.awaited.clear()
     this.segmenter?.close()
     this.segmenter = null
@@ -284,11 +293,9 @@ export class LocalTranslator implements Translator {
 
   private translateForOthers(caption: CaptionLine, earlier: readonly string[]): void {
     const self = this.client?.memberId
-    const candidates = this.candidates()
-    const targets = new Set(candidates.map((candidate) => candidate.lang))
-    for (const target of targets) {
-      if (target === caption.lang || target === this.selfPrefs.lang) continue
-      if (translatorFor(target, candidates) === self) this.translateFor(caption, target, earlier, true)
+    for (const [target, translator] of assignTranslators(this.candidates())) {
+      if (target === caption.lang || target === this.selfPrefs.lang || translator !== self) continue
+      this.translateFor(caption, target, earlier, true)
     }
   }
 
@@ -307,31 +314,51 @@ export class LocalTranslator implements Translator {
       this.translateFor(caption, mine, context, true)
       return
     }
-    if (!caption.final) return
-
     if (translator === null) {
-      if (this.translates !== 'none') this.translateFor(caption, mine, context, false)
-      else this.events.onCaption(caption)
+      this.translateOwn(caption, context)
+      return
+    }
+    this.await(caption, context)
+  }
+
+  private await(caption: CaptionLine, earlier: readonly string[]): void {
+    const segId = translatedId(caption.segId, this.selfPrefs.lang)
+    const awaited = this.awaited.get(segId) ?? { timer: null, latest: caption, earlier, arrived: false, taken: false }
+    awaited.latest = caption
+    awaited.earlier = earlier
+    this.awaited.set(segId, awaited)
+
+    if (awaited.taken) {
+      this.translateOwn(caption, earlier)
+      if (caption.final) this.awaited.delete(segId)
       return
     }
 
-    const segId = translatedId(caption.segId, mine)
-    this.awaited.set(
-      segId,
-      setTimeout(() => {
-        this.awaited.delete(segId)
-        if (this.translates !== 'none') this.translateFor(caption, mine, context, false)
-        else this.failed(new Error(`no translation of ${caption.segId} arrived`), caption, mine)
-      }, TRANSLATION_WAIT_MS),
-    )
+    if (awaited.timer !== null || (awaited.arrived && !caption.final)) return
+    awaited.timer = setTimeout(() => {
+      awaited.timer = null
+      awaited.taken = true
+      this.translateOwn(awaited.latest, awaited.earlier)
+      if (awaited.latest.final) this.awaited.delete(segId)
+    }, TRANSLATION_WAIT_MS)
+  }
+
+  private translateOwn(caption: CaptionLine, earlier: readonly string[]): void {
+    const mine = this.selfPrefs.lang
+    if (this.translates !== 'none') this.translateFor(caption, mine, earlier, false)
+    else this.events.onCaption({ ...caption, lang: mine })
   }
 
   private translated(line: TranslationLine): void {
-    if (line.lang !== this.selfPrefs.lang || line.by !== translatorFor(line.lang, this.candidates())) return
+    if (line.lang !== this.selfPrefs.lang) return
 
-    const timer = this.awaited.get(line.segId)
-    if (timer !== undefined) clearTimeout(timer)
-    this.awaited.delete(line.segId)
+    const awaited = this.awaited.get(line.segId)
+    if (awaited?.timer) clearTimeout(awaited.timer)
+    if (awaited) {
+      awaited.timer = null
+      awaited.arrived = true
+      if (line.final) this.awaited.delete(line.segId)
+    }
     this.show(line, false)
   }
 
@@ -402,7 +429,7 @@ export class LocalTranslator implements Translator {
 
   private failed(error: unknown, caption: CaptionLine, target: string): void {
     if (this.stopped) return
-    if (target === this.selfPrefs.lang) this.events.onCaption(caption)
+    if (target === this.selfPrefs.lang) this.events.onCaption({ ...caption, lang: target })
     this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
     console.warn('live translation:', error)
   }

@@ -32,14 +32,19 @@ class CDP {
     this.ws = ws
     this.id = 0
     this.pending = new Map()
+    this.listeners = new Map()
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data)
+      if (msg.method) for (const listener of this.listeners.get(msg.method) ?? []) listener(msg.params)
       const waiter = msg.id && this.pending.get(msg.id)
       if (!waiter) return
       this.pending.delete(msg.id)
       if (msg.error) waiter.reject(new Error(JSON.stringify(msg.error)))
       else waiter.resolve(msg.result)
     }
+  }
+  on(method, listener) {
+    this.listeners.set(method, [...(this.listeners.get(method) ?? []), listener])
   }
   send(method, params = {}, sessionId) {
     const id = ++this.id
@@ -369,4 +374,14 @@ export async function checkCall(failures, browsers, labels, { seconds, wantPaths
       console.error(`${label} peer connections: ${JSON.stringify(a.pcs)}`)
     }
   }
+}
+
+// Collects what a page and its workers warn about, for a failing test to show.
+export async function consoleOf(browser) {
+  const lines = []
+  browser.cdp.on('Runtime.consoleAPICalled', ({ type, args }) => {
+    if (type === 'warning' || type === 'error') lines.push(`${type}: ${args.map((arg) => arg.value ?? arg.description ?? '').join(' ')}`)
+  })
+  await browser.cdp.send('Runtime.enable', {}, browser.sessionId)
+  return lines
 }

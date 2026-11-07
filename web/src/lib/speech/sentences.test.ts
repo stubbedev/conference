@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { endsSentence, Sentences } from './sentences.ts'
+import { endsSentence, MAX_HELD_CHARS, Sentences } from './sentences.ts'
 
 test('a sentence ends at its full stop, question or exclamation mark, quotes and brackets after it', () => {
   for (const text of ['Yes.', 'Really?', 'Stop!', 'Wait…', 'He said "no."', '(See above.)', '終わり。']) {
@@ -40,4 +40,14 @@ test('silence that was transcribed as nothing changes nothing', () => {
   assert.equal(sentences.partial(''), null)
   sentences.utterance('half')
   assert.deepEqual(sentences.utterance(''), { seq: 0, text: 'half', final: false })
+})
+
+test('a talker who never pauses at a full stop is cut once the held line grows long', () => {
+  const sentences = new Sentences()
+  const words = 'and then we '
+  let line = sentences.utterance(words)
+  while (line && !line.final) line = sentences.utterance(words)
+  assert.ok(line && line.final && line.text.length >= MAX_HELD_CHARS)
+  assert.ok(line.text.length < MAX_HELD_CHARS + words.length)
+  assert.equal(sentences.holding, false)
 })

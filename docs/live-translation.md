@@ -234,17 +234,28 @@ machine.
   does not end it: the fragment is shown and held until the sentence
   ends with its full stop, question or exclamation mark, or until 1.5 s
   pass with nothing more said, so it is translated whole.
-- **One translator per language.** Each browser says how well it can
+- **The languages are shared out.** Each browser says how well it can
   translate: with the language model, with an encoder-decoder model, or
-  not at all. For each language, the member who translates best
+  not at all. The room's languages are handed out one at a time, in the
+  same order in every browser, each to the member at the best level
+  there is who has the fewest languages so far - a member who speaks it
+  before one who does not, then the lowest member id. That member
   translates every sentence into it and shares the translation, sealed
-  like everything else - a member who speaks that language before one
-  who does not, then the lowest member id. So one member with a good GPU
-  translates with the language model for a room of phones, and a
-  listener whose browser cannot translate at all still gets every
-  sentence. A translation is accepted only from the member every browser
-  agrees on; a browser that waited 5 s for one translates the sentence
-  itself as well as it can, and one that cannot shows it as it was said.
+  like everything else. So two members with good GPUs split a room of
+  six languages between them, one member with the language model serves
+  a room of phones on its own, and a listener whose browser cannot
+  translate at all still gets every sentence; a member with the language
+  model is never passed over for one without it. While a member's
+  models load the browsers can briefly disagree on who translates what,
+  so a translation into a language is taken from whichever member sends
+  it first (the relay checks that it comes from the member it names). A
+  browser that has had a sentence, interim or final, for 5 s without any
+  translation of it takes that sentence over and translates every
+  version of it itself as well as it can, and one that cannot shows it
+  as it was said; a translator that goes quiet before a sentence's final
+  version is covered the same way. A sentence held for its full stop is
+  also let go once it reaches 160 characters, so someone who never pauses
+  still gets their sentences finished, translated and spoken.
 - **Keeping up.** A browser loads its models when live translation
   starts, not when the first sentence arrives, asks for persistent
   storage, refuses with the size when the models will not fit, and shows

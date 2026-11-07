@@ -1,3 +1,5 @@
+export const MAX_HELD_CHARS = 160
+
 const SENTENCE_END = /[.!?…。！？][\p{Pe}\p{Pf}"']*\s*$/u
 
 export function endsSentence(text: string): boolean {
@@ -31,7 +33,7 @@ export class Sentences {
     const line = joined(this.held, text.trim())
     if (!line) return null
 
-    if (!endsSentence(line)) {
+    if (!endsSentence(line) && line.length < MAX_HELD_CHARS) {
       this.held = line
       return { seq: this.seq, text: line, final: false }
     }

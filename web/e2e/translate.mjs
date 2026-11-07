@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { createRoom, evalJs, findChrome, freePort, joinRoom, launchChrome, sleep, stopProcess, waitFor } from './browser.mjs'
+import { consoleOf, createRoom, evalJs, findChrome, freePort, joinRoom, launchChrome, sleep, stopProcess, waitFor } from './browser.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const chrome = process.env.CHROME ?? findChrome()
@@ -112,6 +112,8 @@ const translationAudio = `[...document.querySelectorAll('audio')]
   .filter((a) => !a.closest('.hud-tile'))
   .map((a) => ({ tracks: a.srcObject?.getAudioTracks().filter((t) => t.readyState === 'live').length ?? 0, paused: a.paused }))`
 
+const consoles = {}
+
 async function main() {
   const base = await startServer(buildServer())
   const room = await createRoom(base, 'translate-e2e')
@@ -122,6 +124,8 @@ async function main() {
   procs.push(host.proc, guest.proc)
   await preset(host, 'en', 'Hana')
   await preset(guest, 'de', 'Gerd')
+  consoles.host = await consoleOf(host)
+  consoles.guest = await consoleOf(guest)
 
   await joinRoom(host, room.privUrl)
   await joinRoom(guest, room.url)
@@ -150,7 +154,8 @@ async function main() {
   check('host subtitles', hostSees.ok, `no English subtitle on the guest's tile: ${JSON.stringify(hostSees.value)}`)
 
   const voice = await waitFor(guest, translationAudio, (list) => list?.some((a) => a.tracks > 0 && !a.paused), TIMEOUT_MS)
-  check('guest voice', voice.ok, `no playing translated-voice track: ${JSON.stringify(voice.value)}`)
+  const guestHeader = voice.ok ? '' : await evalJs(guest, `document.querySelector('header')?.innerText ?? ''`)
+  check('guest voice', voice.ok, `no playing translated-voice track: ${JSON.stringify(voice.value)}; the guest's header reads ${JSON.stringify(guestHeader)}`)
 
   const muted = await waitFor(guest, tileState('Hana'), (tile) => tile?.volume === 0, 5_000)
   check('guest muting', muted.ok, `the host's own voice is not muted for the guest: ${JSON.stringify(muted.value)}`)
@@ -182,6 +187,7 @@ try {
   rmSync(dir, { recursive: true, force: true })
 }
 if (failures.length) {
+  for (const [name, lines] of Object.entries(consoles)) for (const line of lines) console.error(`${name} ${line}`)
   console.error('\nTRANSLATE E2E FAILED')
   for (const f of failures) console.error('  - ' + f)
   code = 1
