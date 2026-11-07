@@ -160,6 +160,62 @@ func mediaAddrs(listen []net.Addr, externalIPs []netip.Addr) []relay.MediaAddr {
 	return out
 }
 
+const (
+	opusFmtp        = "minptime=10;useinbandfec=1;maxaveragebitrate=64000"
+	opusClockRate   = 48_000
+	opusChannels    = 2
+	opusPayloadType = 111
+	vp8PayloadType  = 96
+	rtxPayloadType  = 97
+)
+
+// registerCodecs offers exactly what end-to-end encryption can carry:
+// the encryption worker leaves the VP8 payload descriptor and the Opus TOC
+// byte in the clear, so any other codec would arrive undecodable.
+func registerCodecs(mediaEngine *webrtc.MediaEngine) error {
+	videoFeedback := []webrtc.RTCPFeedback{
+		{Type: "goog-remb", Parameter: ""},
+		{Type: "ccm", Parameter: "fir"},
+		{Type: "nack", Parameter: ""},
+		{Type: "nack", Parameter: "pli"},
+	}
+	codecs := []struct {
+		params webrtc.RTPCodecParameters
+		kind   webrtc.RTPCodecType
+	}{
+		{codec(webrtc.MimeTypeOpus, opusClockRate, opusChannels, opusFmtp, nil, opusPayloadType), webrtc.RTPCodecTypeAudio},
+		{codec(webrtc.MimeTypeVP8, videoClockRate, 0, "", videoFeedback, vp8PayloadType), webrtc.RTPCodecTypeVideo},
+		{codec(webrtc.MimeTypeRTX, videoClockRate, 0, fmt.Sprintf("apt=%d", vp8PayloadType), nil, rtxPayloadType), webrtc.RTPCodecTypeVideo},
+	}
+
+	for _, each := range codecs {
+		err := mediaEngine.RegisterCodec(each.params, each.kind)
+		if err != nil {
+			return fmt.Errorf("sfu: register codec %s: %w", each.params.MimeType, err)
+		}
+	}
+
+	return nil
+}
+
+func codec(
+	mime string,
+	clockRate uint32,
+	channels uint16,
+	fmtp string,
+	feedback []webrtc.RTCPFeedback,
+	payloadType webrtc.PayloadType,
+) webrtc.RTPCodecParameters {
+	return webrtc.RTPCodecParameters{
+		MimeType:     mime,
+		ClockRate:    clockRate,
+		Channels:     channels,
+		SDPFmtpLine:  fmtp,
+		RTCPFeedback: feedback,
+		PayloadType:  payloadType,
+	}
+}
+
 // newMediaEngine registers the codecs and header extensions negotiated
 // on every peer connection. Transport-wide congestion control is
 // deliberately absent: bandwidth is controlled via REMB, which this
@@ -167,9 +223,9 @@ func mediaAddrs(listen []net.Addr, externalIPs []netip.Addr) []relay.MediaAddr {
 func newMediaEngine() (*webrtc.MediaEngine, error) {
 	mediaEngine := &webrtc.MediaEngine{}
 
-	err := mediaEngine.RegisterDefaultCodecs()
+	err := registerCodecs(mediaEngine)
 	if err != nil {
-		return nil, fmt.Errorf("sfu: register codecs: %w", err)
+		return nil, err
 	}
 
 	extensions := []struct {
