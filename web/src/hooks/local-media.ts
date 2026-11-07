@@ -138,30 +138,6 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     [updateDevicePrefs],
   )
 
-  const cameraTrackFor = useCallback(
-    (raw: MediaStreamTrack, blur: boolean): MediaStreamTrack => {
-      if (!blur) {
-        blurPipelineRef.current?.stop()
-        blurPipelineRef.current = null
-
-        return raw
-      }
-
-      try {
-        const pipeline = blurPipelineRef.current ?? startBlur(raw, { onUnavailable: blurFailed })
-        blurPipelineRef.current = pipeline
-        pipeline.rewire(raw)
-
-        return pipeline.track
-      } catch (err) {
-        blurFailed(err)
-
-        return raw
-      }
-    },
-    [blurFailed],
-  )
-
   const publishCamera = useCallback(
     async (outbound: MediaStreamTrack) => {
       const current = localStreamRef.current
@@ -179,6 +155,39 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       clientRef.current?.setTrackEnabled('cam', controlsRef.current.cam)
     },
     [clientRef, controlsRef],
+  )
+
+  const blurDied = useCallback(
+    (err: unknown) => {
+      blurFailed(err)
+      const raw = rawCamRef.current
+      if (raw) void publishCamera(raw)
+    },
+    [blurFailed, publishCamera],
+  )
+
+  const cameraTrackFor = useCallback(
+    (raw: MediaStreamTrack, blur: boolean): MediaStreamTrack => {
+      if (!blur) {
+        blurPipelineRef.current?.stop()
+        blurPipelineRef.current = null
+
+        return raw
+      }
+
+      try {
+        const pipeline = blurPipelineRef.current ?? startBlur(raw, { onUnavailable: blurDied })
+        blurPipelineRef.current = pipeline
+        pipeline.rewire(raw)
+
+        return pipeline.track
+      } catch (err) {
+        blurFailed(err)
+
+        return raw
+      }
+    },
+    [blurFailed, blurDied],
   )
 
   const toggleBlur = useCallback(async () => {

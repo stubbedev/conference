@@ -330,6 +330,27 @@ async function checkJoinWithoutMedia(failures, dir, base) {
   }
 }
 
+const countPreviewFrames = `(() => {
+  const track = document.querySelector('video').srcObject.getVideoTracks()[0].clone()
+  const reader = new MediaStreamTrackProcessor({ track }).readable.getReader()
+  window.__previewFrames = 0
+  void (async () => {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) return
+      value.close()
+      window.__previewFrames++
+    }
+  })()
+  return true
+})()`
+
+async function previewFps(browser, seconds) {
+  const before = await evalJs(browser, 'window.__previewFrames')
+  await sleep(seconds * 1000)
+  return ((await evalJs(browser, 'window.__previewFrames')) - before) / seconds
+}
+
 async function checkBackgroundBlur(failures, dir, base) {
   const camera = join(dir, 'blur-camera.y4m')
   writeNoiseVideo(camera)
@@ -356,6 +377,19 @@ async function checkBackgroundBlur(failures, dir, base) {
 
     const composited = await evalJs(browser, previewCameraLabel)
     check(failures, 'blur', composited !== cameraLabel, `the preview still carries the raw camera (${composited})`)
+
+    await evalJs(browser, countPreviewFrames)
+    const visibleFps = await previewFps(browser, 3)
+    const show = await hideTab(browser)
+    const hiddenFps = await previewFps(browser, 4)
+    await show()
+    console.log(`blur: ${visibleFps.toFixed(1)} fps visible, ${hiddenFps.toFixed(1)} fps hidden`)
+    check(
+      failures,
+      'blur',
+      hiddenFps >= HIDDEN_RECORDING_MIN_FPS && hiddenFps >= visibleFps / 2,
+      `the blurred camera stalls in a hidden tab (${hiddenFps.toFixed(1)} fps hidden against ${visibleFps.toFixed(1)} visible)`,
+    )
 
     const errors = await evalJs(browser, 'window.__errors')
     check(failures, 'blur', errors.length === 0, `blur page errors: ${errors.join(' | ')}`)
