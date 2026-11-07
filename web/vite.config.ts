@@ -64,6 +64,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': backend,
+      '/speech': backend,
       '/ws': { target: backend.replace(/^http/, 'ws'), ws: true },
     },
   },
