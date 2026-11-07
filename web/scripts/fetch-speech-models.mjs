@@ -435,6 +435,20 @@ async function downloadAll(files) {
   await Promise.all(workers)
 }
 
+async function warnUntranslatable(dir, model, languages, pairs) {
+  const config = JSON.parse(await readFile(path.join(dir, ...model.split('/'), 'config.json'), 'utf8'))
+  if (config.model_type !== 'm2m_100') return
+
+  const tokenizer = await readFile(path.join(dir, ...model.split('/'), 'tokenizer.json'), 'utf8')
+  const missing = languages.filter((code) => !tokenizer.includes(`"__${code}__"`))
+  for (const code of missing) {
+    const covered = Object.keys(pairs).filter((pair) => pair.split('-').includes(code))
+    console.warn(
+      `warning: ${model} cannot translate ${code}${covered.length ? `, except with the pairs ${covered.join(', ')}` : ''}; --mt-kind=llm translates it`,
+    )
+  }
+}
+
 async function main() {
   const { dir, languages: asked, asr, fallback, mt, pairs: pairDtype, builtin } = parseArgs(process.argv.slice(2))
   const languages = await languageCodes(asked)
@@ -476,6 +490,8 @@ async function main() {
   process.stderr.write(`${unique.length} files, ${(total / 1e6).toFixed(0)} MB, into ${dir}\n`)
 
   await downloadAll(unique)
+
+  if (mt.kind === 'seq2seq') await warnUntranslatable(dir, mt.model, languages, pairs)
 
   const models = {
     asr: {
