@@ -61,7 +61,7 @@ export class Silero {
 
   /** Loads the model at url, which the server serves itself. */
   static async load(url: string): Promise<Silero> {
-    configureOrt()
+    configureOrt('detector')
 
     let session: ort.InferenceSession
     try {

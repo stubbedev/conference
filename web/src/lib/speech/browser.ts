@@ -112,10 +112,12 @@ class BrowserEngines implements Engines {
       return { transcribes: false, translates: 'none', problems: [room] }
     }
 
-    const vad = await settle(this.load('vad', { base: VAD_BASE }))
-    const asr = await settle(this.load('asr', { base: this.models.base, asr: this.models.asr, lang }))
-    const mt = await settle(this.load('mt', { base: this.models.base, mt: this.models.mt }))
-    const tts = await settle(this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(null))
+    const [vad, asr, mt, tts] = await Promise.all([
+      settle(this.load('vad', { base: VAD_BASE })),
+      settle(this.load('asr', { base: this.models.base, asr: this.models.asr, lang })),
+      settle(this.load('mt', { base: this.models.base, mt: this.models.mt })),
+      settle(this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(null)),
+    ])
     this.preparing = false
     this.publishLoading()
 

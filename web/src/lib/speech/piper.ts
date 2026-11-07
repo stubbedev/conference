@@ -154,7 +154,7 @@ async function download(url: string): Promise<Uint8Array> {
 
 /** Starts url on the GPU, or on the CPU when this browser's GPU refuses it. */
 async function session(url: string, model: Uint8Array): Promise<ort.InferenceSession> {
-  configureOrt()
+  configureOrt('model')
 
   let refusal: string
   try {

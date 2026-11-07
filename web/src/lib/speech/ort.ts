@@ -1,13 +1,13 @@
 import * as ort from 'onnxruntime-web'
 
-import { configureWasm } from './wasm'
+import { configureOnnx, type ThreadUse } from './wasm'
 
 let configured = false
 
-export function configureOrt(): void {
+export function configureOrt(use: ThreadUse): void {
   if (configured) return
   configured = true
-  configureWasm(ort.env.wasm)
+  configureOnnx(ort.env, use)
 }
 
 export { ort }

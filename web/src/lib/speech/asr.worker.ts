@@ -7,10 +7,15 @@ import { asrExport, exportKey, type AsrChoice, type AsrTier, type Export } from 
 import { toFloat32 } from './pcm'
 import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
 import { serve } from './serve'
+import { RATE } from './vad'
 import { webgpuAvailable, webgpuHalves } from './webgpu'
 
+const TOKENS_PER_SECOND = 10
+const TOKEN_SLACK = 10
+const WARM_UP_SECONDS = 1
+
 interface Transcriber {
-  (audio: Float32Array, options: { language: string; task: 'transcribe' }): Promise<{ text: string }>
+  (audio: Float32Array, options: { language: string; task: 'transcribe'; max_new_tokens: number }): Promise<{ text: string }>
   dispose(): Promise<void>
 }
 
@@ -56,7 +61,13 @@ async function transcriberFor(lang: string): Promise<Transcriber> {
   await previous?.transcriber.dispose()
 
   loaded = await load(lang)
+  await run(loaded.transcriber, new Float32Array(RATE * WARM_UP_SECONDS), lang)
   return loaded.transcriber
+}
+
+function run(transcriber: Transcriber, audio: Float32Array, lang: string): Promise<{ text: string }> {
+  const seconds = audio.length / RATE
+  return transcriber(audio, { language: lang, task: 'transcribe', max_new_tokens: Math.ceil(seconds * TOKENS_PER_SECOND) + TOKEN_SLACK })
 }
 
 async function load(lang: string): Promise<Loaded> {
@@ -94,7 +105,7 @@ serve(async (request) => {
 
     case 'transcribe': {
       const transcriber = await transcriberFor(lang)
-      const { text } = await transcriber(toFloat32(request.audio as Int16Array), { language: lang, task: 'transcribe' })
+      const { text } = await run(transcriber, toFloat32(request.audio as Int16Array), lang)
       return [{ text }]
     }
 
