@@ -2,8 +2,8 @@ import { pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers } from './hf'
-import { reportLoading } from './loading'
-import { asrExport, type AsrChoice, type AsrTier, type Export } from './models'
+import { expectLoading, reportLoading } from './loading'
+import { asrExport, exportKey, type AsrChoice, type AsrTier, type Export } from './models'
 import { toFloat32 } from './pcm'
 import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
 import { serve } from './serve'
@@ -61,6 +61,7 @@ async function transcriberFor(lang: string): Promise<Transcriber> {
 
 async function load(lang: string): Promise<Loaded> {
   const wanted = exportFor(lang)
+  expectLoading(exportKey(wanted))
   try {
     const transcriber = await pipeline('automatic-speech-recognition', wanted.model, {
       device,

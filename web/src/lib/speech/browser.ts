@@ -11,6 +11,7 @@ type Purpose = 'vad' | 'asr' | 'mt' | 'tts'
 const VAD_BASE = '/vad/'
 const MODEL_CACHE = 'transformers-cache'
 const MEGABYTE = 1e6
+const LOADING_REPORT_MS = 250
 
 interface TextReply extends WorkerReply {
   text: string
@@ -67,6 +68,13 @@ function megabytes(bytes: number): string {
   return `${Math.round(bytes / MEGABYTE)} MB`
 }
 
+function settle<T>(pending: Promise<T>): Promise<PromiseSettledResult<T>> {
+  return pending.then(
+    (value) => ({ status: 'fulfilled', value }),
+    (reason: unknown) => ({ status: 'rejected', reason }),
+  )
+}
+
 function reason(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
@@ -79,6 +87,8 @@ class BrowserEngines implements Engines {
   private readonly channels = new Map<Purpose, Channel>()
   private readonly loading = new Map<Purpose, Promise<WorkerReply>>()
   private readonly files = new Map<string, Loading>()
+  private readonly expected = new Set<string>()
+  private loadingReport: ReturnType<typeof setTimeout> | null = null
   private readonly builtin = new BuiltinTranslators()
   private onLoading: (loading: Loading | null) => void = () => {}
   private segments: SegmenterEvents | null = null
@@ -94,13 +104,14 @@ class BrowserEngines implements Engines {
     const room = await this.storageProblem(lang)
     if (room) return { transcribes: false, translates: 'none', problems: [room] }
 
-    const [vad, asr, mt, tts] = await Promise.allSettled([
-      this.load('vad', { base: VAD_BASE }),
-      this.load('asr', { base: this.models.base, asr: this.models.asr, lang }),
-      this.load('mt', { base: this.models.base, mt: this.models.mt }),
-      this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(null),
-    ])
+    const vad = await settle(this.load('vad', { base: VAD_BASE }))
+    const asr = await settle(this.load('asr', { base: this.models.base, asr: this.models.asr, lang }))
+    const mt = await settle(this.load('mt', { base: this.models.base, mt: this.models.mt }))
+    const tts = await settle(this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(null))
+    if (this.loadingReport) clearTimeout(this.loadingReport)
+    this.loadingReport = null
     this.files.clear()
+    this.expected.clear()
     this.onLoading(null)
 
     const problems = [vad, asr, mt, tts].flatMap((result) => (result.status === 'rejected' ? [reason(result.reason)] : []))
@@ -206,9 +217,13 @@ class BrowserEngines implements Engines {
 
   private event(event: WorkerEvent): void {
     switch (event.event) {
+      case 'expect':
+        this.expected.add(String(event.key))
+        this.reportLoading()
+        return
       case 'loading':
         this.files.set(String(event.file), { loaded: Number(event.loaded), total: Number(event.total) })
-        this.onLoading(this.total())
+        this.reportLoading()
         return
       case 'segment':
         this.segments?.onSegment({ kind: event.kind === 'partial' ? 'partial' : 'utterance', audio: event.audio as Int16Array })
@@ -219,14 +234,23 @@ class BrowserEngines implements Engines {
     }
   }
 
+  private reportLoading(): void {
+    this.loadingReport ??= setTimeout(() => {
+      this.loadingReport = null
+      this.onLoading(this.total())
+    }, LOADING_REPORT_MS)
+  }
+
   private total(): Loading {
     let loaded = 0
-    let total = 0
+    let started = 0
     for (const file of this.files.values()) {
       loaded += file.loaded
-      total += file.total
+      started += file.total
     }
-    return { loaded, total }
+    let expected = 0
+    for (const key of this.expected) expected += this.models.sizes[key] ?? 0
+    return { loaded, total: Math.max(started, expected) }
   }
 
   private channel(purpose: Purpose): Channel {

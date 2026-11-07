@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { asrExport, bytesFor, pairFor, renderPrompt, type SpeechModels } from './models.ts'
+import { asrExport, bytesFor, exportKey, pairFor, renderPrompt, type SpeechModels } from './models.ts'
 
 const models: SpeechModels = {
   base: '/speech/',
@@ -14,9 +14,9 @@ const models: SpeechModels = {
   mt: { kind: 'llm', model: 'onnx-community/Qwen3-1.7B-ONNX', dtype: 'q4f16', pairs: { 'en-de': { model: 'Xenova/opus-mt-en-de', dtype: 'q4f16' } } },
   voices: { en: 'en_US-joe-medium' },
   sizes: {
-    'onnx-community/whisper-large-v3-turbo': 500,
-    'owner/danish': 400,
-    'onnx-community/Qwen3-1.7B-ONNX': 1400,
+    'onnx-community/whisper-large-v3-turbo:q4f16': 500,
+    'owner/danish:q4f16': 400,
+    'onnx-community/Qwen3-1.7B-ONNX:q4f16': 1400,
     'piper/en_US-joe-medium': 60,
   },
   prompt: {
@@ -57,4 +57,8 @@ test('the prompt is put together exactly as the server puts it together', () => 
       ' Earlier sentences, for context only: two. three.',
   )
   assert.equal(renderPrompt(prompt, de, en, []), 'You translate spoken German into natural spoken English. Use these term translations: Kontainer = Kontainer.')
+})
+
+test('an export is named by its model and dtype, as the server names it in sizes', () => {
+  assert.equal(exportKey({ model: 'Xenova/m2m100_418M', dtype: 'q8' }), 'Xenova/m2m100_418M:q8')
 })

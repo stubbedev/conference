@@ -51,6 +51,10 @@ export function pairFor(mt: MtChoice, source: string, target: string): Export | 
   return mt.pairs?.[`${source}-${target}`] ?? null
 }
 
+export function exportKey(wanted: Export): string {
+  return `${wanted.model}:${wanted.dtype}`
+}
+
 export function voiceKey(voice: string): string {
   return `piper/${voice}`
 }
@@ -58,7 +62,7 @@ export function voiceKey(voice: string): string {
 export function bytesFor(models: SpeechModels, lang: string): number {
   const asr = asrExport(models.asr, 'primary', lang)
   const voice = models.voices[lang]
-  const keys = [asr?.model, models.mt.model, voice === undefined ? undefined : voiceKey(voice)]
+  const keys = [asr ? exportKey(asr) : undefined, exportKey(models.mt), voice === undefined ? undefined : voiceKey(voice)]
   return keys.reduce((total, key) => total + (key === undefined ? 0 : (models.sizes[key] ?? 0)), 0)
 }
 

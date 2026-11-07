@@ -2,8 +2,8 @@ import { pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers } from './hf'
-import { reportLoading } from './loading'
-import { pairFor, type Export, type MtChoice } from './models'
+import { expectLoading, reportLoading } from './loading'
+import { exportKey, pairFor, type Export, type MtChoice } from './models'
 import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
 import { serve } from './serve'
 import type { TranslationLevel } from '../translate/types'
@@ -67,6 +67,7 @@ async function load(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
   }
 
   const dtype = dtypeFor(device, wanted.dtype) as DataType
+  expectLoading(exportKey({ model: wanted.model, dtype }))
   try {
     if (kind === 'llm') {
       const run = await pipeline('text-generation', wanted.model, { device, dtype, progress_callback: reportLoading })

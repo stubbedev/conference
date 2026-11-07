@@ -313,30 +313,49 @@ func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes 
 	what := fmt.Sprintf("%s %q", purpose, export.Model)
 	root := filepath.Join(dir, filepath.FromSlash(export.Model))
 
-	size, err := metadataSize(root, what)
+	metadata, err := metadataSize(root, what)
 	if err != nil {
 		return err
 	}
 
-	for _, name := range exportFiles(kind, suffix) {
+	onnx, err := exportBytes(root, exportFiles(kind, suffix), what)
+	if err != nil {
+		return err
+	}
+
+	sizes[exportKey(export.Model, export.Dtype)] = metadata + onnx
+
+	if !cpu || export.Dtype == cpuDtype {
+		return nil
+	}
+
+	onnx, err = exportBytes(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
+	if err != nil {
+		return err
+	}
+
+	sizes[exportKey(export.Model, cpuDtype)] = metadata + onnx
+
+	return nil
+}
+
+func exportKey(model, dtype string) string {
+	return model + ":" + dtype
+}
+
+func exportBytes(root string, names []string, what string) (int64, error) {
+	var size int64
+
+	for _, name := range names {
 		bytes, err := exportSize(root, name, what)
 		if err != nil {
-			return err
+			return 0, err
 		}
 
 		size += bytes
 	}
 
-	if cpu && export.Dtype != cpuDtype {
-		err = checkFiles(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
-		if err != nil {
-			return err
-		}
-	}
-
-	sizes[export.Model] = size
-
-	return nil
+	return size, nil
 }
 
 func checkModelID(purpose, model string) error {
@@ -348,17 +367,6 @@ func checkModelID(purpose, model string) error {
 	for _, part := range parts {
 		if part == "" || part == "." || part == ".." {
 			return fmt.Errorf("%s %q %w", purpose, model, errModelsDir)
-		}
-	}
-
-	return nil
-}
-
-func checkFiles(root string, names []string, what string) error {
-	for _, name := range names {
-		_, err := fileSize(filepath.Join(root, filepath.FromSlash(name)), what)
-		if err != nil {
-			return err
 		}
 	}
 

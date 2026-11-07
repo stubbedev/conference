@@ -366,11 +366,13 @@ func TestBrowserRuntimeReportsWhatEachModelWeighs(t *testing.T) {
 	}
 
 	want := map[string]int64{
-		asrModel:                     int64(len("{}") + len("[]") + 2*len("onnx") + len("weights")),
-		danish:                       int64(len("{}") + 2*len("onnx")),
-		mtModel:                      int64(len("{}") + 2*len("onnx")),
-		piperDir + "/" + voiceLessac: int64(2 * len("{}")),
-		piperDir + "/" + voiceDanish: int64(2 * len("{}")),
+		exportKey(asrModel, halvesDtype): int64(len("{}") + len("[]") + 2*len("onnx") + len("weights")),
+		exportKey(asrModel, cpuDtype):    int64(len("{}") + len("[]") + 2*len("onnx")),
+		exportKey(danish, halvesDtype):   int64(len("{}") + 2*len("onnx")),
+		exportKey(mtModel, "q4"):         int64(len("{}") + 2*len("onnx")),
+		exportKey(mtModel, cpuDtype):     int64(len("{}") + 2*len("onnx")),
+		piperDir + "/" + voiceLessac:     int64(2 * len("{}")),
+		piperDir + "/" + voiceDanish:     int64(2 * len("{}")),
 	}
 
 	for model, size := range want {
@@ -503,7 +505,7 @@ func TestBrowserRuntimeChecksTheTranslationFallback(t *testing.T) {
 	writeModel(t, dir, mtModel, kindSeq2Seq, "q4", cpuDtype)
 
 	status = browserStatus(t, dir, choices)
-	if !status.Available || status.Models.Sizes[mtModel] == 0 {
+	if !status.Available || status.Models.Sizes[exportKey(mtModel, "q4")] == 0 {
 		t.Fatalf("available %v reason %q sizes %v, want the fallback weighed", status.Available, status.Reason, status.Models.Sizes)
 	}
 

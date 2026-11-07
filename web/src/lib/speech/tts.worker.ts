@@ -3,6 +3,8 @@
 // language the server has no voice for is an error naming the language,
 // not a silence the member has to guess about.
 
+import { expectLoading } from './loading'
+import { voiceKey } from './models'
 import { Piper } from './piper'
 import { serve } from './serve'
 import { isVoiceChoice, type VoiceChoice } from '../translate/types'
@@ -16,7 +18,10 @@ serve(async (request) => {
       voices = (request.voices ?? {}) as Record<string, string>
       piper ??= new Piper(String(request.base))
       const voice = voices[String(request.lang)]
-      if (voice) await piper.prepare(voice)
+      if (voice) {
+        expectLoading(voiceKey(voice))
+        await piper.prepare(voice)
+      }
       return
     }
 

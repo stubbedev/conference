@@ -5,9 +5,11 @@ export const WASM_PATHS = {
 
 const MAX_THREADS = 4
 
+const WORKERS = 4
+
 export function wasmThreads(isolated: boolean, cores: number): number {
   if (!isolated) return 1
-  return Math.max(1, Math.min(MAX_THREADS, Math.floor(cores / 2)))
+  return Math.max(1, Math.min(MAX_THREADS, Math.floor(cores / WORKERS)))
 }
 
 interface WasmFlags {
