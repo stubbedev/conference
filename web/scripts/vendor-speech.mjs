@@ -4,9 +4,9 @@
 // @diffusionstudio/piper-wasm, and the Silero voice detection model from
 // the project that publishes it. No CDN is involved at call time.
 //
-// Only the two backends the app asks for are copied: the wasm one, which
-// runs a voice or a filter model, and the jsep one, which is WebGPU. Each
-// needs its .mjs loader and the .wasm beside it. The phonemizer's .data
+// Only the build the app's ONNX Runtime (onnxruntime-web/webgpu) loads is
+// copied: the asyncify one, which runs a model on WebGPU or on the CPU.
+// It needs its .mjs loader and the .wasm beside it. The phonemizer's .data
 // file holds the eSpeak-NG language data and is served as it is.
 
 import { createHash } from 'node:crypto'
@@ -20,7 +20,7 @@ const VAD_OUT = path.join(ROOT, 'public', 'vad')
 const ORT_PACKAGE = path.join(ROOT, 'node_modules', 'onnxruntime-web', 'dist')
 const PIPER_PACKAGE = path.join(ROOT, 'node_modules', '@diffusionstudio', 'piper-wasm', 'build')
 
-const ORT_FILES = ['ort-wasm-simd-threaded.jsep.mjs', 'ort-wasm-simd-threaded.jsep.wasm']
+const ORT_FILES = ['ort-wasm-simd-threaded.asyncify.mjs', 'ort-wasm-simd-threaded.asyncify.wasm']
 
 const PIPER_FILES = ['piper_phonemize.js', 'piper_phonemize.wasm', 'piper_phonemize.data']
 

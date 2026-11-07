@@ -1,6 +1,6 @@
 export const WASM_PATHS = {
-  mjs: '/ort/ort-wasm-simd-threaded.jsep.mjs',
-  wasm: '/ort/ort-wasm-simd-threaded.jsep.wasm',
+  mjs: '/ort/ort-wasm-simd-threaded.asyncify.mjs',
+  wasm: '/ort/ort-wasm-simd-threaded.asyncify.wasm',
 }
 
 const MAX_THREADS = 4
