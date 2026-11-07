@@ -55,8 +55,12 @@ export interface TranslationLine {
 
 export type RoomMessage = RoomCaption | TranslationLine
 
+export const TRANSLATION_LEVELS = ['none', 'plain', 'prompted'] as const
+
+export type TranslationLevel = (typeof TRANSLATION_LEVELS)[number]
+
 export interface LangAnnouncement extends LangPrefs {
-  translates: boolean
+  translates: TranslationLevel
 }
 
 export interface Loading {
@@ -103,5 +107,6 @@ export function isLangPrefs(value: unknown): value is LangPrefs {
 
 export function announcement(value: unknown): LangAnnouncement | null {
   if (!isLangPrefs(value)) return null
-  return { ...value, translates: (value as { translates?: unknown }).translates === true }
+  const translates = (value as { translates?: unknown }).translates
+  return { ...value, translates: TRANSLATION_LEVELS.find((level) => level === translates) ?? 'none' }
 }

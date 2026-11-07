@@ -48,6 +48,7 @@ var (
 	errModelsPair     = errors.New("must be two different languages, source-target, e.g. en-de")
 	errVoiceName      = errors.New("must be a voice's name, letters, digits, dashes and dots")
 	errModelsTooLarge = errors.New("is larger than a browser can load as one file")
+	errModelsFallback = errors.New("is for a language model, which not every browser can run; an encoder-decoder model needs none")
 )
 
 func dtypeSuffixes() map[string]string {
@@ -95,13 +96,15 @@ type ASRChoice struct {
 	Fallback *ModelChoice `json:"fallback,omitempty"`
 }
 
-// MTChoice is the translation model, the pairs with one of their own, and the built-in translator.
+// MTChoice is the translation model, the encoder-decoder model a browser that cannot run a language model
+// translates with, the pairs with one of their own, and the built-in translator.
 type MTChoice struct {
-	Kind    Kind              `json:"kind"`
-	Model   string            `json:"model"`
-	Dtype   string            `json:"dtype"`
-	Pairs   map[string]Export `json:"pairs,omitempty"`
-	Builtin bool              `json:"builtin,omitempty"`
+	Kind     Kind              `json:"kind"`
+	Model    string            `json:"model"`
+	Dtype    string            `json:"dtype"`
+	Fallback *Export           `json:"fallback,omitempty"`
+	Pairs    map[string]Export `json:"pairs,omitempty"`
+	Builtin  bool              `json:"builtin,omitempty"`
 }
 
 // Models is what the browsers load, what it weighs, and the prompt a language model follows.
@@ -127,7 +130,7 @@ type modelFile struct {
 func noModels(problem string) Models {
 	return Models{
 		ASR:     ASRChoice{ModelChoice: ModelChoice{Model: "", Dtype: "", Languages: nil}, Fallback: nil},
-		MT:      MTChoice{Kind: "", Model: "", Dtype: "", Pairs: nil, Builtin: false},
+		MT:      MTChoice{Kind: "", Model: "", Dtype: "", Fallback: nil, Pairs: nil, Builtin: false},
 		Voices:  nil,
 		Sizes:   nil,
 		Prompt:  nil,
@@ -245,6 +248,17 @@ func checkTranslation(dir string, choice MTChoice, available languages, sizes ma
 		return err
 	}
 
+	if choice.Fallback != nil {
+		if choice.Kind != kindLLM {
+			return fmt.Errorf("mt fallback %w", errModelsFallback)
+		}
+
+		err = checkExport(dir, "mt.fallback", kindSeq2Seq, *choice.Fallback, true, sizes)
+		if err != nil {
+			return err
+		}
+	}
+
 	for _, pair := range slices.Sorted(maps.Keys(choice.Pairs)) {
 		err = checkPair(pair, available)
 		if err != nil {
@@ -313,41 +327,16 @@ func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes 
 		size += bytes
 	}
 
-	err = checkStandIns(root, what, kind, export.Dtype, cpu)
-	if err != nil {
-		return err
-	}
-
-	sizes[export.Model] = size
-
-	return nil
-}
-
-func checkStandIns(root, what string, kind Kind, dtype string, cpu bool) error {
-	suffixes := dtypeSuffixes()
-
-	if cpu && dtype != cpuDtype {
-		err := checkFiles(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
+	if cpu && export.Dtype != cpuDtype {
+		err = checkFiles(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
 		if err != nil {
 			return err
 		}
 	}
 
-	plain, halves := withoutHalves(dtype)
-	if kind != kindLLM || !halves {
-		return nil
-	}
+	sizes[export.Model] = size
 
-	return checkFiles(root, exportFiles(kind, suffixes[plain]), what+" on a GPU without shader-f16")
-}
-
-func withoutHalves(dtype string) (string, bool) {
-	plain, halves := map[string]string{"fp16": "fp32", "q4f16": "q4", "q2f16": "q2", "q1f16": "q1"}[dtype]
-	if !halves {
-		return dtype, false
-	}
-
-	return plain, true
+	return nil
 }
 
 func checkModelID(purpose, model string) error {

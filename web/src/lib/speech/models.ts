@@ -17,6 +17,7 @@ export type MtKind = 'seq2seq' | 'llm'
 
 export interface MtChoice extends Export {
   kind: MtKind
+  fallback?: Export
   pairs?: Record<string, Export>
   builtin?: boolean
 }

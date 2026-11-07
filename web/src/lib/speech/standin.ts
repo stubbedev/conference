@@ -89,7 +89,7 @@ export class StandInEngines implements Engines {
   private readonly ttsEngine = new StandInTts()
 
   async prepare(): Promise<Prepared> {
-    return { transcribes: true, translates: true, problems: [] }
+    return { transcribes: true, translates: 'plain', problems: [] }
   }
 
   async segmenter(events: SegmenterEvents): Promise<Segmenter> {

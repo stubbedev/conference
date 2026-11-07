@@ -1,4 +1,4 @@
-import type { Loading, VoiceChoice } from '../translate/types.ts'
+import type { Loading, TranslationLevel, VoiceChoice } from '../translate/types.ts'
 import type { Segment } from './vad.ts'
 
 export interface Voiced {
@@ -40,7 +40,7 @@ export interface SegmenterEvents {
 
 export interface Prepared {
   transcribes: boolean
-  translates: boolean
+  translates: TranslationLevel
   problems: string[]
 }
 

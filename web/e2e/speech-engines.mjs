@@ -85,7 +85,7 @@ const mtProbe = workerProbe(
   { mt: builtWorker('mt') },
   `
   const { ask } = workers.mt
-  await ask({ type: 'init', base: '/speech/', mt: ${JSON.stringify(chosen.mt)} })
+  const { level } = await ask({ type: 'init', base: '/speech/', mt: ${JSON.stringify(chosen.mt)} })
   const translated = {}
   for (const pair of ${JSON.stringify([...pairs.slice(0, 1), multilingual])}) {
     const [source, target] = pair.split('-')
@@ -93,7 +93,7 @@ const mtProbe = workerProbe(
     const { text } = await ask({ type: 'translate', text: ${JSON.stringify(TEXTS)}[source], source, target, system: ${JSON.stringify(Object.fromEntries(['en-de', 'de-da', 'da-de', 'en-da', 'de-en'].map((pair) => [pair, system(...pair.split('-'))])))}[pair] })
     translated[pair] = { text, ms: Math.round(performance.now() - started) }
   }
-  return { translated }
+  return { translated, level }
 `,
 )
 
@@ -118,6 +118,7 @@ async function main() {
     check('transcription reports its download', asr.loading > 0 || process.env.CACHED === '1', 'no loading events')
 
     const mt = await probe(browser, 'translation', mtProbe)
+    check('translation level', ['plain', 'prompted'].includes(mt.level), `level ${mt.level}`)
     for (const [pair, { text }] of Object.entries(mt.translated ?? {})) {
       const source = TEXTS[pair.split('-')[0]]
       check(`translation ${pair}`, typeof text === 'string' && text.length > 10 && text !== source, `translated ${JSON.stringify(text)}`)

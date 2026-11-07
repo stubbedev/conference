@@ -17,13 +17,16 @@
 //
 // A model a browser without a usable GPU runs comes with its 8-bit
 // export as well: the transcription fallback, or the transcription model
-// itself when there is none, and every encoder-decoder translation model.
+// itself when there is none, and every encoder-decoder translation model,
+// which is also what a language model falls back to (m2m100 unless
+// --mt-fallback says otherwise) on a browser that cannot run it.
 //
 // Usage: node scripts/fetch-speech-models.mjs <target dir> [options]
 //   --languages=en,de,da or all, the server's own list
 //   --asr=owner/model --asr-dtype=q4f16
 //   --asr-fallback=owner/model|none --asr-fallback-dtype=q4
 //   --mt-kind=seq2seq|llm --mt=owner/model --mt-dtype=q4f16
+//   --mt-fallback=owner/model|none, what a language model falls back to
 //   --pairs --pair-dtype=q4f16
 //   --builtin
 
@@ -90,9 +93,10 @@ const REPORT_BYTES = 64e6
 const USAGE =
   'usage: node scripts/fetch-speech-models.mjs <target dir> [--languages=en,de,da] [--asr=owner/model] [--asr-dtype=q4f16] ' +
   '[--asr-fallback=owner/model|none] [--asr-fallback-dtype=q4] [--mt-kind=seq2seq|llm] [--mt=owner/model] [--mt-dtype=q4f16] ' +
+  '[--mt-fallback=owner/model|none] ' +
   '[--pairs] [--pair-dtype=q4f16] [--builtin]'
 
-const VALUED = ['languages', 'asr', 'asr-dtype', 'asr-fallback', 'asr-fallback-dtype', 'mt-kind', 'mt', 'mt-dtype', 'pair-dtype']
+const VALUED = ['languages', 'asr', 'asr-dtype', 'asr-fallback', 'asr-fallback-dtype', 'mt-kind', 'mt', 'mt-dtype', 'mt-fallback', 'pair-dtype']
 const FLAGS = ['pairs', 'builtin']
 
 function parseArgs(argv) {
@@ -156,6 +160,10 @@ function parseArgs(argv) {
       kind,
       model: options.mt ?? MT_DEFAULTS[kind].model,
       dtype: options['mt-dtype'] ?? MT_DEFAULTS[kind].dtype,
+      fallback:
+        kind === 'llm' && options['mt-fallback'] !== 'none'
+          ? { model: options['mt-fallback'] ?? MT_DEFAULTS.seq2seq.model, dtype: MT_DEFAULTS.seq2seq.dtype }
+          : null,
     },
     pairs: options.pairs ? options['pair-dtype'] : null,
     builtin: options.builtin,
@@ -246,14 +254,8 @@ async function modelFiles(dir, model, kind, dtypes) {
   }))
 }
 
-const WITHOUT_HALVES = { fp16: 'fp32', q4f16: 'q4', q2f16: 'q2', q1f16: 'q1' }
-
 function exportsFor(dtype, cpu) {
   return cpu ? [dtype, CPU_DTYPE] : [dtype]
-}
-
-function languageModelExports(dtype) {
-  return [dtype, WITHOUT_HALVES[dtype] ?? dtype]
 }
 
 function moonshineCandidates(code) {
@@ -473,7 +475,7 @@ async function main() {
 
   const files = [
     ...(await modelFiles(dir, asr.model, 'seq2seq', exportsFor(asr.dtype, fallback === null))),
-    ...(await modelFiles(dir, mt.model, mt.kind, mt.kind === 'llm' ? languageModelExports(mt.dtype) : exportsFor(mt.dtype, true))),
+    ...(await modelFiles(dir, mt.model, mt.kind, exportsFor(mt.dtype, mt.kind === 'seq2seq'))),
   ]
 
   if (fallback) {
@@ -486,6 +488,8 @@ async function main() {
       files.push(...moonshine.files)
     }
   }
+
+  if (mt.fallback) files.push(...(await modelFiles(dir, mt.fallback.model, 'seq2seq', exportsFor(mt.fallback.dtype, true))))
 
   for (const model of Object.values(pairs)) files.push(...(await modelFiles(dir, model, 'seq2seq', exportsFor(pairDtype, true))))
 
@@ -506,7 +510,8 @@ async function main() {
 
   await downloadAll(unique)
 
-  if (mt.kind === 'seq2seq') await warnUntranslatable(dir, mt.model, languages, pairs)
+  const plain = mt.kind === 'seq2seq' ? mt.model : mt.fallback?.model
+  if (plain) await warnUntranslatable(dir, plain, languages, pairs)
 
   const models = {
     asr: {
@@ -518,6 +523,7 @@ async function main() {
       kind: mt.kind,
       model: mt.model,
       dtype: mt.dtype,
+      ...(mt.fallback ? { fallback: mt.fallback } : {}),
       ...(Object.keys(pairs).length > 0
         ? { pairs: Object.fromEntries(Object.entries(pairs).map(([pair, model]) => [pair, { model, dtype: pairDtype }])) }
         : {}),

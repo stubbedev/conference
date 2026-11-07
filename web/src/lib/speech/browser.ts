@@ -4,7 +4,7 @@ import { asrExport, bytesFor, renderPrompt, type SpeechModels } from '@/lib/spee
 import { Serial } from '@/lib/speech/serial'
 import { WorkerRpc, type WorkerEvent, type WorkerReply } from '@/lib/speech/worker'
 import { languageName, type Language } from '@/lib/translate/languages'
-import type { Loading, VoiceChoice } from '@/lib/translate/types'
+import type { Loading, TranslationLevel, VoiceChoice } from '@/lib/translate/types'
 
 type Purpose = 'vad' | 'asr' | 'mt' | 'tts'
 
@@ -19,6 +19,10 @@ interface TextReply extends WorkerReply {
 interface SpokenReply extends WorkerReply {
   pcm: Float32Array
   rate: number
+}
+
+interface LevelReply extends WorkerReply {
+  level: TranslationLevel
 }
 
 interface SteppedReply extends WorkerReply {
@@ -73,7 +77,7 @@ class BrowserEngines implements Engines {
   private readonly models: SpeechModels
   private readonly languages: readonly Language[]
   private readonly channels = new Map<Purpose, Channel>()
-  private readonly loading = new Map<Purpose, Promise<void>>()
+  private readonly loading = new Map<Purpose, Promise<WorkerReply>>()
   private readonly files = new Map<string, Loading>()
   private readonly builtin = new BuiltinTranslators()
   private onLoading: (loading: Loading | null) => void = () => {}
@@ -88,13 +92,13 @@ class BrowserEngines implements Engines {
   async prepare(lang: string, onLoading: (loading: Loading | null) => void): Promise<Prepared> {
     this.onLoading = onLoading
     const room = await this.storageProblem(lang)
-    if (room) return { transcribes: false, translates: false, problems: [room] }
+    if (room) return { transcribes: false, translates: 'none', problems: [room] }
 
     const [vad, asr, mt, tts] = await Promise.allSettled([
       this.load('vad', { base: VAD_BASE }),
       this.load('asr', { base: this.models.base, asr: this.models.asr, lang }),
       this.load('mt', { base: this.models.base, mt: this.models.mt }),
-      this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(),
+      this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(null),
     ])
     this.files.clear()
     this.onLoading(null)
@@ -102,7 +106,7 @@ class BrowserEngines implements Engines {
     const problems = [vad, asr, mt, tts].flatMap((result) => (result.status === 'rejected' ? [reason(result.reason)] : []))
     return {
       transcribes: vad.status === 'fulfilled' && asr.status === 'fulfilled',
-      translates: mt.status === 'fulfilled',
+      translates: mt.status === 'fulfilled' ? (mt.value as LevelReply).level : 'none',
       problems,
     }
   }
@@ -234,13 +238,12 @@ class BrowserEngines implements Engines {
     return channel
   }
 
-  private load(purpose: Purpose, settings: Record<string, unknown>): Promise<void> {
+  private load(purpose: Purpose, settings: Record<string, unknown>): Promise<WorkerReply> {
     const known = this.loading.get(purpose)
     if (known) return known
 
     const pending = this.channel(purpose)
       .call<WorkerReply>({ ...settings, type: 'init' })
-      .then(() => undefined)
       .catch((err: unknown) => {
         this.loading.delete(purpose)
         throw err

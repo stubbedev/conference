@@ -95,7 +95,7 @@ func browserChoices() modelFile {
 			ModelChoice: ModelChoice{Model: asrModel, Dtype: halvesDtype, Languages: map[string]string{"da": danish}},
 			Fallback:    nil,
 		},
-		MT:  MTChoice{Kind: kindSeq2Seq, Model: mtModel, Dtype: "q4", Pairs: nil, Builtin: false},
+		MT:  MTChoice{Kind: kindSeq2Seq, Model: mtModel, Dtype: "q4", Fallback: nil, Pairs: nil, Builtin: false},
 		TTS: map[string]string{"en": voiceLessac, "da": voiceDanish},
 	}
 }
@@ -384,10 +384,10 @@ func TestBrowserRuntimeGivesALanguageModelItsPrompt(t *testing.T) {
 	t.Parallel()
 
 	dir := modelDir(t, asrModel, danish)
-	writeModel(t, dir, llmModel, kindLLM, halvesDtype, "q4")
+	writeModel(t, dir, llmModel, kindLLM, halvesDtype)
 
 	choices := browserChoices()
-	choices.MT = MTChoice{Kind: kindLLM, Model: llmModel, Dtype: halvesDtype, Pairs: nil, Builtin: true}
+	choices.MT = MTChoice{Kind: kindLLM, Model: llmModel, Dtype: halvesDtype, Fallback: nil, Pairs: nil, Builtin: true}
 
 	settings := load(t, map[string]string{
 		envRuntime:    runtimeBrowser,
@@ -485,29 +485,35 @@ func TestBrowserRuntimeRunsTheFallbackOnTheCPU(t *testing.T) {
 	}
 }
 
-func TestBrowserRuntimeNeedsTheLanguageModelWithoutHalves(t *testing.T) {
+func TestBrowserRuntimeChecksTheTranslationFallback(t *testing.T) {
 	t.Parallel()
 
 	dir := modelDir(t, asrModel, danish)
 	writeModel(t, dir, llmModel, kindLLM, halvesDtype)
 
 	choices := browserChoices()
-	choices.MT = MTChoice{Kind: kindLLM, Model: llmModel, Dtype: halvesDtype, Pairs: nil, Builtin: false}
+	fallback := &Export{Model: mtModel, Dtype: "q4"}
+	choices.MT = MTChoice{Kind: kindLLM, Model: llmModel, Dtype: halvesDtype, Fallback: fallback, Pairs: nil, Builtin: false}
 
 	status := browserStatus(t, dir, choices)
-	if status.Available || !strings.Contains(status.Reason, "without shader-f16") || !strings.Contains(status.Reason, "model_q4.onnx") {
-		t.Fatalf("available %v reason %q, want a refusal naming the q4 export", status.Available, status.Reason)
+	if status.Available || !strings.Contains(status.Reason, "mt.fallback") {
+		t.Fatalf("available %v reason %q, want a refusal naming the missing fallback", status.Available, status.Reason)
 	}
-}
 
-func TestWithoutHalves(t *testing.T) {
-	t.Parallel()
+	writeModel(t, dir, mtModel, kindSeq2Seq, "q4", cpuDtype)
 
-	for dtype, want := range map[string]string{halvesDtype: "q4", "fp16": "fp32", "q1f16": "q1", "q4": "q4", "q8": "q8"} {
-		got, _ := withoutHalves(dtype)
-		if got != want {
-			t.Errorf("%s without halves is %s, want %s", dtype, got, want)
-		}
+	status = browserStatus(t, dir, choices)
+	if !status.Available || status.Models.Sizes[mtModel] == 0 {
+		t.Fatalf("available %v reason %q sizes %v, want the fallback weighed", status.Available, status.Reason, status.Models.Sizes)
+	}
+
+	choices.MT.Kind = kindSeq2Seq
+	choices.MT.Model = mtModel
+	choices.MT.Dtype = "q4"
+
+	status = browserStatus(t, dir, choices)
+	if status.Available || !strings.Contains(status.Reason, "mt fallback") {
+		t.Fatalf("available %v reason %q, want an encoder-decoder model refused a fallback", status.Available, status.Reason)
 	}
 }
 

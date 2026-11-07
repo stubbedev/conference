@@ -4,8 +4,9 @@ import type { DataType } from '@huggingface/transformers'
 import { configureTransformers } from './hf'
 import { reportLoading } from './loading'
 import { pairFor, type Export, type MtChoice } from './models'
-import { dtypeFor, fallbackToWasm, message, needsHalves, withoutHalves, type Device } from './runtime'
+import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
 import { serve } from './serve'
+import type { TranslationLevel } from '../translate/types'
 import { webgpuAvailable, webgpuHalves } from './webgpu'
 
 const MAX_NEW_TOKENS = 384
@@ -31,8 +32,10 @@ interface Generator {
 type Model = { kind: 'seq2seq'; run: Seq2Seq } | { kind: 'llm'; run: Generator }
 
 let choice: MtChoice | null = null
-let device: Device = 'webgpu'
+let gpu = true
 let halves = true
+let primary: Model | null = null
+let fallback: Model | null = null
 const models = new Map<string, Promise<Model>>()
 
 function chosen(): MtChoice {
@@ -52,12 +55,18 @@ function modelFor(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
   return pending
 }
 
+function deviceFor(dtype: string): Device {
+  return gpu && (halves || !needsHalves(dtype)) ? 'webgpu' : 'wasm'
+}
+
 async function load(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
+  const device = deviceFor(wanted.dtype)
   if (kind === 'llm' && device !== 'webgpu') {
-    throw new Error(`the translation model ${wanted.model} is a language model, which needs WebGPU`)
+    const lacking = gpu ? 'a GPU with 16-bit floats' : 'WebGPU'
+    throw new Error(`the translation model ${wanted.model} is a language model, which needs ${lacking}`)
   }
 
-  const dtype = (kind === 'llm' && !halves ? withoutHalves(wanted.dtype) : dtypeFor(device, wanted.dtype)) as DataType
+  const dtype = dtypeFor(device, wanted.dtype) as DataType
   try {
     if (kind === 'llm') {
       const run = await pipeline('text-generation', wanted.model, { device, dtype, progress_callback: reportLoading })
@@ -68,11 +77,23 @@ async function load(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
   } catch (err) {
     if (device === 'webgpu' && kind === 'seq2seq' && fallbackToWasm(err)) {
       console.warn(`mt: ${wanted.model} cannot run on this browser's WebGPU (${message(err)}); translating on the CPU instead`)
-      device = 'wasm'
+      gpu = false
       return load(wanted, kind)
     }
     const on = device === 'webgpu' ? 'WebGPU' : 'the CPU'
     throw new Error(`the translation model ${wanted.model} could not start on ${on}: ${message(err)}`)
+  }
+}
+
+async function prepare(mt: MtChoice): Promise<TranslationLevel> {
+  try {
+    primary = await modelFor(mt, mt.kind)
+    return mt.kind === 'llm' ? 'prompted' : 'plain'
+  } catch (err) {
+    if (!mt.fallback) throw err
+    console.warn(`mt: ${message(err)}; translating with ${mt.fallback.model} instead`)
+    fallback = await modelFor(mt.fallback, 'seq2seq')
+    return 'plain'
   }
 }
 
@@ -93,8 +114,8 @@ async function translateWith(model: Model, text: string, source: string, target:
   }
 
   const type = model.run.model.config.model_type
-  const options = type === 'm2m_100' ? { src_lang: source, tgt_lang: target } : undefined
   if (type !== 'm2m_100' && type !== 'marian') throw new Error(`a ${type} model is not one this app translates with`)
+  const options = type === 'm2m_100' ? { src_lang: source, tgt_lang: target } : undefined
 
   const [translated] = await model.run(text, options)
   if (!translated) throw new Error(`the translation model translated nothing into ${target}`)
@@ -106,19 +127,17 @@ serve(async (request) => {
     case 'init': {
       configureTransformers(String(request.base))
       choice = request.mt as MtChoice
-      if (!(await webgpuAvailable().catch(() => false))) device = 'wasm'
-      halves = await webgpuHalves().catch(() => false)
-      if (choice.kind === 'seq2seq' && !halves && needsHalves(choice.dtype)) device = 'wasm'
-      await modelFor(choice, choice.kind)
-      return
+      gpu = await webgpuAvailable().catch(() => false)
+      halves = gpu && (await webgpuHalves().catch(() => false))
+      return [{ level: await prepare(choice) }]
     }
 
     case 'translate': {
-      const mt = chosen()
       const source = String(request.source)
       const target = String(request.target)
-      const pair = pairFor(mt, source, target)
-      const model = pair ? await modelFor(pair, 'seq2seq') : await modelFor(mt, mt.kind)
+      const pair = pairFor(chosen(), source, target)
+      const model = pair ? await modelFor(pair, 'seq2seq') : (primary ?? fallback)
+      if (!model) throw new Error('translation has no model it can run')
       return [{ text: await translateWith(model, String(request.text), source, target, String(request.system ?? '')) }]
     }
 

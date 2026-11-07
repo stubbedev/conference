@@ -152,7 +152,11 @@ exports and the voice for each language:
   `mt.builtin` lets a browser with a built-in translator (Chrome's
   `Translator`) translate first. The pairs and the built-in translator
   follow no prompt, so a room that needs the glossary or the form of
-  address leaves both out.
+  address leaves both out. `mt.fallback` names the encoder-decoder model
+  a browser translates with when it cannot run the language model (no
+  WebGPU, or a GPU without 16-bit floats), so every member translates as
+  well as their machine allows; the fetch script gives a language model
+  m2m100 unless `--mt-fallback` says otherwise.
 - **The voice** (`tts`) is a Piper voice per language: the one voice that
   language is spoken in, so the choice between a male and a female voice
   is the operator's, not the speaker's. A language without a voice gets
@@ -165,10 +169,8 @@ with `<model dir>/piper/<voice>.onnx.json` beside it. A model a browser
 without a usable GPU runs also needs its 8-bit export (`q8`, the
 `_quantized` files): every encoder-decoder translation model, the
 transcription fallback, and the transcription model itself when there is
-no fallback; a language model, which no CPU runs, needs the export it
-has without 16-bit floats (`q4` beside `q4f16`) for a GPU without
-`shader-f16`, and a GPU like that runs an encoder-decoder export that needs
-them on the CPU instead. No single file may be larger than a browser can
+no fallback. A GPU without `shader-f16` runs an export that needs 16-bit
+floats on the CPU instead. No single file may be larger than a browser can
 load, 2 GiB. The server checks every file at start, names the one that
 is missing or too large, and tells the browsers what each model weighs.
 
@@ -232,14 +234,17 @@ machine.
   does not end it: the fragment is shown and held until the sentence
   ends with its full stop, question or exclamation mark, or until 1.5 s
   pass with nothing more said, so it is translated whole.
-- **One translator per language.** Of the members who speak a language
-  and whose browser can translate, the one with the lowest member id
+- **One translator per language.** Each browser says how well it can
+  translate: with the language model, with an encoder-decoder model, or
+  not at all. For each language, the member who translates best
   translates every sentence into it and shares the translation, sealed
-  like everything else; the others show it and speak it. A translation
-  is accepted only from the member every browser of that language agrees
-  on, and a browser that waited 5 s for one translates the sentence
-  itself. A listener whose browser cannot translate at all still gets
-  every sentence from whoever can.
+  like everything else - a member who speaks that language before one
+  who does not, then the lowest member id. So one member with a good GPU
+  translates with the language model for a room of phones, and a
+  listener whose browser cannot translate at all still gets every
+  sentence. A translation is accepted only from the member every browser
+  agrees on; a browser that waited 5 s for one translates the sentence
+  itself as well as it can, and one that cannot shows it as it was said.
 - **Keeping up.** A browser loads its models when live translation
   starts, not when the first sentence arrives, asks for persistent
   storage, refuses with the size when the models will not fit, and shows

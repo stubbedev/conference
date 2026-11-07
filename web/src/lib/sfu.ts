@@ -22,7 +22,7 @@ import {
   screenSenderParameters,
 } from '@/lib/encodings'
 import { SCREEN_AUDIO_KIND } from '@/lib/screen'
-import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage } from '@/lib/translate/types'
+import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -237,7 +237,7 @@ export class RoomClient {
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
   private memberLangs = new Map<string, LangAnnouncement>()
-  private translates = false
+  private translates: TranslationLevel = 'none'
   private negotiation: Promise<void> = Promise.resolve()
   private transformed = new WeakSet<object>()
   private selfId = ''
@@ -569,7 +569,7 @@ export class RoomClient {
     void this.sendLang()
   }
 
-  setTranslates(translates: boolean): void {
+  setTranslates(translates: TranslationLevel): void {
     if (this.translates === translates) return
     this.translates = translates
     void this.sendLang()
