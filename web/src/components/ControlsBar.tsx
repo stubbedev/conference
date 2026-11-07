@@ -134,16 +134,31 @@ export const ControlsBar = memo(function ControlsBar({
         </span>
         <span className="hidden h-4 w-px shrink-0 bg-border sm:inline" />
         <span className="hidden min-w-0 truncate font-medium md:inline">{roomName}</span>
-        {recording && onRecord && (
-          <Button
-            variant="destructive"
-            className="h-8 shrink-0 gap-1.5 rounded-full px-3 text-xs font-semibold pointer-coarse:h-11"
-            onClick={onRecord}
-            aria-label="Stop recording"
-          >
-            <span className="size-2 animate-pulse rounded-full bg-white" />
-            REC
-          </Button>
+        {canRecord && onRecord && recording && (
+          <Hint label="Stop recording">
+            <Button
+              variant="destructive"
+              className="h-9 shrink-0 gap-1.5 rounded-full px-3 text-xs font-semibold pointer-coarse:h-11"
+              onClick={onRecord}
+              aria-label="Stop recording"
+            >
+              <span className="size-2 animate-pulse rounded-full bg-white" />
+              REC
+            </Button>
+          </Hint>
+        )}
+        {canRecord && onRecord && !recording && (
+          <Hint label="Record the call">
+            <Button
+              variant="ghost"
+              className="h-9 shrink-0 gap-2 rounded-full px-3 pointer-coarse:h-11"
+              onClick={onRecord}
+              aria-label="Record the call"
+            >
+              <Circle className="fill-destructive text-destructive" />
+              <span className="hidden lg:inline">Record</span>
+            </Button>
+          </Hint>
         )}
       </div>
 
@@ -200,12 +215,6 @@ export const ControlsBar = memo(function ControlsBar({
               >
                 <Contrast />
                 {blurUnavailable || (blur ? 'Turn off background blur' : 'Blur background')}
-              </DropdownMenuItem>
-            )}
-            {canRecord && onRecord && !recording && (
-              <DropdownMenuItem onSelect={onRecord} aria-label="Record the call">
-                <Circle className="fill-destructive text-destructive" />
-                Record the call
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onSelect={onToggleFullscreen} aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
