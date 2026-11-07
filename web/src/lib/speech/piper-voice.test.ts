@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { lengthsDims, phonemeIds, readVoiceConfig, speakerId } from './piper-voice.ts'
+import { phonemeIds, readVoiceConfig, speakerId, voiceInputs, type VoiceInput } from './piper-voice.ts'
 
 const voice = {
   audio: { sample_rate: 22050 },
@@ -46,11 +46,27 @@ test('the voice choice picks a speaker, and a voice with one speaker needs none'
   assert.throws(() => speakerId({ alice: 0, bob: 1 }, 'female'), /no female speaker/)
 })
 
-test('a model that takes one length gets one, one that takes a list gets a list', () => {
-  assert.deepEqual(lengthsDims([1], 12), [1])
-  assert.deepEqual(lengthsDims([-1], 12), [12])
-  assert.deepEqual(lengthsDims(undefined, 12), [12])
-  assert.deepEqual(lengthsDims([1], 1), [1])
+function values(input: VoiceInput): number[] {
+  return input.type === 'int64' ? Array.from(input.data, Number) : Array.from(input.data)
+}
+
+test('a sentence is one batch item: its ids, their count, the scales, and the speaker when there is one', () => {
+  const config = readVoiceConfig(voice)
+  const inputs = voiceInputs([1, 0, 20, 0, 2], config, null)
+
+  assert.deepEqual(
+    inputs.map(({ name, dims }) => [name, dims]),
+    [
+      ['input', [1, 5]],
+      ['input_lengths', [1]],
+      ['scales', [3]],
+    ],
+  )
+  assert.deepEqual(values(inputs[1]), [5])
+  assert.deepEqual(values(inputs[2]).map((value) => Math.round(value * 10) / 10), [0.5, 1.1, 0.7])
+
+  const sid = voiceInputs([1, 2], config, 3).find((input) => input.name === 'sid')
+  assert.deepEqual(sid && [values(sid), sid.dims], [[3], [1]])
 })
 
 test('phoneme ids are read from the lines the phonemizer prints', () => {

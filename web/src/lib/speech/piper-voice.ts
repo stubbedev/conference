@@ -39,14 +39,23 @@ export function readVoiceConfig(json: unknown): VoiceConfig {
   }
 }
 
-/**
- * The shape a voice declares for input_lengths. Piper's own exports take
- * one length, [1]; a model exported with a list of them takes one per
- * phoneme id, which is what a dynamic or matching dimension means.
- */
-export function lengthsDims(declared: readonly number[] | undefined, length: number): number[] {
-  if (declared?.length === 1 && declared[0] === 1) return [1]
-  return [length]
+export type VoiceInput =
+  | { name: string; type: 'int64'; data: BigInt64Array; dims: number[] }
+  | { name: string; type: 'float32'; data: Float32Array; dims: number[] }
+
+export function voiceInputs(ids: readonly number[], config: VoiceConfig, speaker: number | null): VoiceInput[] {
+  const inputs: VoiceInput[] = [
+    { name: 'input', type: 'int64', data: BigInt64Array.from(ids, (id) => BigInt(id)), dims: [1, ids.length] },
+    { name: 'input_lengths', type: 'int64', data: BigInt64Array.of(BigInt(ids.length)), dims: [1] },
+    {
+      name: 'scales',
+      type: 'float32',
+      data: Float32Array.of(config.noiseScale, config.lengthScale, config.noiseWidth),
+      dims: [3],
+    },
+  ]
+  if (speaker !== null) inputs.push({ name: 'sid', type: 'int64', data: BigInt64Array.of(BigInt(speaker)), dims: [1] })
+  return inputs
 }
 
 /** The id of the speaker to speak with, or null when the voice has one speaker. */

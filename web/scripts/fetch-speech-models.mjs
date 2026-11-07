@@ -8,7 +8,10 @@
 // The file list of each model comes from the Hugging Face API, since a
 // transformers.js model loads whatever metadata and ONNX exports its
 // repository holds, and the voices come from piper-voices' voices.json.
-// A voice whose model card is CC0 or Apache-2.0 is preferred, medium
+// A voice speaks with one speaker, since a member chooses no speaker
+// among the dozens of a multi-speaker voice, whose speakers are anything
+// from emotions to corpus ids. A voice whose model card is CC0 or
+// Apache-2.0 is preferred, medium
 // before high, low and x_low. A language with only other licenses still
 // gets a voice, with the license named, rather than no voice at all.
 //
@@ -170,7 +173,7 @@ function rank(voice) {
 // it carries.
 async function voiceFor(code, voices) {
   const candidates = Object.values(voices)
-    .filter((voice) => voice.language.family === code)
+    .filter((voice) => voice.language.family === code && voice.num_speakers === 1)
     .sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key))
 
   if (candidates.length === 0) {

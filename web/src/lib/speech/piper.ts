@@ -13,9 +13,8 @@
 // same reason: a sentence should be spoken as soon as it is translated.
 
 import { configureOrt, ort } from './ort'
-import { lengthsDims, phonemeIds, readVoiceConfig, speakerId, type VoiceConfig } from './piper-voice'
+import { phonemeIds, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
 import { fallbackToWasm, message } from './runtime'
-import { fixed, size } from './tensor'
 import { modelURL } from './urls'
 import type { VoiceChoice } from '../translate/types'
 
@@ -28,9 +27,6 @@ const PHONEMIZER_DIR = '/piper/'
  * from.
  */
 const ESPEAK_DATA = '/espeak-ng-data'
-
-/** The scales a voice is spoken with, in the order Piper takes them. */
-const SCALES = 3
 
 /** The phonemizer as its build exports it: an Emscripten program with callMain. */
 interface Phonemizer {
@@ -156,38 +152,11 @@ async function phonemizer(): Promise<CreatePhonemizer> {
   return (module.default ?? module) as CreatePhonemizer
 }
 
-/** What the voice model is asked to say, in the shapes it declares. */
-function feeds(
-  session: ort.InferenceSession,
-  config: VoiceConfig,
-  ids: readonly number[],
-  choice: VoiceChoice,
-): Record<string, ort.Tensor> {
-  const length = ids.length
-  const lengths = lengthsDims(declared(session, 'input_lengths'), length)
-  const speakerDims = lengthsDims(declared(session, 'sid'), 1)
-
-  const asked: Record<string, ort.Tensor> = {
-    input: new ort.Tensor('int64', BigInt64Array.from(ids, (id) => BigInt(id)), [1, length]),
-    input_lengths: new ort.Tensor('int64', fixed(size(lengths), length), lengths),
-    scales: new ort.Tensor('float32', Float32Array.from([config.noiseScale, config.lengthScale, config.noiseWidth]), [SCALES]),
-  }
-
-  const speaker = speakerId(config.speakers, choice)
-  if (speaker !== null) asked.sid = new ort.Tensor('int64', fixed(size(speakerDims), speaker), speakerDims)
-
+function feeds(session: ort.InferenceSession, config: VoiceConfig, ids: readonly number[], choice: VoiceChoice): Record<string, ort.Tensor> {
+  const wanted = new Set(session.inputNames)
   const feeds: Record<string, ort.Tensor> = {}
-  for (const name of session.inputNames) {
-    const tensor = asked[name]
-    if (tensor) feeds[name] = tensor
+  for (const input of voiceInputs(ids, config, speakerId(config.speakers, choice))) {
+    if (wanted.has(input.name)) feeds[input.name] = new ort.Tensor(input.type, input.data, input.dims)
   }
   return feeds
-}
-
-/** The shape a model declares for one of its inputs, if it declares one. */
-function declared(session: ort.InferenceSession, name: string): readonly number[] | undefined {
-  const input = session.inputMetadata.find((value) => value.name === name)
-  if (!input || !input.isTensor) return undefined
-
-  return input.shape.map((dim) => (typeof dim === 'number' ? dim : 0))
 }
