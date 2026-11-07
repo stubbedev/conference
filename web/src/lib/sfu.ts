@@ -15,12 +15,7 @@ import {
   type Layer as LayerName,
   type QualityState,
 } from '@/lib/quality'
-import {
-  CAMERA_LAYERS,
-  CAMERA_SHARING_LAYERS,
-  relayerParameters,
-  screenSenderParameters,
-} from '@/lib/encodings'
+import { cameraLayers, relayerParameters, screenSenderParameters, sharingLayers } from '@/lib/encodings'
 import { SCREEN_AUDIO_KIND } from '@/lib/screen'
 import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
@@ -219,11 +214,6 @@ async function tuneScreenSender(sender: RTCRtpSender): Promise<void> {
     console.warn('sfu: tuning the screen-share encoder', err)
   }
 }
-
-// The camera is published as three encodings so the SFU can give each
-// viewer the one its layout and network can use; the encodings live in
-// encodings.ts, next to the share's.
-export { CAMERA_LAYERS } from '@/lib/encodings'
 
 export class RoomClient {
   private ws: WebSocket | null = null
@@ -433,7 +423,7 @@ export class RoomClient {
     }
 
     this.state = { ...this.state, sharing: true }
-    void this.tuneCamera(CAMERA_SHARING_LAYERS)
+    void this.tuneCamera()
     this.sendState()
     await this.sendUpOffer()
   }
@@ -453,20 +443,24 @@ export class RoomClient {
     this.screenSenders = []
 
     this.state = { ...this.state, sharing: false }
-    void this.tuneCamera(CAMERA_LAYERS)
+    void this.tuneCamera()
     this.sendState()
     await this.sendUpOffer()
   }
 
-  // tuneCamera retunes the camera's encodings in place. A browser that
-  // refuses the parameters keeps its own caps, which is a worse picture
-  // during a share, never a broken one.
-  private async tuneCamera(layers: readonly RTCRtpEncodingParameters[]): Promise<void> {
+  // tuneCamera retunes the camera's encodings in place for the track it
+  // sends and whether a screen is shared. A browser that refuses the
+  // parameters keeps its own caps, which is a worse picture, never a
+  // broken one.
+  private async tuneCamera(): Promise<void> {
     const sender = this.camSender
-    if (!sender) return
+    const track = sender?.track
+    if (!sender || !track) return
+
+    const layers = cameraLayers(track.getSettings())
 
     try {
-      await sender.setParameters(relayerParameters(sender.getParameters(), layers))
+      await sender.setParameters(relayerParameters(sender.getParameters(), this.state.sharing ? sharingLayers(layers) : layers))
     } catch (err) {
       console.warn('sfu: tuning the camera encoder', err)
     }
@@ -486,6 +480,7 @@ export class RoomClient {
       await this.sendUpOffer()
     } else {
       await sender.replaceTrack(track)
+      if (kind === 'cam') await this.tuneCamera()
     }
 
     if (kind === 'mic') this.localMic = track
@@ -726,7 +721,7 @@ export class RoomClient {
     const transceiver = pc.addTransceiver(track, {
       direction: 'sendonly',
       streams: [stream],
-      sendEncodings: CAMERA_LAYERS.map((layer) => ({ ...layer })),
+      sendEncodings: cameraLayers(track.getSettings()),
     })
     preferVP8(transceiver)
     return transceiver.sender
