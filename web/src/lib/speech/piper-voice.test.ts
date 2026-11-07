@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { phonemeIds, readVoiceConfig, speakerId, voiceInputs, type VoiceInput } from './piper-voice.ts'
+import { phonemeIds, phonemes, readVoiceConfig, speakerId, voiceInputs, type VoiceInput } from './piper-voice.ts'
 
 const voice = {
   audio: { sample_rate: 22050 },
   espeak: { voice: 'da' },
   inference: { noise_scale: 0.5, length_scale: 1.1, noise_w: 0.7 },
+  phoneme_id_map: { _: [0], '^': [1], $: [2], h: [20], ə: [59] },
 }
 
 test('a voice JSON is read into its settings', () => {
@@ -16,11 +17,12 @@ test('a voice JSON is read into its settings', () => {
     lengthScale: 1.1,
     noiseWidth: 0.7,
     speakers: {},
+    phonemeIds: { _: [0], '^': [1], $: [2], h: [20], ə: [59] },
   })
 })
 
 test('a voice that leaves the inference settings out gets Piper defaults', () => {
-  const config = readVoiceConfig({ audio: { sample_rate: 16000 }, espeak: { voice: 'en-us' } })
+  const config = readVoiceConfig({ ...voice, inference: undefined })
   assert.equal(config.noiseScale, 0.667)
   assert.equal(config.lengthScale, 1)
   assert.equal(config.noiseWidth, 0.8)
@@ -43,7 +45,11 @@ test('a speaker map is read, and junk in it is left out', () => {
 test('the voice choice picks a speaker, and a voice with one speaker needs none', () => {
   assert.equal(speakerId({}, 'female'), null)
   assert.equal(speakerId({ female: 2, male: 4 }, 'male'), 4)
-  assert.throws(() => speakerId({ alice: 0, bob: 1 }, 'female'), /no female speaker/)
+})
+
+test('a voice whose speakers are not a female and a male one speaks with its first', () => {
+  assert.equal(speakerId({ bob: 3, alice: 1, carol: 2 }, 'female'), 1)
+  assert.equal(speakerId({ male: 5, neutral: 0 }, 'female'), 0)
 })
 
 function values(input: VoiceInput): number[] {
@@ -69,17 +75,28 @@ test('a sentence is one batch item: its ids, their count, the scales, and the sp
   assert.deepEqual(sid && [values(sid), sid.dims], [[3], [1]])
 })
 
-test('phoneme ids are read from the lines the phonemizer prints', () => {
+test('the phonemes are read from each line the phonemizer prints, a warning in front of it or not', () => {
   const lines = [
-    '{"phoneme_ids":[1,0,20,0,2],"phonemes":["h","ə"],"text":"Hej"}',
+    '{"phoneme_ids":[9],"phonemes":["h","ə"],"text":"Hej"}',
     'starting up',
-    '{"phoneme_ids":[3,4],"phonemes":["d"],"text":"du"}',
+    'Missing phoneme: \u0361 for: {"phoneme_ids":[9],"phonemes":["t","͡","ʃ"],"text":"tsch"}',
+    '{oops',
   ]
-  assert.deepEqual(phonemeIds(lines), [1, 0, 20, 0, 2, 3, 4])
+  assert.deepEqual(phonemes(lines), [['h', 'ə'], ['t', '͡', 'ʃ']])
 })
 
-test('a phonemizer that printed nothing has no ids', () => {
-  assert.deepEqual(phonemeIds([]), [])
-  assert.deepEqual(phonemeIds(['not json', '{"phonemes":[]}']), [])
-  assert.deepEqual(phonemeIds(['{oops']), [])
+test('phonemes are mapped with the voice\'s own ids, padded and wrapped per sentence as Piper does', () => {
+  const map = readVoiceConfig(voice).phonemeIds
+  assert.deepEqual(phonemeIds([['h', 'ə'], ['ə']], map), [1, 0, 20, 0, 59, 0, 2, 1, 0, 59, 0, 2])
+})
+
+test('a phoneme the voice does not know is skipped, and a sentence of none is no sentence', () => {
+  const map = readVoiceConfig(voice).phonemeIds
+  assert.deepEqual(phonemeIds([['h', '͡', 'ə']], map), [1, 0, 20, 0, 59, 0, 2])
+  assert.deepEqual(phonemeIds([['͡'], []], map), [])
+})
+
+test('a voice without the markers Piper wraps a sentence in is refused', () => {
+  assert.throws(() => readVoiceConfig({ ...voice, phoneme_id_map: { h: [20] } }), /phoneme_id_map has no/)
+  assert.throws(() => readVoiceConfig({ ...voice, phoneme_id_map: undefined }), /phoneme_id_map/)
 })

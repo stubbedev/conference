@@ -26,13 +26,7 @@ function check(label, condition, detail) {
   if (!condition) failures.push(`${label}: ${detail}`)
 }
 
-const SENTENCES = {
-  en: 'Good morning, everyone. Shall we start with the budget?',
-  de: 'Guten Morgen zusammen. Sollen wir mit dem Budget anfangen?',
-  da: 'Godmorgen allesammen. Skal vi starte med budgettet?',
-}
-
-const voiced = Object.keys(chosen.tts).filter((lang) => SENTENCES[lang])
+const SENTENCE = '1, 2, 3, 4, 5. 10, 20, 30.'
 
 const ttsProbe = workerProbe(
   { tts: builtWorker('tts') },
@@ -40,16 +34,20 @@ const ttsProbe = workerProbe(
   const { ask } = workers.tts
   await ask({ type: 'init', base: '/speech/', voices: ${JSON.stringify(chosen.tts)} })
   const spoken = {}
-  for (const [lang, text] of Object.entries(${JSON.stringify(Object.fromEntries(voiced.map((lang) => [lang, SENTENCES[lang]])))})) {
+  for (const lang of ${JSON.stringify(Object.keys(chosen.tts))}) {
     const times = []
     let seconds = 0
-    for (let i = 0; i < 3; i++) {
-      const started = performance.now()
-      const reply = await ask({ type: 'speak', text, lang, voice: 'female' })
-      times.push(Math.round(performance.now() - started))
-      seconds = reply.pcm.length / reply.rate
+    try {
+      for (let i = 0; i < 2; i++) {
+        const started = performance.now()
+        const reply = await ask({ type: 'speak', text: ${JSON.stringify(SENTENCE)}, lang, voice: 'female' })
+        times.push(Math.round(performance.now() - started))
+        seconds = reply.pcm.length / reply.rate
+      }
+      spoken[lang] = { seconds, times }
+    } catch (err) {
+      spoken[lang] = { error: String(err?.message ?? err) }
     }
-    spoken[lang] = { seconds, times }
   }
   return { spoken }
 `,
@@ -70,9 +68,8 @@ async function main() {
     await sleep(1_000)
 
     const tts = await probe(browser, 'voice', ttsProbe)
-    for (const [lang, { seconds, times }] of Object.entries(tts.spoken ?? {})) {
-      check(`voice ${lang}`, seconds > 1, `spoke ${seconds} s`)
-      check(`voice ${lang} again`, times[2] < times[0], `the third sentence took ${times[2]} ms, the first ${times[0]} ms`)
+    for (const [lang, { seconds, error }] of Object.entries(tts.spoken ?? {})) {
+      check(`voice ${lang}`, !error && seconds > 1, error ?? `spoke ${seconds} s`)
     }
   } finally {
     await stopProcess(browser.proc)

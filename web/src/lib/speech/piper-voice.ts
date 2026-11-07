@@ -20,6 +20,7 @@ export interface VoiceConfig {
   noiseWidth: number
   /** The names of its speakers, empty for a one-speaker voice. */
   speakers: Record<string, number>
+  phonemeIds: Record<string, number[]>
 }
 
 /** readVoiceConfig checks a voice's JSON and reads the settings out of it. */
@@ -36,6 +37,7 @@ export function readVoiceConfig(json: unknown): VoiceConfig {
     lengthScale: ratio(inference.length_scale, 'inference.length_scale', LENGTH_SCALE),
     noiseWidth: ratio(inference.noise_w, 'inference.noise_w', NOISE_WIDTH),
     speakers: speakers(root.speaker_id_map),
+    phonemeIds: phonemeIdMap(root.phoneme_id_map),
   }
 }
 
@@ -58,33 +60,49 @@ export function voiceInputs(ids: readonly number[], config: VoiceConfig, speaker
   return inputs
 }
 
-/** The id of the speaker to speak with, or null when the voice has one speaker. */
 export function speakerId(speakers: Record<string, number>, voice: string): number | null {
-  const names = Object.keys(speakers)
-  if (names.length === 0) return null
-
-  const id = speakers[voice]
-  if (id === undefined) throw new Error(`this voice has no ${voice} speaker, only ${names.join(', ')}`)
-  return id
+  const ids = Object.values(speakers)
+  if (ids.length === 0) return null
+  return speakers[voice] ?? Math.min(...ids)
 }
 
-/** The phoneme ids in the JSON lines the phonemizer printed. */
-export function phonemeIds(lines: readonly string[]): number[] {
-  const ids: number[] = []
+const BOS = '^'
+const EOS = '$'
+const PAD = '_'
+
+export function phonemes(lines: readonly string[]): string[][] {
+  const sentences: string[][] = []
   for (const line of lines) {
-    const parsed = json(line)
-    const list = parsed?.phoneme_ids
+    const list = json(line)?.phonemes
     if (!Array.isArray(list)) continue
-    for (const id of list) if (typeof id === 'number') ids.push(id)
+    sentences.push(list.filter((phoneme): phoneme is string => typeof phoneme === 'string'))
+  }
+  return sentences
+}
+
+export function phonemeIds(sentences: readonly (readonly string[])[], map: Readonly<Record<string, number[]>>): number[] {
+  const pad = map[PAD] ?? []
+  const ids: number[] = []
+  for (const sentence of sentences) {
+    const known = sentence.flatMap((phoneme) => map[phoneme] ?? [])
+    if (known.length === 0) continue
+
+    ids.push(...(map[BOS] ?? []), ...pad)
+    for (const phoneme of sentence) {
+      const mapped = map[phoneme]
+      if (mapped) ids.push(...mapped, ...pad)
+    }
+    ids.push(...(map[EOS] ?? []))
   }
   return ids
 }
 
 function json(line: string): Record<string, unknown> | null {
-  if (!line.startsWith('{')) return null
+  const start = line.indexOf('{')
+  if (start < 0) return null
 
   try {
-    const parsed: unknown = JSON.parse(line)
+    const parsed: unknown = JSON.parse(line.slice(start))
     if (typeof parsed !== 'object' || parsed === null) return null
     return parsed as Record<string, unknown>
   } catch {
@@ -113,6 +131,18 @@ function ratio(value: unknown, what: string, fallback: number): number {
   if (value === undefined) return fallback
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`the voice's ${what} is not a number`)
   return value
+}
+
+function phonemeIdMap(value: unknown): Record<string, number[]> {
+  const listed = record(value, 'phoneme_id_map')
+  const map: Record<string, number[]> = {}
+  for (const [phoneme, ids] of Object.entries(listed)) {
+    if (Array.isArray(ids) && ids.length > 0 && ids.every((id) => Number.isInteger(id))) map[phoneme] = ids as number[]
+  }
+  for (const marker of [BOS, EOS, PAD]) {
+    if (!map[marker]) throw new Error(`the voice's phoneme_id_map has no ${marker}`)
+  }
+  return map
 }
 
 function speakers(value: unknown): Record<string, number> {

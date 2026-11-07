@@ -139,9 +139,10 @@ exports and the voice for each language:
   model a language loads instead of the default one, which is how a room
   with a Danish fine-tune gets one without moving every other language off
   the shared model. `asr.fallback` is the smaller model a browser steps
-  down to when it cannot keep up, with its own `languages`: English steps
-  down to Moonshine, whose cost follows the length of what was said rather
-  than Whisper's fixed 30 seconds.
+  down to when it cannot keep up, with its own `languages`: a language
+  Moonshine has a model for steps down to it (English, French and
+  Ukrainian among these), since its cost follows the length of what was
+  said rather than Whisper's fixed 30 seconds.
 - **Translation** (`mt`) is either an encoder-decoder model (`"kind":
   "seq2seq"`) such as m2m100, or a language model (`"kind": "llm"`) such
   as Qwen3. Only a language model follows the translation prompt the
@@ -181,6 +182,8 @@ both settings at it.
 
 ```sh
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da
+# every language the server speaks (LANGUAGES_FILE, or the built-in list)
+node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=all
 # every pair OPUS-MT has a model for, and Chrome's translator first
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da --pairs --builtin
 # a language model, for the glossary and the form of address
@@ -196,8 +199,14 @@ OPUS-MT, CC-BY-4.0, which asks for credit where they ship. A file already
 in place with the right size is left alone.
 
 Voices are chosen by quality first, medium before high, low and x_low,
-among the voices with one speaker, and the first one whose model card is
-CC0 or Apache-2.0 wins. A language with no such voice still gets its best
+a voice with one speaker before one with several, and the first one
+whose model card is CC0 or Apache-2.0 wins. A voice with several
+speakers speaks with the member's choice where they are named female
+and male, and with its first one otherwise, as Estonian's and Serbian's
+do. Piper has no voice for Belarusian, Bosnian, Croatian, Macedonian or
+Maltese, so those get subtitles only; the script says so and carries on.
+The Moonshine models for the fallback are found the same way, by
+looking for one per language. A language with no such voice still gets its best
 one, with the license it carries named on stderr, so French ships a CC0
 low voice and Italian a medium one under a license to read before
 shipping it.

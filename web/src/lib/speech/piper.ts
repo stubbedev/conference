@@ -16,7 +16,7 @@
 // translated.
 
 import { configureOrt, ort } from './ort'
-import { phonemeIds, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
+import { phonemeIds, phonemes, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
 import { fallbackToWasm, message } from './runtime'
 import { modelURL } from './urls'
 import type { VoiceChoice } from '../translate/types'
@@ -148,7 +148,10 @@ async function phonemize(text: string, config: VoiceConfig): Promise<number[]> {
   const module = await Promise.race([
     create({
       print: (line) => lines.push(line),
-      printErr: (line) => complaints.push(line),
+      printErr: (line) => {
+        lines.push(line)
+        complaints.push(line)
+      },
       instantiateWasm: (imports, receive) => {
         WebAssembly.instantiate(wasm, imports).then((instance) => receive(instance, wasm), refuse)
         return {}
@@ -160,7 +163,7 @@ async function phonemize(text: string, config: VoiceConfig): Promise<number[]> {
 
   module.callMain(['-l', config.espeak, '--input', JSON.stringify([{ text }]), '--espeak_data', ESPEAK_DATA])
 
-  const ids = phonemeIds(lines)
+  const ids = phonemeIds(phonemes(lines), config.phonemeIds)
   if (ids.length === 0) {
     const said = complaints.join(' ').trim()
     throw new Error(`the voice could not phonemize "${text}"${said ? `: ${said}` : ''}`)

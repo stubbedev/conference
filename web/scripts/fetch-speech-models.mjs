@@ -7,10 +7,10 @@
 // commit its repository is on, which the script names.
 //
 // The file list of each model comes from the Hugging Face API, and the
-// voices come from piper-voices' voices.json. A voice speaks with one
-// speaker, since a member chooses no speaker among the dozens of a
-// multi-speaker voice, whose speakers are anything from emotions to
-// corpus ids. A voice whose model card is CC0 or Apache-2.0 is
+// voices come from piper-voices' voices.json. A voice with one speaker
+// goes before one with several, whose speakers are anything from
+// emotions to corpus ids and which speaks with its first unless they are
+// named female and male. A voice whose model card is CC0 or Apache-2.0 is
 // preferred, medium before high, low and x_low. A language with only
 // other licenses still gets a voice, with the license named, rather than
 // no voice at all.
@@ -20,7 +20,7 @@
 // itself when there is none, and every encoder-decoder translation model.
 //
 // Usage: node scripts/fetch-speech-models.mjs <target dir> [options]
-//   --languages=en,de,da
+//   --languages=en,de,da or all, the server's own list
 //   --asr=owner/model --asr-dtype=q4f16
 //   --asr-fallback=owner/model|none --asr-fallback-dtype=q4
 //   --mt-kind=seq2seq|llm --mt=owner/model --mt-dtype=q4f16
@@ -28,7 +28,7 @@
 //   --builtin
 
 import { createHash } from 'node:crypto'
-import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const HUB = 'https://huggingface.co'
@@ -41,7 +41,8 @@ const PINNED = {
   'onnx-community/Qwen3-1.7B-ONNX': '3231b522c6e703b2f9b3cd8ea27426a1289a02f2',
 }
 
-const ENGLISH_FALLBACK = 'onnx-community/moonshine-base-ONNX'
+const LANGUAGES_FILE =
+  process.env.LANGUAGES_FILE ?? path.resolve(import.meta.dirname, '..', '..', 'internal', 'speech', 'service', 'languages.json')
 
 const MT_DEFAULTS = {
   seq2seq: { model: 'Xenova/m2m100_418M', dtype: 'q4f16' },
@@ -173,6 +174,18 @@ async function getText(url) {
   return response.text()
 }
 
+class MissingExport extends Error {}
+
+async function languageCodes(asked) {
+  const known = JSON.parse(await readFile(LANGUAGES_FILE, 'utf8')).map((language) => language.code)
+  if (asked.length === 1 && asked[0] === 'all') return known
+
+  const unknown = asked.filter((code) => !known.includes(code))
+  if (unknown.length > 0) throw new Error(`${unknown.join(', ')} is not among the languages in ${LANGUAGES_FILE}: ${known.join(', ')}`)
+
+  return asked
+}
+
 async function revisionOf(model) {
   const pinned = PINNED[model]
   if (pinned) return pinned
@@ -207,7 +220,7 @@ async function modelFiles(dir, model, kind, dtypes) {
     for (const stem of ONNX_STEMS[kind]) {
       const name = `${stem}${DTYPE_SUFFIXES[dtype]}.onnx`
       if (!tree.has(name)) {
-        throw new Error(`${model} has no ${name} at ${revision}, so it has no ${dtype} export; ${treeURL}`)
+        throw new MissingExport(`${model} has no ${name} at ${revision}, so it has no ${dtype} export; ${treeURL}`)
       }
 
       names.push(name)
@@ -226,6 +239,26 @@ async function modelFiles(dir, model, kind, dtypes) {
 
 function exportsFor(dtype, cpu) {
   return cpu ? [dtype, CPU_DTYPE] : [dtype]
+}
+
+function moonshineCandidates(code) {
+  if (code === 'en') return ['onnx-community/moonshine-base-ONNX']
+  return [`onnx-community/moonshine-base-${code}-ONNX`, `onnx-community/moonshine-tiny-${code}-ONNX`]
+}
+
+async function moonshineFor(dir, code, dtypes) {
+  for (const model of moonshineCandidates(code)) {
+    if (!(await modelExists(model))) continue
+
+    try {
+      return { model, files: await modelFiles(dir, model, 'seq2seq', dtypes) }
+    } catch (err) {
+      if (!(err instanceof MissingExport)) throw err
+      process.stderr.write(`skipping ${model}: ${err.message}\n`)
+    }
+  }
+
+  return null
 }
 
 async function pairModels(languages) {
@@ -286,11 +319,12 @@ function rank(voice) {
 // it carries.
 async function voiceFor(code, voices) {
   const candidates = Object.values(voices)
-    .filter((voice) => voice.language.family === code && voice.num_speakers === 1)
-    .sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key))
+    .filter((voice) => voice.language.family === code)
+    .sort((a, b) => Number(a.num_speakers > 1) - Number(b.num_speakers > 1) || rank(a) - rank(b) || a.key.localeCompare(b.key))
 
   if (candidates.length === 0) {
-    throw new Error(`${PIPER_REPO} at ${PIPER_REVISION} has no voice for ${code}`)
+    console.warn(`warning: ${PIPER_REPO} at ${PIPER_REVISION} has no voice for ${code}, so ${code} gets subtitles and no voice`)
+    return null
   }
 
   for (const candidate of candidates) {
@@ -402,9 +436,10 @@ async function downloadAll(files) {
 }
 
 async function main() {
-  const { dir, languages, asr, fallback, mt, pairs: pairDtype, builtin } = parseArgs(process.argv.slice(2))
+  const { dir, languages: asked, asr, fallback, mt, pairs: pairDtype, builtin } = parseArgs(process.argv.slice(2))
+  const languages = await languageCodes(asked)
 
-  const fallbackLanguages = fallback && languages.includes('en') ? { en: ENGLISH_FALLBACK } : {}
+  const fallbackLanguages = {}
   const pairs = pairDtype ? await pairModels(languages) : {}
 
   const files = [
@@ -414,8 +449,12 @@ async function main() {
 
   if (fallback) {
     files.push(...(await modelFiles(dir, fallback.model, 'seq2seq', exportsFor(fallback.dtype, true))))
-    for (const model of Object.values(fallbackLanguages)) {
-      files.push(...(await modelFiles(dir, model, 'seq2seq', exportsFor(fallback.dtype, true))))
+    for (const code of languages) {
+      const moonshine = await moonshineFor(dir, code, exportsFor(fallback.dtype, true))
+      if (!moonshine) continue
+
+      fallbackLanguages[code] = moonshine.model
+      files.push(...moonshine.files)
     }
   }
 
@@ -426,6 +465,8 @@ async function main() {
 
   for (const code of languages) {
     const voice = await voiceFor(code, voices)
+    if (!voice) continue
+
     tts[code] = voice.key
     files.push(...voiceFiles(dir, voice))
   }
