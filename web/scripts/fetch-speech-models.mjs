@@ -1,23 +1,31 @@
 // Downloads the model files the browser speech engines load, so an
 // operator can fill a model directory without knowing the ONNX file
-// names: a Whisper model and a translation model in the layout
+// names: the transcription and translation models in the layout
 // transformers.js loads them from, and a Piper voice per language under
-// piper/. Every repository is pinned to a commit below, so the same run
-// downloads the same bytes twice.
+// piper/. The default models are pinned to a commit below, so the same
+// run downloads the same bytes twice; any other model is fetched at the
+// commit its repository is on, which the script names.
 //
-// The file list of each model comes from the Hugging Face API, since a
-// transformers.js model loads whatever metadata and ONNX exports its
-// repository holds, and the voices come from piper-voices' voices.json.
-// A voice speaks with one speaker, since a member chooses no speaker
-// among the dozens of a multi-speaker voice, whose speakers are anything
-// from emotions to corpus ids. A voice whose model card is CC0 or
-// Apache-2.0 is preferred, medium
-// before high, low and x_low. A language with only other licenses still
-// gets a voice, with the license named, rather than no voice at all.
+// The file list of each model comes from the Hugging Face API, and the
+// voices come from piper-voices' voices.json. A voice speaks with one
+// speaker, since a member chooses no speaker among the dozens of a
+// multi-speaker voice, whose speakers are anything from emotions to
+// corpus ids. A voice whose model card is CC0 or Apache-2.0 is
+// preferred, medium before high, low and x_low. A language with only
+// other licenses still gets a voice, with the license named, rather than
+// no voice at all.
 //
-// Usage: node scripts/fetch-speech-models.mjs <target dir>
-//   [--languages=en,de,da] [--asr=owner/model] [--mt=owner/model]
-//   [--asr-dtype=q4f16] [--mt-dtype=q4]
+// A model a browser without a usable GPU runs comes with its 8-bit
+// export as well: the transcription fallback, or the transcription model
+// itself when there is none, and every encoder-decoder translation model.
+//
+// Usage: node scripts/fetch-speech-models.mjs <target dir> [options]
+//   --languages=en,de,da
+//   --asr=owner/model --asr-dtype=q4f16
+//   --asr-fallback=owner/model|none --asr-fallback-dtype=q4
+//   --mt-kind=seq2seq|llm --mt=owner/model --mt-dtype=q4f16
+//   --pairs --pair-dtype=q4f16
+//   --builtin
 
 import { createHash } from 'node:crypto'
 import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -25,18 +33,24 @@ import path from 'node:path'
 
 const HUB = 'https://huggingface.co'
 
-const ASR_MODEL = 'onnx-community/whisper-large-v3-turbo'
-const ASR_REVISION = '360ebcde2559d60bb474678be3c1de9ef347d01a'
-const ASR_DTYPE = 'q4f16'
+const PINNED = {
+  'onnx-community/whisper-large-v3-turbo': '360ebcde2559d60bb474678be3c1de9ef347d01a',
+  'onnx-community/whisper-base': '27a07b4b52b3a4c5886134bb4320e93e1a4bbc7c',
+  'onnx-community/moonshine-base-ONNX': 'b1e9b6aae3c3c7298f10c3798393fdf38e8fbbad',
+  'Xenova/m2m100_418M': '9c374f0b7aca709787cea97b047bfbbd1559d177',
+  'onnx-community/Qwen3-1.7B-ONNX': '3231b522c6e703b2f9b3cd8ea27426a1289a02f2',
+}
 
-const MT_MODEL = 'Xenova/m2m100_418M'
-const MT_REVISION = '9c374f0b7aca709787cea97b047bfbbd1559d177'
-const MT_DTYPE = 'q4'
+const ENGLISH_FALLBACK = 'onnx-community/moonshine-base-ONNX'
+
+const MT_DEFAULTS = {
+  seq2seq: { model: 'Xenova/m2m100_418M', dtype: 'q4f16' },
+  llm: { model: 'onnx-community/Qwen3-1.7B-ONNX', dtype: 'q4f16' },
+}
 
 const PIPER_REPO = 'rhasspy/piper-voices'
 const PIPER_REVISION = 'e7229f7d33a10e145e109b886d661984201ac3c4'
 
-// What transformers.js reads from a model directory besides the exports.
 const MODEL_FILES = [
   'config.json',
   'generation_config.json',
@@ -45,24 +59,50 @@ const MODEL_FILES = [
   'tokenizer_config.json',
 ]
 
-// The exports transformers.js loads: one encoder, and one decoder with the
-// past merged into it, each named with the dtype's suffix.
-const ONNX_STEMS = ['onnx/encoder_model', 'onnx/decoder_model_merged']
+const ONNX_STEMS = {
+  seq2seq: ['onnx/encoder_model', 'onnx/decoder_model_merged'],
+  llm: ['onnx/model'],
+}
+
+const DTYPE_SUFFIXES = {
+  fp32: '',
+  fp16: '_fp16',
+  q8: '_quantized',
+  int8: '_int8',
+  uint8: '_uint8',
+  q4: '_q4',
+  q4f16: '_q4f16',
+  bnb4: '_bnb4',
+  q2: '_q2',
+  q2f16: '_q2f16',
+  q1: '_q1',
+  q1f16: '_q1f16',
+}
+
+const CPU_DTYPE = 'q8'
 
 const MAX_PARALLEL = 4
 const REPORT_BYTES = 64e6
 
-const USAGE = 'usage: node scripts/fetch-speech-models.mjs <target dir> [--languages=en,de,da] [--asr=owner/model] [--mt=owner/model] [--asr-dtype=q4f16] [--mt-dtype=q4]'
+const USAGE =
+  'usage: node scripts/fetch-speech-models.mjs <target dir> [--languages=en,de,da] [--asr=owner/model] [--asr-dtype=q4f16] ' +
+  '[--asr-fallback=owner/model|none] [--asr-fallback-dtype=q4] [--mt-kind=seq2seq|llm] [--mt=owner/model] [--mt-dtype=q4f16] ' +
+  '[--pairs] [--pair-dtype=q4f16] [--builtin]'
 
-const OPTIONS = ['languages', 'asr', 'mt', 'asr-dtype', 'mt-dtype']
+const VALUED = ['languages', 'asr', 'asr-dtype', 'asr-fallback', 'asr-fallback-dtype', 'mt-kind', 'mt', 'mt-dtype', 'pair-dtype']
+const FLAGS = ['pairs', 'builtin']
 
 function parseArgs(argv) {
   const options = {
-    languages: ['en'],
-    asr: ASR_MODEL,
-    mt: MT_MODEL,
-    'asr-dtype': ASR_DTYPE,
-    'mt-dtype': MT_DTYPE,
+    languages: 'en',
+    asr: 'onnx-community/whisper-large-v3-turbo',
+    'asr-dtype': 'q4f16',
+    'asr-fallback': 'onnx-community/whisper-base',
+    'asr-fallback-dtype': 'q4',
+    'mt-kind': 'seq2seq',
+    'pair-dtype': 'q4f16',
+    pairs: false,
+    builtin: false,
   }
   const positional = []
 
@@ -75,7 +115,15 @@ function parseArgs(argv) {
 
     const equals = arg.indexOf('=')
     const name = equals < 0 ? arg.slice(2) : arg.slice(2, equals)
-    if (!OPTIONS.includes(name)) throw new Error(`${name} is not an option; ${USAGE}`)
+
+    if (FLAGS.includes(name)) {
+      if (equals >= 0) throw new Error(`--${name} takes no value; ${USAGE}`)
+      options[name] = true
+
+      continue
+    }
+
+    if (!VALUED.includes(name)) throw new Error(`${name} is not an option; ${USAGE}`)
     if (equals < 0) throw new Error(`--${name} needs a value, e.g. --${name}=...; ${USAGE}`)
 
     options[name] = arg.slice(equals + 1)
@@ -86,7 +134,29 @@ function parseArgs(argv) {
   const languages = [...new Set(String(options.languages).split(',').map((code) => code.trim()).filter(Boolean))]
   if (languages.length === 0) throw new Error('--languages names no language')
 
-  return { dir: path.resolve(positional[0]), languages, asr: options.asr, mt: options.mt, asrDtype: options['asr-dtype'], mtDtype: options['mt-dtype'] }
+  const kind = options['mt-kind']
+  if (!MT_DEFAULTS[kind]) throw new Error(`--mt-kind is ${kind}, not ${Object.keys(MT_DEFAULTS).join(' or ')}`)
+
+  for (const option of ['asr-dtype', 'asr-fallback-dtype', 'mt-dtype', 'pair-dtype']) {
+    const dtype = options[option]
+    if (dtype !== undefined && DTYPE_SUFFIXES[dtype] === undefined) {
+      throw new Error(`--${option} is ${dtype}, not one of ${Object.keys(DTYPE_SUFFIXES).join(', ')}`)
+    }
+  }
+
+  return {
+    dir: path.resolve(positional[0]),
+    languages,
+    asr: { model: options.asr, dtype: options['asr-dtype'] },
+    fallback: options['asr-fallback'] === 'none' ? null : { model: options['asr-fallback'], dtype: options['asr-fallback-dtype'] },
+    mt: {
+      kind,
+      model: options.mt ?? MT_DEFAULTS[kind].model,
+      dtype: options['mt-dtype'] ?? MT_DEFAULTS[kind].dtype,
+    },
+    pairs: options.pairs ? options['pair-dtype'] : null,
+    builtin: options.builtin,
+  }
 }
 
 async function getJSON(url) {
@@ -103,27 +173,47 @@ async function getText(url) {
   return response.text()
 }
 
-// modelFiles is what one transformers.js model needs, named as its
-// repository holds it, and where each file goes in the model directory.
-async function modelFiles(dir, model, revision, dtype) {
+async function revisionOf(model) {
+  const pinned = PINNED[model]
+  if (pinned) return pinned
+
+  const { sha } = await getJSON(`${HUB}/api/models/${model}`)
+  process.stderr.write(`${model} is not pinned here; fetching it at ${sha}\n`)
+
+  return sha
+}
+
+async function modelExists(model) {
+  const response = await fetch(`${HUB}/api/models/${model}`, { method: 'HEAD' })
+  if (response.status === 404 || response.status === 401) return false
+  if (!response.ok) throw new Error(`cannot look up ${model}: ${response.status} ${response.statusText}`)
+
+  return true
+}
+
+// modelFiles is what one transformers.js model needs in each of the
+// given exports, named as its repository holds it, and where each file
+// goes in the model directory.
+async function modelFiles(dir, model, kind, dtypes) {
+  const revision = await revisionOf(model)
   const treeURL = `${HUB}/api/models/${model}/tree/${revision}?recursive=true`
   const entries = (await getJSON(treeURL)).filter((entry) => entry.type === 'file')
   const tree = new Map(entries.map((entry) => [entry.path, entry]))
-  const suffix = dtype === 'fp32' ? '' : `_${dtype}`
 
-  const names = MODEL_FILES.filter((name) => tree.has(name))
   if (!tree.has('config.json')) throw new Error(`${model} has no config.json at ${revision}: ${treeURL}`)
+  const names = MODEL_FILES.filter((name) => tree.has(name))
 
-  for (const stem of ONNX_STEMS) {
-    const name = `${stem}${suffix}.onnx`
-    if (!tree.has(name)) {
-      throw new Error(`${model} has no ${name} at ${revision}, so it has no ${dtype} export; ${treeURL}`)
+  for (const dtype of new Set(dtypes)) {
+    for (const stem of ONNX_STEMS[kind]) {
+      const name = `${stem}${DTYPE_SUFFIXES[dtype]}.onnx`
+      if (!tree.has(name)) {
+        throw new Error(`${model} has no ${name} at ${revision}, so it has no ${dtype} export; ${treeURL}`)
+      }
+
+      names.push(name)
+
+      if (tree.has(`${name}_data`)) names.push(`${name}_data`)
     }
-
-    names.push(name)
-
-    // The weights of a large export can live in a file beside it.
-    if (tree.has(`${name}_data`)) names.push(`${name}_data`)
   }
 
   return names.map((name) => ({
@@ -132,6 +222,29 @@ async function modelFiles(dir, model, revision, dtype) {
     size: tree.get(name).size,
     sha256: tree.get(name).lfs?.oid,
   }))
+}
+
+function exportsFor(dtype, cpu) {
+  return cpu ? [dtype, CPU_DTYPE] : [dtype]
+}
+
+async function pairModels(languages) {
+  const pairs = {}
+
+  for (const source of languages) {
+    for (const target of languages) {
+      if (source === target) continue
+
+      const model = `Xenova/opus-mt-${source}-${target}`
+      if (await modelExists(model)) pairs[`${source}-${target}`] = model
+    }
+  }
+
+  if (Object.keys(pairs).length > 0) {
+    process.stderr.write('the pair models are OPUS-MT, CC-BY-4.0: credit the Helsinki-NLP OPUS-MT project where you ship them\n')
+  }
+
+  return pairs
 }
 
 // cardURL is a voice's model card, which names the license of its data.
@@ -289,14 +402,27 @@ async function downloadAll(files) {
 }
 
 async function main() {
-  const { dir, languages, asr, mt, asrDtype, mtDtype } = parseArgs(process.argv.slice(2))
+  const { dir, languages, asr, fallback, mt, pairs: pairDtype, builtin } = parseArgs(process.argv.slice(2))
+
+  const fallbackLanguages = fallback && languages.includes('en') ? { en: ENGLISH_FALLBACK } : {}
+  const pairs = pairDtype ? await pairModels(languages) : {}
+
+  const files = [
+    ...(await modelFiles(dir, asr.model, 'seq2seq', exportsFor(asr.dtype, fallback === null))),
+    ...(await modelFiles(dir, mt.model, mt.kind, exportsFor(mt.dtype, mt.kind === 'seq2seq'))),
+  ]
+
+  if (fallback) {
+    files.push(...(await modelFiles(dir, fallback.model, 'seq2seq', exportsFor(fallback.dtype, true))))
+    for (const model of Object.values(fallbackLanguages)) {
+      files.push(...(await modelFiles(dir, model, 'seq2seq', exportsFor(fallback.dtype, true))))
+    }
+  }
+
+  for (const model of Object.values(pairs)) files.push(...(await modelFiles(dir, model, 'seq2seq', exportsFor(pairDtype, true))))
 
   const voices = await getJSON(`${HUB}/${PIPER_REPO}/resolve/${PIPER_REVISION}/voices.json`)
   const tts = {}
-  const files = [
-    ...(await modelFiles(dir, asr, ASR_REVISION, asrDtype)),
-    ...(await modelFiles(dir, mt, MT_REVISION, mtDtype)),
-  ]
 
   for (const code of languages) {
     const voice = await voiceFor(code, voices)
@@ -311,13 +437,27 @@ async function main() {
   await downloadAll(unique)
 
   const models = {
-    asr: { model: asr, dtype: asrDtype },
-    mt: { model: mt, dtype: mtDtype },
+    asr: {
+      model: asr.model,
+      dtype: asr.dtype,
+      ...(fallback ? { fallback: { ...fallback, languages: fallbackLanguages } } : {}),
+    },
+    mt: {
+      kind: mt.kind,
+      model: mt.model,
+      dtype: mt.dtype,
+      ...(Object.keys(pairs).length > 0
+        ? { pairs: Object.fromEntries(Object.entries(pairs).map(([pair, model]) => [pair, { model, dtype: pairDtype }])) }
+        : {}),
+      ...(builtin ? { builtin: true } : {}),
+    },
     tts,
   }
   const text = `${JSON.stringify(models, null, 2)}\n`
   const modelsFile = path.join(dir, 'models.json')
-  await writeFile(modelsFile, text)
+  const partial = `${modelsFile}.part`
+  await writeFile(partial, text)
+  await rename(partial, modelsFile)
 
   process.stdout.write(`${modelsFile}\n${text}`)
   process.stderr.write(`total ${(total / 1e6).toFixed(0)} MB in ${unique.length} files in ${dir}\n`)

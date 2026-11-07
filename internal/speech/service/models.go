@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,39 +25,89 @@ const (
 	// browsers load from.
 	ModelsPath = "/speech/"
 
-	// piperDir holds the voices under the model directory, each a model
-	// file and the JSON beside it.
-	piperDir    = "piper"
-	modelConfig = "config.json"
-	voiceModel  = ".onnx"
-	voiceJSON   = ".onnx.json"
+	piperDir     = "piper"
+	modelConfig  = "config.json"
+	voiceModel   = ".onnx"
+	voiceJSON    = ".onnx.json"
+	externalData = "_data"
+	cpuDtype     = "q8"
 
 	modelIDParts = 2
+	pairParts    = 2
 )
 
 var (
 	errModelsJSON     = errors.New("is not valid JSON")
 	errModelsMissing  = errors.New("is missing")
 	errModelsDir      = errors.New("must be an owner and a name, e.g. onnx-community/whisper-large-v3-turbo")
-	errModelsDtype    = errors.New("is not an export transformers.js loads: " + dtypes)
+	errModelsDtype    = errors.New("is not an export transformers.js loads")
 	errModelsLanguage = errors.New("is not one of the languages live translation has")
+	errModelsKind     = errors.New("must be " + string(kindSeq2Seq) + " or " + string(kindLLM))
+	errModelsPair     = errors.New("must be two different languages, source-target, e.g. en-de")
 	errVoiceName      = errors.New("must be a voice's name, letters, digits, dashes and dots")
 )
 
-// dtypes are the ONNX exports transformers.js names, and the only ones a
-// model directory can hold.
-const dtypes = "fp32, fp16, q8, int8, uint8, q4, q4f16, bnb4, q2, q2f16, q1, q1f16"
+func dtypeSuffixes() map[string]string {
+	return map[string]string{
+		"fp32":  "",
+		"fp16":  "_fp16",
+		"q8":    "_quantized",
+		"int8":  "_int8",
+		"uint8": "_uint8",
+		"q4":    "_q4",
+		"q4f16": "_q4f16",
+		"bnb4":  "_bnb4",
+		"q2":    "_q2",
+		"q2f16": "_q2f16",
+		"q1":    "_q1",
+		"q1f16": "_q1f16",
+	}
+}
 
-// Models is what the browsers load: a model for transcription and one for
-// translation, each with the languages that load one of their own, and a
-// voice for every language it can speak.
+// Kind is how a translation model translates.
+type Kind string
+
+const (
+	kindSeq2Seq Kind = "seq2seq"
+	kindLLM     Kind = "llm"
+)
+
+// Export is a model and the export of it the browsers load.
+type Export struct {
+	Model string `json:"model"`
+	Dtype string `json:"dtype"`
+}
+
+// ModelChoice is a transcription model and the languages with one of their own.
+type ModelChoice struct {
+	Model     string            `json:"model"`
+	Dtype     string            `json:"dtype"`
+	Languages map[string]string `json:"languages,omitempty"`
+}
+
+// ASRChoice is the transcription model and the smaller one to step down to.
+type ASRChoice struct {
+	ModelChoice
+
+	Fallback *ModelChoice `json:"fallback,omitempty"`
+}
+
+// MTChoice is the translation model, the pairs with one of their own, and the built-in translator.
+type MTChoice struct {
+	Kind    Kind              `json:"kind"`
+	Model   string            `json:"model"`
+	Dtype   string            `json:"dtype"`
+	Pairs   map[string]Export `json:"pairs,omitempty"`
+	Builtin bool              `json:"builtin,omitempty"`
+}
+
+// Models is what the browsers load, what it weighs, and the prompt a language model follows.
 type Models struct {
-	ASR ModelChoice `json:"asr"`
-	MT  ModelChoice `json:"mt"`
-
-	// Voices is the voice each language speaks in, named as Piper names
-	// them, e.g. da_DK-talesyntese-medium.
+	ASR    ASRChoice         `json:"asr"`
+	MT     MTChoice          `json:"mt"`
 	Voices map[string]string `json:"voices"`
+	Sizes  map[string]int64  `json:"sizes"`
+	Prompt *Prompt           `json:"prompt,omitempty"`
 
 	// Base is the path the files are served from, empty when the browsers
 	// run stand-in engines; problem says why they cannot load at all.
@@ -63,38 +115,25 @@ type Models struct {
 	problem string
 }
 
-// ModelChoice is one purpose's model and the export it loads.
-type ModelChoice struct {
-	Model     string            `json:"model"`
-	Dtype     string            `json:"dtype"`
-	Languages map[string]string `json:"languages,omitempty"`
-}
-
-// modelFile is the shape of SPEECH_MODELS_FILE.
 type modelFile struct {
-	ASR ModelChoice       `json:"asr"`
-	MT  ModelChoice       `json:"mt"`
+	ASR ASRChoice         `json:"asr"`
+	MT  MTChoice          `json:"mt"`
 	TTS map[string]string `json:"tts"`
 }
 
-// noModels is a model set that cannot load, and why; empty when the
-// browsers run stand-in engines and load nothing.
 func noModels(problem string) Models {
 	return Models{
-		ASR:     ModelChoice{Model: "", Dtype: "", Languages: nil},
-		MT:      ModelChoice{Model: "", Dtype: "", Languages: nil},
+		ASR:     ASRChoice{ModelChoice: ModelChoice{Model: "", Dtype: "", Languages: nil}, Fallback: nil},
+		MT:      MTChoice{Kind: "", Model: "", Dtype: "", Pairs: nil, Builtin: false},
 		Voices:  nil,
+		Sizes:   nil,
+		Prompt:  nil,
 		Base:    "",
 		problem: problem,
 	}
 }
 
-// loadModels reads the model choices from modelsFile and checks that
-// every file they name is in dir, which the server serves. Stand-in
-// engines need no files at all. A directory that cannot load is not an
-// error here: it is why live translation is unavailable, which the app
-// reports to whoever runs the server.
-func (env environment) loadModels(dir, modelsFile string, available languages) Models {
+func (env environment) loadModels(dir, modelsFile string, available languages, prompt Prompt) Models {
 	if env(envEngines) == "fake" {
 		return noModels("")
 	}
@@ -108,31 +147,20 @@ func (env environment) loadModels(dir, modelsFile string, available languages) M
 		return noModels(fmt.Sprintf("%s: %v", envModelsFile, err))
 	}
 
-	choices := []struct {
-		purpose string
-		choice  ModelChoice
-	}{
-		{purpose: "asr", choice: file.ASR},
-		{purpose: "mt", choice: file.MT},
-	}
-
-	for _, entry := range choices {
-		err = checkChoice(dir, entry.purpose, entry.choice, available)
-		if err != nil {
-			return noModels(fmt.Sprintf("%s: %v", envModelsFile, err))
-		}
-	}
-
-	err = checkVoices(dir, file.TTS, available)
+	sizes, err := checkModelFile(dir, file, available)
 	if err != nil {
 		return noModels(fmt.Sprintf("%s: %v", envModelsFile, err))
 	}
 
-	return Models{ASR: file.ASR, MT: file.MT, Voices: file.TTS, Base: ModelsPath, problem: ""}
+	models := Models{ASR: file.ASR, MT: file.MT, Voices: file.TTS, Sizes: sizes, Prompt: nil, Base: ModelsPath, problem: ""}
+	if file.MT.Kind == kindLLM {
+		translating := prompt.clone()
+		models.Prompt = &translating
+	}
+
+	return models
 }
 
-// readModelFile reads the model choices, which have no defaults: every
-// purpose loads a model somebody put in the model directory.
 func readModelFile(name string) (modelFile, error) {
 	var file modelFile
 
@@ -156,24 +184,46 @@ func readModelFile(name string) (modelFile, error) {
 	return file, nil
 }
 
-// checkChoice validates one purpose's model and confirms that its files
-// are in dir, along with those of every language with a model of its own.
-func checkChoice(dir, purpose string, choice ModelChoice, available languages) error {
-	err := checkModel(dir, purpose, choice.Model)
+func checkModelFile(dir string, file modelFile, available languages) (map[string]int64, error) {
+	sizes := make(map[string]int64)
+
+	err := checkTranscription(dir, "asr", file.ASR.ModelChoice, available, file.ASR.Fallback == nil, sizes)
+	if err != nil {
+		return nil, err
+	}
+
+	if file.ASR.Fallback != nil {
+		err = checkTranscription(dir, "asr.fallback", *file.ASR.Fallback, available, true, sizes)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = checkTranslation(dir, file.MT, available, sizes)
+	if err != nil {
+		return nil, err
+	}
+
+	err = checkVoices(dir, file.TTS, available, sizes)
+	if err != nil {
+		return nil, err
+	}
+
+	return sizes, nil
+}
+
+func checkTranscription(dir, purpose string, choice ModelChoice, available languages, cpu bool, sizes map[string]int64) error {
+	err := checkExport(dir, purpose, kindSeq2Seq, Export{Model: choice.Model, Dtype: choice.Dtype}, cpu, sizes)
 	if err != nil {
 		return err
 	}
 
-	if !slices.Contains(strings.Split(dtypes, ", "), choice.Dtype) {
-		return fmt.Errorf("%s dtype %q %w", purpose, choice.Dtype, errModelsDtype)
-	}
-
-	for _, code := range sortedKeys(choice.Languages) {
+	for _, code := range slices.Sorted(maps.Keys(choice.Languages)) {
 		if _, ok := available.get(code); !ok {
 			return fmt.Errorf("%s %q %w", purpose, code, errModelsLanguage)
 		}
 
-		err = checkModel(dir, purpose+"."+code, choice.Languages[code])
+		err = checkExport(dir, purpose+"."+code, kindSeq2Seq, Export{Model: choice.Languages[code], Dtype: choice.Dtype}, cpu, sizes)
 		if err != nil {
 			return err
 		}
@@ -182,62 +232,214 @@ func checkChoice(dir, purpose string, choice ModelChoice, available languages) e
 	return nil
 }
 
-// checkModel confirms that a model id names a directory of files in dir,
-// in the layout a browser loads a model from.
-func checkModel(dir, purpose, model string) error {
-	parts := strings.Split(model, "/")
-	valid := len(parts) == modelIDParts && parts[0] != "" && parts[1] != "" && !strings.ContainsAny(model, " :\t")
+func checkTranslation(dir string, choice MTChoice, available languages, sizes map[string]int64) error {
+	if choice.Kind != kindSeq2Seq && choice.Kind != kindLLM {
+		return fmt.Errorf("mt kind %q %w", choice.Kind, errModelsKind)
+	}
 
-	if !valid {
+	err := checkExport(dir, "mt", choice.Kind, Export{Model: choice.Model, Dtype: choice.Dtype}, choice.Kind == kindSeq2Seq, sizes)
+	if err != nil {
+		return err
+	}
+
+	for _, pair := range slices.Sorted(maps.Keys(choice.Pairs)) {
+		err = checkPair(pair, available)
+		if err != nil {
+			return err
+		}
+
+		err = checkExport(dir, "mt.pairs."+pair, kindSeq2Seq, choice.Pairs[pair], true, sizes)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func checkPair(pair string, available languages) error {
+	codes := strings.Split(pair, "-")
+	if len(codes) != pairParts || codes[0] == codes[1] {
+		return fmt.Errorf("mt pair %q %w", pair, errModelsPair)
+	}
+
+	for _, code := range codes {
+		if _, ok := available.get(code); !ok {
+			return fmt.Errorf("mt pair %q: %q %w", pair, code, errModelsLanguage)
+		}
+	}
+
+	return nil
+}
+
+func exportFiles(kind Kind, suffix string) []string {
+	if kind == kindLLM {
+		return []string{"onnx/model" + suffix + ".onnx"}
+	}
+
+	return []string{"onnx/encoder_model" + suffix + ".onnx", "onnx/decoder_model_merged" + suffix + ".onnx"}
+}
+
+func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes map[string]int64) error {
+	err := checkModelID(purpose, export.Model)
+	if err != nil {
+		return err
+	}
+
+	suffixes := dtypeSuffixes()
+
+	suffix, ok := suffixes[export.Dtype]
+	if !ok {
+		return fmt.Errorf("%s dtype %q %w: %s", purpose, export.Dtype, errModelsDtype, strings.Join(slices.Sorted(maps.Keys(suffixes)), ", "))
+	}
+
+	what := fmt.Sprintf("%s %q", purpose, export.Model)
+	root := filepath.Join(dir, filepath.FromSlash(export.Model))
+
+	size, err := metadataSize(root, what)
+	if err != nil {
+		return err
+	}
+
+	for _, name := range exportFiles(kind, suffix) {
+		bytes, err := exportSize(root, name, what)
+		if err != nil {
+			return err
+		}
+
+		size += bytes
+	}
+
+	if cpu && export.Dtype != cpuDtype {
+		err = checkFiles(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
+		if err != nil {
+			return err
+		}
+	}
+
+	sizes[export.Model] = size
+
+	return nil
+}
+
+func checkModelID(purpose, model string) error {
+	parts := strings.Split(model, "/")
+	if len(parts) != modelIDParts || strings.ContainsAny(model, " :\t") {
 		return fmt.Errorf("%s %q %w", purpose, model, errModelsDir)
 	}
 
-	return checkFile(filepath.Join(dir, filepath.FromSlash(model), modelConfig), fmt.Sprintf("%s %q", purpose, model))
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("%s %q %w", purpose, model, errModelsDir)
+		}
+	}
+
+	return nil
 }
 
-// checkVoices confirms that every language has a Piper voice in dir, the
-// model and the JSON beside it.
-func checkVoices(dir string, voices map[string]string, available languages) error {
-	for _, code := range sortedKeys(voices) {
+func checkFiles(root string, names []string, what string) error {
+	for _, name := range names {
+		_, err := fileSize(filepath.Join(root, filepath.FromSlash(name)), what)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func metadataSize(root, what string) (int64, error) {
+	size, err := fileSize(filepath.Join(root, modelConfig), what)
+	if err != nil {
+		return 0, err
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", what, err)
+	}
+
+	for _, entry := range entries {
+		if entry.Name() == modelConfig || path.Ext(entry.Name()) != ".json" || !entry.Type().IsRegular() {
+			continue
+		}
+
+		bytes, err := fileSize(filepath.Join(root, entry.Name()), what)
+		if err != nil {
+			return 0, err
+		}
+
+		size += bytes
+	}
+
+	return size, nil
+}
+
+func exportSize(root, name, what string) (int64, error) {
+	file := filepath.Join(root, filepath.FromSlash(name))
+
+	size, err := fileSize(file, what)
+	if err != nil {
+		return 0, err
+	}
+
+	data, err := fileSize(file+externalData, what)
+	if errors.Is(err, errModelsMissing) {
+		return size, nil
+	}
+
+	if err != nil {
+		return 0, err
+	}
+
+	return size + data, nil
+}
+
+func checkVoices(dir string, voices map[string]string, available languages, sizes map[string]int64) error {
+	for _, code := range slices.Sorted(maps.Keys(voices)) {
 		if _, ok := available.get(code); !ok {
 			return fmt.Errorf("tts %q %w", code, errModelsLanguage)
 		}
 
 		voice := voices[code]
-		if voice == "" || strings.ContainsAny(voice, `/\ :`) {
+		if voice == "" || strings.ContainsAny(voice, `/\ :`) || strings.HasPrefix(voice, ".") {
 			return fmt.Errorf("tts %q %q %w", code, voice, errVoiceName)
 		}
 
 		what := fmt.Sprintf("tts %q voice %q", code, voice)
 
+		var size int64
+
 		for _, suffix := range []string{voiceModel, voiceJSON} {
-			err := checkFile(filepath.Join(dir, piperDir, voice+suffix), what)
+			bytes, err := fileSize(filepath.Join(dir, piperDir, voice+suffix), what)
 			if err != nil {
 				return err
 			}
+
+			size += bytes
 		}
+
+		sizes[piperDir+"/"+voice] = size
 	}
 
 	return nil
 }
 
-// checkFile confirms that a file the browsers load is where they look for
-// it, and names what loads it when it is not.
-func checkFile(file, what string) error {
+func fileSize(file, what string) (int64, error) {
 	info, err := os.Stat(file)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrInvalid) {
-			return fmt.Errorf("%s %w: %s", what, errModelsMissing, file)
+			return 0, fmt.Errorf("%s %w: %s", what, errModelsMissing, file)
 		}
 
-		return fmt.Errorf("%s: %w: %s", what, err, file)
+		return 0, fmt.Errorf("%s: %w: %s", what, err, file)
 	}
 
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s %w: %s", what, errModelsMissing, file)
+		return 0, fmt.Errorf("%s %w: %s", what, errModelsMissing, file)
 	}
 
-	return nil
+	return info.Size(), nil
 }
 
 // newModelFiles serves the model directory the browsers load from. A
@@ -264,15 +466,4 @@ func newModelFiles(dir string) http.Handler {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		files.ServeHTTP(w, r)
 	})
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-
-	slices.Sort(keys)
-
-	return keys
 }

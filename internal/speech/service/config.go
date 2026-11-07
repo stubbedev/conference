@@ -56,6 +56,7 @@ const (
 	envEngines           = "SPEECH_ENGINES"
 	envModelDir          = "SPEECH_MODEL_DIR"
 	envModelsFile        = "SPEECH_MODELS_FILE"
+	envGlossary          = "GLOSSARY"
 	envLanguagesFile     = "LANGUAGES_FILE"
 	envOpenAIKey         = "OPENAI_API_KEY"
 	envInternalDomains   = "INTERNAL_DOMAINS"
@@ -95,7 +96,7 @@ type Settings struct {
 	voice            engine
 	voiceName        string
 	interim          time.Duration
-	glossary         string
+	prompt           Prompt
 	languages        languages
 	models           Models
 	modelDir         string
@@ -218,7 +219,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		voice:            standIn(),
 		voiceName:        env(envVoiceName),
 		interim:          0,
-		glossary:         env("GLOSSARY"),
+		prompt:           newPrompt(env(envGlossary), langs),
 		languages:        langs,
 		models:           noModels(""),
 		modelDir:         env(envModelDir),
@@ -229,7 +230,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		return Settings{}, err
 	}
 
-	settings.models = env.loadModels(settings.modelDir, env(envModelsFile), langs)
+	settings.models = env.loadModels(settings.modelDir, env(envModelsFile), langs, settings.prompt)
 
 	interimDefault := defaultInterim
 	if settings.transcription.external {

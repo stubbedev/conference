@@ -118,55 +118,89 @@ exports and the voice for each language:
 
 ```json
 {
-  "asr": { "model": "onnx-community/whisper-large-v3-turbo", "dtype": "q4f16" },
-  "mt": { "model": "Xenova/m2m100_418M", "dtype": "q4" },
-  "tts": { "en": "en_US-lessac-medium", "de": "de_DE-thorsten-medium" }
+  "asr": {
+    "model": "onnx-community/whisper-large-v3-turbo", "dtype": "q4f16",
+    "fallback": {
+      "model": "onnx-community/whisper-base", "dtype": "q4",
+      "languages": { "en": "onnx-community/moonshine-base-ONNX" }
+    }
+  },
+  "mt": {
+    "kind": "seq2seq", "model": "Xenova/m2m100_418M", "dtype": "q4f16",
+    "pairs": { "en-de": { "model": "Xenova/opus-mt-en-de", "dtype": "q4f16" } },
+    "builtin": false
+  },
+  "tts": { "en": "en_US-joe-medium", "de": "de_DE-thorsten-medium" }
 }
 ```
 
-Transcription is a Whisper model such as whisper-large-v3-turbo through
-transformers.js, translation a multilingual model such as m2m100, and the
-voice a Piper voice per language: the one voice that language is spoken
-in, so the choice between a male and a female voice is the operator's,
-not the speaker's. A language without a voice gets subtitles and no
-voice, and the other engines carry on. `asr.languages` names a model a
-language loads instead of the default one, which is how a room with a
-Danish fine-tune gets one without moving every other language off the
-shared model.
+- **Transcription** (`asr`) is a Whisper model such as
+  whisper-large-v3-turbo through transformers.js. `asr.languages` names a
+  model a language loads instead of the default one, which is how a room
+  with a Danish fine-tune gets one without moving every other language off
+  the shared model. `asr.fallback` is the smaller model a browser steps
+  down to when it cannot keep up, with its own `languages`: English steps
+  down to Moonshine, whose cost follows the length of what was said rather
+  than Whisper's fixed 30 seconds.
+- **Translation** (`mt`) is either an encoder-decoder model (`"kind":
+  "seq2seq"`) such as m2m100, or a language model (`"kind": "llm"`) such
+  as Qwen3. Only a language model follows the translation prompt the
+  server runtime uses: the form of address of each language, `GLOSSARY`,
+  and the sentences before the one it translates. `mt.pairs` gives a
+  language pair, source-target, a smaller model of its own (OPUS-MT), and
+  `mt.builtin` lets a browser with a built-in translator (Chrome's
+  `Translator`) translate first. The pairs and the built-in translator
+  follow no prompt, so a room that needs the glossary or the form of
+  address leaves both out.
+- **The voice** (`tts`) is a Piper voice per language: the one voice that
+  language is spoken in, so the choice between a male and a female voice
+  is the operator's, not the speaker's. A language without a voice gets
+  subtitles and no voice, and the other engines carry on.
 
 The directory holds each model in the layout transformers.js loads it
-from, `<model dir>/<owner>/<model>/config.json` with
-`onnx/<name>_<dtype>.onnx` beside it, and each voice as
-`<model dir>/piper/<voice>.onnx` with `<model dir>/piper/<voice>.onnx.json`
-beside it. The server checks every file at start and names the one that
-is missing.
+from, `<model dir>/<owner>/<model>/config.json` with the export's ONNX
+files in `onnx/` beside it, and each voice as `<model dir>/piper/<voice>.onnx`
+with `<model dir>/piper/<voice>.onnx.json` beside it. A model a browser
+without a usable GPU runs also needs its 8-bit export (`q8`, the
+`_quantized` files): every encoder-decoder translation model, the
+transcription fallback, and the transcription model itself when there is
+no fallback. The server checks every file at start, names the one that is
+missing, and tells the browsers what each model weighs.
 
-The models are large: whisper-large-v3-turbo at q4f16 is about 537 MB,
-m2m100_418M at q4 about 1.3 GB, and a Piper medium voice about 60 MB per
-language. A browser downloads each once and caches it from then on.
-Transcription needs WebGPU; a member without it transcribes nothing and
-is heard untranslated.
+The models are large: whisper-large-v3-turbo at q4f16 is about 570 MB,
+m2m100_418M at q4f16 about 740 MB, Qwen3-1.7B at q4f16 about 1.4 GB, a
+pair about 150 MB, and a Piper medium voice about 60 MB per language. A
+browser downloads what it uses once and caches it from then on.
 
 `node web/scripts/fetch-speech-models.mjs` fills that directory without
 the operator looking up a file name: it reads each model's file list from
-the Hugging Face API at the commit the script pins, downloads the export
-for the dtype it is asked for, picks a Piper voice for every language it
-is given, and writes `models.json` naming the models, the dtypes and each
-voice, for `SPEECH_MODELS_FILE`. Mount the directory into the container
-and point both settings at it; English comes to about 1.9 GB, and every
-further language about 65 MB.
+the Hugging Face API, downloads the exports a browser loads, picks a Piper
+voice for every language it is given, and writes `models.json` for
+`SPEECH_MODELS_FILE`. Mount the directory into the container and point
+both settings at it.
 
 ```sh
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da
+# every pair OPUS-MT has a model for, and Chrome's translator first
+node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da --pairs --builtin
+# a language model, for the glossary and the form of address
+node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da --mt-kind=llm
 ```
 
+`--asr`, `--asr-dtype`, `--asr-fallback` (or `none`), `--asr-fallback-dtype`,
+`--mt`, `--mt-dtype` and `--pair-dtype` choose other models and exports.
+The default models are pinned to a commit, so each run downloads the same
+bytes; a model the script does not pin, such as a pair, is fetched at the
+commit its repository is on, which the script names. The pairs are
+OPUS-MT, CC-BY-4.0, which asks for credit where they ship. A file already
+in place with the right size is left alone.
+
 Voices are chosen by quality first, medium before high, low and x_low,
-and the first one whose model card is CC0 or Apache-2.0 wins. A language
-with no such voice still gets its best one, with the license it carries
-named on stderr, so French ships a CC0 low voice and Italian a medium one
-under a license to read before shipping it. Each run downloads the same
-bytes, since the revisions are pinned, and a file already in place with
-the right size is left alone.
+among the voices with one speaker, and the first one whose model card is
+CC0 or Apache-2.0 wins. A language with no such voice still gets its best
+one, with the license it carries named on stderr, so French ships a CC0
+low voice and Italian a medium one under a license to read before
+shipping it.
 
 Every model and voice file is served from the server's own origin under
 `/speech/`, with immutable caching, so nothing comes from a model hub or

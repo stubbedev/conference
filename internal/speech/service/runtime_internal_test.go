@@ -23,42 +23,50 @@ const (
 )
 
 // modelDir writes a model directory holding the given model ids, each as
-// a directory with the config a browser loads a model from, and the two
-// voices the choices name.
+// a directory with the config and the encoder-decoder exports a browser
+// loads, on a GPU and on the CPU, and the two voices the choices name.
 func modelDir(t *testing.T, models ...string) string {
 	t.Helper()
 
 	dir := t.TempDir()
 
 	for _, model := range models {
-		path := filepath.Join(dir, filepath.FromSlash(model))
-
-		err := os.MkdirAll(path, 0o750)
-		if err != nil {
-			t.Fatalf("model dir: %v", err)
-		}
-
-		err = os.WriteFile(filepath.Join(path, modelConfig), []byte("{}"), 0o600)
-		if err != nil {
-			t.Fatalf("model config: %v", err)
-		}
+		writeModel(t, dir, model, kindSeq2Seq, "q4f16", "q4", cpuDtype)
 	}
 
 	for _, voice := range []string{voiceLessac, voiceDanish} {
-		err := os.MkdirAll(filepath.Join(dir, piperDir), 0o750)
-		if err != nil {
-			t.Fatalf("voices dir: %v", err)
-		}
-
-		for _, suffix := range []string{voiceModel, voiceJSON} {
-			err = os.WriteFile(filepath.Join(dir, piperDir, voice+suffix), []byte("{}"), 0o600)
-			if err != nil {
-				t.Fatalf("voice: %v", err)
-			}
-		}
+		writeFile(t, filepath.Join(dir, piperDir, voice+voiceModel), "{}")
+		writeFile(t, filepath.Join(dir, piperDir, voice+voiceJSON), "{}")
 	}
 
 	return dir
+}
+
+func writeModel(t *testing.T, dir, model string, kind Kind, dtypes ...string) {
+	t.Helper()
+
+	root := filepath.Join(dir, filepath.FromSlash(model))
+	writeFile(t, filepath.Join(root, modelConfig), "{}")
+
+	for _, dtype := range dtypes {
+		for _, name := range exportFiles(kind, dtypeSuffixes()[dtype]) {
+			writeFile(t, filepath.Join(root, filepath.FromSlash(name)), "onnx")
+		}
+	}
+}
+
+func writeFile(t *testing.T, file, content string) {
+	t.Helper()
+
+	err := os.MkdirAll(filepath.Dir(file), 0o750)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	err = os.WriteFile(file, []byte(content), 0o600)
+	if err != nil {
+		t.Fatalf("write %s: %v", file, err)
+	}
 }
 
 // modelsFile writes the model choices the browsers load and returns its
@@ -83,8 +91,11 @@ func modelsFile(t *testing.T, choices modelFile) string {
 
 func browserChoices() modelFile {
 	return modelFile{
-		ASR: ModelChoice{Model: asrModel, Dtype: "q4f16", Languages: map[string]string{"da": danish}},
-		MT:  ModelChoice{Model: mtModel, Dtype: "q8", Languages: nil},
+		ASR: ASRChoice{
+			ModelChoice: ModelChoice{Model: asrModel, Dtype: "q4f16", Languages: map[string]string{"da": danish}},
+			Fallback:    nil,
+		},
+		MT:  MTChoice{Kind: kindSeq2Seq, Model: mtModel, Dtype: "q4", Pairs: nil, Builtin: false},
 		TTS: map[string]string{"en": voiceLessac, "da": voiceDanish},
 	}
 }
@@ -310,5 +321,165 @@ func TestModelFiles(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("missing model: %d, want 404", rec.Code)
+	}
+}
+
+const (
+	llmModel  = "onnx-community/Qwen3-1.7B-ONNX"
+	pairModel = "Xenova/opus-mt-en-da"
+	baseModel = "onnx-community/whisper-base"
+)
+
+func browserStatus(t *testing.T, dir string, choices modelFile) Status {
+	t.Helper()
+
+	return load(t, map[string]string{
+		envRuntime:    runtimeBrowser,
+		envModelDir:   dir,
+		envModelsFile: modelsFile(t, choices),
+	}).Status()
+}
+
+func TestBrowserRuntimeNeedsTheExportItRunsOnTheCPU(t *testing.T) {
+	t.Parallel()
+
+	dir := modelDir(t, danish, mtModel)
+	writeModel(t, dir, asrModel, kindSeq2Seq, "q4f16")
+
+	status := browserStatus(t, dir, browserChoices())
+	if status.Available || !strings.Contains(status.Reason, "on the CPU") || !strings.Contains(status.Reason, "encoder_model_quantized.onnx") {
+		t.Fatalf("available %v reason %q, want a refusal naming the 8-bit export", status.Available, status.Reason)
+	}
+}
+
+func TestBrowserRuntimeReportsWhatEachModelWeighs(t *testing.T) {
+	t.Parallel()
+
+	dir := modelDir(t, asrModel, danish, mtModel)
+	writeFile(t, filepath.Join(dir, filepath.FromSlash(asrModel), "tokenizer.json"), "[]")
+	writeFile(t, filepath.Join(dir, filepath.FromSlash(asrModel), "onnx", "encoder_model_q4f16.onnx_data"), "weights")
+
+	status := browserStatus(t, dir, browserChoices())
+	if !status.Available {
+		t.Fatalf("unavailable: %s", status.Reason)
+	}
+
+	want := map[string]int64{
+		asrModel:                     int64(len("{}") + len("[]") + 2*len("onnx") + len("weights")),
+		danish:                       int64(len("{}") + 2*len("onnx")),
+		mtModel:                      int64(len("{}") + 2*len("onnx")),
+		piperDir + "/" + voiceLessac: int64(2 * len("{}")),
+		piperDir + "/" + voiceDanish: int64(2 * len("{}")),
+	}
+
+	for model, size := range want {
+		if status.Models.Sizes[model] != size {
+			t.Errorf("%s weighs %d, want %d", model, status.Models.Sizes[model], size)
+		}
+	}
+}
+
+func TestBrowserRuntimeGivesALanguageModelItsPrompt(t *testing.T) {
+	t.Parallel()
+
+	dir := modelDir(t, asrModel, danish)
+	writeModel(t, dir, llmModel, kindLLM, "q4f16")
+
+	choices := browserChoices()
+	choices.MT = MTChoice{Kind: kindLLM, Model: llmModel, Dtype: "q4f16", Pairs: nil, Builtin: true}
+
+	settings := load(t, map[string]string{
+		envRuntime:    runtimeBrowser,
+		envModelDir:   dir,
+		envModelsFile: modelsFile(t, choices),
+		envGlossary:   testGlossary,
+	})
+
+	status := settings.Status()
+	if !status.Available {
+		t.Fatalf("unavailable: %s", status.Reason)
+	}
+
+	prompt := status.Models.Prompt
+	if prompt == nil {
+		t.Fatal("a language model has no prompt")
+	}
+
+	if !strings.Contains(prompt.Glossary, "Kontainer") || prompt.Address["de"] == "" || !status.Models.MT.Builtin {
+		t.Fatalf("prompt %+v builtin %v, want the glossary, German's address and the built-in translator", prompt, status.Models.MT.Builtin)
+	}
+
+	if browserStatus(t, modelDir(t, asrModel, danish, mtModel), browserChoices()).Models.Prompt != nil {
+		t.Fatal("an encoder-decoder model has a prompt it cannot follow")
+	}
+}
+
+func TestBrowserRuntimeChecksEveryPair(t *testing.T) {
+	t.Parallel()
+
+	dir := modelDir(t, asrModel, danish, mtModel, pairModel)
+
+	for pair, refusal := range map[string]string{"en-da": "", "en-en": "en-en", "en-xx": "xx", "enda": "enda", "da-en": "mt.pairs.da-en"} {
+		choices := browserChoices()
+
+		model := pairModel
+		if pair == "da-en" {
+			model = "Xenova/opus-mt-da-en"
+		}
+
+		choices.MT.Pairs = map[string]Export{pair: {Model: model, Dtype: "q4"}}
+
+		status := browserStatus(t, dir, choices)
+		if refusal == "" && !status.Available {
+			t.Errorf("%s: unavailable: %s", pair, status.Reason)
+		}
+
+		if refusal != "" && (status.Available || !strings.Contains(status.Reason, refusal)) {
+			t.Errorf("%s: available %v reason %q, want a refusal naming %q", pair, status.Available, status.Reason, refusal)
+		}
+	}
+}
+
+func TestBrowserRuntimeChecksTheFallbackModel(t *testing.T) {
+	t.Parallel()
+
+	choices := browserChoices()
+	choices.ASR.Fallback = &ModelChoice{Model: baseModel, Dtype: "q4", Languages: nil}
+
+	status := browserStatus(t, modelDir(t, asrModel, danish, mtModel), choices)
+	if status.Available || !strings.Contains(status.Reason, "asr.fallback") {
+		t.Fatalf("available %v reason %q, want a refusal naming the fallback", status.Available, status.Reason)
+	}
+
+	if !browserStatus(t, modelDir(t, asrModel, danish, mtModel, baseModel), choices).Available {
+		t.Fatal("unavailable with the fallback in place")
+	}
+}
+
+func TestBrowserRuntimeNeedsTheKindOfTranslationModel(t *testing.T) {
+	t.Parallel()
+
+	choices := browserChoices()
+	choices.MT.Kind = ""
+
+	status := browserStatus(t, modelDir(t, asrModel, danish, mtModel), choices)
+	if status.Available || !strings.Contains(status.Reason, "mt kind") {
+		t.Fatalf("available %v reason %q, want a refusal naming the kind", status.Available, status.Reason)
+	}
+}
+
+func TestBrowserRuntimeRunsTheFallbackOnTheCPU(t *testing.T) {
+	t.Parallel()
+
+	dir := modelDir(t, danish, mtModel, baseModel)
+	writeModel(t, dir, asrModel, kindSeq2Seq, "q4f16")
+
+	choices := browserChoices()
+	choices.ASR.Languages = nil
+	choices.ASR.Fallback = &ModelChoice{Model: baseModel, Dtype: "q4", Languages: nil}
+
+	status := browserStatus(t, dir, choices)
+	if !status.Available {
+		t.Fatalf("unavailable: %s, though the CPU runs the fallback", status.Reason)
 	}
 }
