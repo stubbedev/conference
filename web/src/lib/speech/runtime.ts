@@ -26,3 +26,13 @@ export function fallbackToWasm(err: unknown): boolean {
 export function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
+
+const WITHOUT_HALVES: Record<string, string> = { fp16: 'fp32', q4f16: 'q4', q2f16: 'q2', q1f16: 'q1' }
+
+export function withoutHalves(dtype: string): string {
+  return WITHOUT_HALVES[dtype] ?? dtype
+}
+
+export function needsHalves(dtype: string): boolean {
+  return withoutHalves(dtype) !== dtype
+}

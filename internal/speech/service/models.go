@@ -32,6 +32,8 @@ const (
 	externalData = "_data"
 	cpuDtype     = "q8"
 
+	maxBrowserFile = 2<<30 - 1
+
 	modelIDParts = 2
 	pairParts    = 2
 )
@@ -45,6 +47,7 @@ var (
 	errModelsKind     = errors.New("must be " + string(kindSeq2Seq) + " or " + string(kindLLM))
 	errModelsPair     = errors.New("must be two different languages, source-target, e.g. en-de")
 	errVoiceName      = errors.New("must be a voice's name, letters, digits, dashes and dots")
+	errModelsTooLarge = errors.New("is larger than a browser can load as one file")
 )
 
 func dtypeSuffixes() map[string]string {
@@ -310,16 +313,41 @@ func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes 
 		size += bytes
 	}
 
-	if cpu && export.Dtype != cpuDtype {
-		err = checkFiles(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
-		if err != nil {
-			return err
-		}
+	err = checkStandIns(root, what, kind, export.Dtype, cpu)
+	if err != nil {
+		return err
 	}
 
 	sizes[export.Model] = size
 
 	return nil
+}
+
+func checkStandIns(root, what string, kind Kind, dtype string, cpu bool) error {
+	suffixes := dtypeSuffixes()
+
+	if cpu && dtype != cpuDtype {
+		err := checkFiles(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
+		if err != nil {
+			return err
+		}
+	}
+
+	plain, halves := withoutHalves(dtype)
+	if kind != kindLLM || !halves {
+		return nil
+	}
+
+	return checkFiles(root, exportFiles(kind, suffixes[plain]), what+" on a GPU without shader-f16")
+}
+
+func withoutHalves(dtype string) (string, bool) {
+	plain, halves := map[string]string{"fp16": "fp32", "q4f16": "q4", "q2f16": "q2", "q1f16": "q1"}[dtype]
+	if !halves {
+		return dtype, false
+	}
+
+	return plain, true
 }
 
 func checkModelID(purpose, model string) error {
@@ -437,6 +465,10 @@ func fileSize(file, what string) (int64, error) {
 
 	if !info.Mode().IsRegular() {
 		return 0, fmt.Errorf("%s %w: %s", what, errModelsMissing, file)
+	}
+
+	if info.Size() > maxBrowserFile {
+		return 0, fmt.Errorf("%s %w, %d bytes against %d: %s", what, errModelsTooLarge, info.Size(), maxBrowserFile, file)
 	}
 
 	return info.Size(), nil

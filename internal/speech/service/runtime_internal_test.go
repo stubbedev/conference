@@ -31,7 +31,7 @@ func modelDir(t *testing.T, models ...string) string {
 	dir := t.TempDir()
 
 	for _, model := range models {
-		writeModel(t, dir, model, kindSeq2Seq, "q4f16", "q4", cpuDtype)
+		writeModel(t, dir, model, kindSeq2Seq, halvesDtype, "q4", cpuDtype)
 	}
 
 	for _, voice := range []string{voiceLessac, voiceDanish} {
@@ -92,7 +92,7 @@ func modelsFile(t *testing.T, choices modelFile) string {
 func browserChoices() modelFile {
 	return modelFile{
 		ASR: ASRChoice{
-			ModelChoice: ModelChoice{Model: asrModel, Dtype: "q4f16", Languages: map[string]string{"da": danish}},
+			ModelChoice: ModelChoice{Model: asrModel, Dtype: halvesDtype, Languages: map[string]string{"da": danish}},
 			Fallback:    nil,
 		},
 		MT:  MTChoice{Kind: kindSeq2Seq, Model: mtModel, Dtype: "q4", Pairs: nil, Builtin: false},
@@ -325,9 +325,10 @@ func TestModelFiles(t *testing.T) {
 }
 
 const (
-	llmModel  = "onnx-community/Qwen3-1.7B-ONNX"
-	pairModel = "Xenova/opus-mt-en-da"
-	baseModel = "onnx-community/whisper-base"
+	halvesDtype = "q4f16"
+	llmModel    = "onnx-community/Qwen3-1.7B-ONNX"
+	pairModel   = "Xenova/opus-mt-en-da"
+	baseModel   = "onnx-community/whisper-base"
 )
 
 func browserStatus(t *testing.T, dir string, choices modelFile) Status {
@@ -344,7 +345,7 @@ func TestBrowserRuntimeNeedsTheExportItRunsOnTheCPU(t *testing.T) {
 	t.Parallel()
 
 	dir := modelDir(t, danish, mtModel)
-	writeModel(t, dir, asrModel, kindSeq2Seq, "q4f16")
+	writeModel(t, dir, asrModel, kindSeq2Seq, halvesDtype)
 
 	status := browserStatus(t, dir, browserChoices())
 	if status.Available || !strings.Contains(status.Reason, "on the CPU") || !strings.Contains(status.Reason, "encoder_model_quantized.onnx") {
@@ -383,10 +384,10 @@ func TestBrowserRuntimeGivesALanguageModelItsPrompt(t *testing.T) {
 	t.Parallel()
 
 	dir := modelDir(t, asrModel, danish)
-	writeModel(t, dir, llmModel, kindLLM, "q4f16")
+	writeModel(t, dir, llmModel, kindLLM, halvesDtype, "q4")
 
 	choices := browserChoices()
-	choices.MT = MTChoice{Kind: kindLLM, Model: llmModel, Dtype: "q4f16", Pairs: nil, Builtin: true}
+	choices.MT = MTChoice{Kind: kindLLM, Model: llmModel, Dtype: halvesDtype, Pairs: nil, Builtin: true}
 
 	settings := load(t, map[string]string{
 		envRuntime:    runtimeBrowser,
@@ -472,7 +473,7 @@ func TestBrowserRuntimeRunsTheFallbackOnTheCPU(t *testing.T) {
 	t.Parallel()
 
 	dir := modelDir(t, danish, mtModel, baseModel)
-	writeModel(t, dir, asrModel, kindSeq2Seq, "q4f16")
+	writeModel(t, dir, asrModel, kindSeq2Seq, halvesDtype)
 
 	choices := browserChoices()
 	choices.ASR.Languages = nil
@@ -481,5 +482,50 @@ func TestBrowserRuntimeRunsTheFallbackOnTheCPU(t *testing.T) {
 	status := browserStatus(t, dir, choices)
 	if !status.Available {
 		t.Fatalf("unavailable: %s, though the CPU runs the fallback", status.Reason)
+	}
+}
+
+func TestBrowserRuntimeNeedsTheLanguageModelWithoutHalves(t *testing.T) {
+	t.Parallel()
+
+	dir := modelDir(t, asrModel, danish)
+	writeModel(t, dir, llmModel, kindLLM, halvesDtype)
+
+	choices := browserChoices()
+	choices.MT = MTChoice{Kind: kindLLM, Model: llmModel, Dtype: halvesDtype, Pairs: nil, Builtin: false}
+
+	status := browserStatus(t, dir, choices)
+	if status.Available || !strings.Contains(status.Reason, "without shader-f16") || !strings.Contains(status.Reason, "model_q4.onnx") {
+		t.Fatalf("available %v reason %q, want a refusal naming the q4 export", status.Available, status.Reason)
+	}
+}
+
+func TestWithoutHalves(t *testing.T) {
+	t.Parallel()
+
+	for dtype, want := range map[string]string{halvesDtype: "q4", "fp16": "fp32", "q1f16": "q1", "q4": "q4", "q8": "q8"} {
+		got, _ := withoutHalves(dtype)
+		if got != want {
+			t.Errorf("%s without halves is %s, want %s", dtype, got, want)
+		}
+	}
+}
+
+func TestBrowserRuntimeRefusesAFileNoBrowserCanLoad(t *testing.T) {
+	t.Parallel()
+
+	dir := modelDir(t, asrModel, danish, mtModel)
+	encoder := filepath.Join(dir, filepath.FromSlash(mtModel), "onnx", "encoder_model_q4.onnx")
+
+	err := os.Truncate(encoder, maxBrowserFile+1)
+	if err != nil {
+		t.Fatalf("grow the export: %v", err)
+	}
+
+	status := browserStatus(t, dir, browserChoices())
+	refused := strings.Contains(status.Reason, "larger than a browser can load") && strings.Contains(status.Reason, "encoder_model_q4.onnx")
+
+	if status.Available || !refused {
+		t.Fatalf("available %v reason %q, want a refusal naming the file", status.Available, status.Reason)
 	}
 }

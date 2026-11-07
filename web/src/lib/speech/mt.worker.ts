@@ -4,9 +4,9 @@ import type { DataType } from '@huggingface/transformers'
 import { configureTransformers } from './hf'
 import { reportLoading } from './loading'
 import { pairFor, type Export, type MtChoice } from './models'
-import { dtypeFor, fallbackToWasm, message, type Device } from './runtime'
+import { dtypeFor, fallbackToWasm, message, needsHalves, withoutHalves, type Device } from './runtime'
 import { serve } from './serve'
-import { webgpuAvailable } from './webgpu'
+import { webgpuAvailable, webgpuHalves } from './webgpu'
 
 const MAX_NEW_TOKENS = 384
 const THINKING = /<think>[\s\S]*?<\/think>/g
@@ -32,6 +32,7 @@ type Model = { kind: 'seq2seq'; run: Seq2Seq } | { kind: 'llm'; run: Generator }
 
 let choice: MtChoice | null = null
 let device: Device = 'webgpu'
+let halves = true
 const models = new Map<string, Promise<Model>>()
 
 function chosen(): MtChoice {
@@ -56,7 +57,7 @@ async function load(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
     throw new Error(`the translation model ${wanted.model} is a language model, which needs WebGPU`)
   }
 
-  const dtype = dtypeFor(device, wanted.dtype) as DataType
+  const dtype = (kind === 'llm' && !halves ? withoutHalves(wanted.dtype) : dtypeFor(device, wanted.dtype)) as DataType
   try {
     if (kind === 'llm') {
       const run = await pipeline('text-generation', wanted.model, { device, dtype, progress_callback: reportLoading })
@@ -106,6 +107,8 @@ serve(async (request) => {
       configureTransformers(String(request.base))
       choice = request.mt as MtChoice
       if (!(await webgpuAvailable().catch(() => false))) device = 'wasm'
+      halves = await webgpuHalves().catch(() => false)
+      if (choice.kind === 'seq2seq' && !halves && needsHalves(choice.dtype)) device = 'wasm'
       await modelFor(choice, choice.kind)
       return
     }

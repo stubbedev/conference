@@ -38,7 +38,7 @@ const PINNED = {
   'onnx-community/whisper-base': '27a07b4b52b3a4c5886134bb4320e93e1a4bbc7c',
   'onnx-community/moonshine-base-ONNX': 'b1e9b6aae3c3c7298f10c3798393fdf38e8fbbad',
   'Xenova/m2m100_418M': '9c374f0b7aca709787cea97b047bfbbd1559d177',
-  'onnx-community/Qwen3-1.7B-ONNX': '3231b522c6e703b2f9b3cd8ea27426a1289a02f2',
+  'onnx-community/Qwen2.5-1.5B-Instruct': 'd54957e3af1be04546436e874a60fe386041b244',
 }
 
 const LANGUAGES_FILE =
@@ -46,7 +46,7 @@ const LANGUAGES_FILE =
 
 const MT_DEFAULTS = {
   seq2seq: { model: 'Xenova/m2m100_418M', dtype: 'q4f16' },
-  llm: { model: 'onnx-community/Qwen3-1.7B-ONNX', dtype: 'q4f16' },
+  llm: { model: 'onnx-community/Qwen2.5-1.5B-Instruct', dtype: 'q4f16' },
 }
 
 const PIPER_REPO = 'rhasspy/piper-voices'
@@ -81,6 +81,8 @@ const DTYPE_SUFFIXES = {
 }
 
 const CPU_DTYPE = 'q8'
+
+const MAX_BROWSER_FILE = 2 ** 31 - 1
 
 const MAX_PARALLEL = 4
 const REPORT_BYTES = 64e6
@@ -229,6 +231,13 @@ async function modelFiles(dir, model, kind, dtypes) {
     }
   }
 
+  for (const name of names) {
+    const { size } = tree.get(name)
+    if (size > MAX_BROWSER_FILE) {
+      throw new Error(`${model} has ${name} of ${(size / 1e6).toFixed(0)} MB at ${revision}, larger than a browser can load as one file; choose another export or model`)
+    }
+  }
+
   return names.map((name) => ({
     url: `${HUB}/${model}/resolve/${revision}/${name}`,
     out: path.join(dir, ...model.split('/'), ...name.split('/')),
@@ -237,8 +246,14 @@ async function modelFiles(dir, model, kind, dtypes) {
   }))
 }
 
+const WITHOUT_HALVES = { fp16: 'fp32', q4f16: 'q4', q2f16: 'q2', q1f16: 'q1' }
+
 function exportsFor(dtype, cpu) {
   return cpu ? [dtype, CPU_DTYPE] : [dtype]
+}
+
+function languageModelExports(dtype) {
+  return [dtype, WITHOUT_HALVES[dtype] ?? dtype]
 }
 
 function moonshineCandidates(code) {
@@ -458,7 +473,7 @@ async function main() {
 
   const files = [
     ...(await modelFiles(dir, asr.model, 'seq2seq', exportsFor(asr.dtype, fallback === null))),
-    ...(await modelFiles(dir, mt.model, mt.kind, exportsFor(mt.dtype, mt.kind === 'seq2seq'))),
+    ...(await modelFiles(dir, mt.model, mt.kind, mt.kind === 'llm' ? languageModelExports(mt.dtype) : exportsFor(mt.dtype, true))),
   ]
 
   if (fallback) {

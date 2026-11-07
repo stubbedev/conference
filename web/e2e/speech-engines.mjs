@@ -2,7 +2,7 @@
 // GPU loads the built workers and runs each on the models in
 // SPEECH_MODEL_DIR, the directory scripts/fetch-speech-models.mjs fills.
 //
-//   SPEECH_MODEL_DIR=… node web/e2e/speech-engines.mjs
+//   SPEECH_MODEL_DIR=… [GPU=1] node web/e2e/speech-engines.mjs
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -74,6 +74,11 @@ const asrProbe = workerProbe(
 
 const pairs = Object.keys(chosen.mt.pairs ?? {})
 const multilingual = ['de-da', 'da-de', 'en-da', 'de-en'].find((pair) => !pairs.includes(pair)) ?? 'de-en'
+const NAMES = { en: 'English', de: 'German', da: 'Danish' }
+const system = (source, target) =>
+  chosen.mt.kind === 'llm'
+    ? `You translate spoken ${NAMES[source]} from a business video call into natural spoken ${NAMES[target]}. Reply with the translation only.`
+    : ''
 const TEXTS = { en: 'Good morning, shall we start with the budget?', de: 'Guten Morgen, sollen wir mit dem Budget anfangen?', da: 'Godmorgen, skal vi starte med budgettet?' }
 
 const mtProbe = workerProbe(
@@ -85,7 +90,7 @@ const mtProbe = workerProbe(
   for (const pair of ${JSON.stringify([...pairs.slice(0, 1), multilingual])}) {
     const [source, target] = pair.split('-')
     const started = performance.now()
-    const { text } = await ask({ type: 'translate', text: ${JSON.stringify(TEXTS)}[source], source, target, system: '' })
+    const { text } = await ask({ type: 'translate', text: ${JSON.stringify(TEXTS)}[source], source, target, system: ${JSON.stringify(Object.fromEntries(['en-de', 'de-da', 'da-de', 'en-da', 'de-en'].map((pair) => [pair, system(...pair.split('-'))])))}[pair] })
     translated[pair] = { text, ms: Math.round(performance.now() - started) }
   }
   return { translated }
@@ -101,7 +106,7 @@ async function probe(browser, label, expression) {
 
 async function main() {
   const server = await serveSpeechPage({ models })
-  const browser = await launchChrome(chrome, 0, dir)
+  const browser = await launchChrome(chrome, 0, dir, [], { gpu: process.env.GPU === '1' })
   try {
     await browser.cdp.send('Page.navigate', { url: `${server.origin}/` }, browser.sessionId)
     await sleep(1_000)

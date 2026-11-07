@@ -84,7 +84,7 @@ function devToolsEndpoint(proc, idx) {
   })
 }
 
-export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless = true, fakeDevices = true } = {}) {
+export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless = true, fakeDevices = true, gpu = false } = {}) {
   const profile = mkdtempSync(join(dir, `chrome-${idx}-`))
   const proc = spawn(
     chrome,
@@ -93,7 +93,7 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
       ...(headless ? ['--headless=new', '--mute-audio'] : []),
       '--no-sandbox',
       '--no-first-run',
-      '--disable-gpu',
+      ...(gpu ? ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan'] : ['--disable-gpu']),
       ...(fakeDevices ? ['--use-fake-device-for-media-stream'] : []),
       '--use-fake-ui-for-media-stream',
       '--autoplay-policy=no-user-gesture-required',

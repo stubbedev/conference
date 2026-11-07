@@ -145,7 +145,7 @@ exports and the voice for each language:
   said rather than Whisper's fixed 30 seconds.
 - **Translation** (`mt`) is either an encoder-decoder model (`"kind":
   "seq2seq"`) such as m2m100, or a language model (`"kind": "llm"`) such
-  as Qwen3. Only a language model follows the translation prompt the
+  as Qwen2.5. Only a language model follows the translation prompt the
   server runtime uses: the form of address of each language, `GLOSSARY`,
   and the sentences before the one it translates. `mt.pairs` gives a
   language pair, source-target, a smaller model of its own (OPUS-MT), and
@@ -165,11 +165,15 @@ with `<model dir>/piper/<voice>.onnx.json` beside it. A model a browser
 without a usable GPU runs also needs its 8-bit export (`q8`, the
 `_quantized` files): every encoder-decoder translation model, the
 transcription fallback, and the transcription model itself when there is
-no fallback. The server checks every file at start, names the one that is
-missing, and tells the browsers what each model weighs.
+no fallback; a language model, which no CPU runs, needs the export it
+has without 16-bit floats (`q4` beside `q4f16`) for a GPU without
+`shader-f16`, and a GPU like that runs an encoder-decoder export that needs
+them on the CPU instead. No single file may be larger than a browser can
+load, 2 GiB. The server checks every file at start, names the one that
+is missing or too large, and tells the browsers what each model weighs.
 
 The models are large: whisper-large-v3-turbo at q4f16 is about 570 MB,
-m2m100_418M at q4f16 about 740 MB, Qwen3-1.7B at q4f16 about 1.4 GB, a
+m2m100_418M at q4f16 about 740 MB, Qwen2.5-1.5B-Instruct at q4f16 about 1.2 GB, a
 pair about 150 MB, and a Piper medium voice about 60 MB per language. A
 browser downloads what it uses once and caches it from then on.
 

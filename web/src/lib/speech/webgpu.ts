@@ -8,3 +8,8 @@ export async function webgpuAvailable(): Promise<boolean> {
   const adapter = await navigator.gpu?.requestAdapter()
   return Boolean(adapter)
 }
+
+export async function webgpuHalves(): Promise<boolean> {
+  const adapter = await navigator.gpu?.requestAdapter()
+  return adapter?.features.has('shader-f16') ?? false
+}

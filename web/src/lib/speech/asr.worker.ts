@@ -5,9 +5,9 @@ import { configureTransformers } from './hf'
 import { reportLoading } from './loading'
 import { asrExport, type AsrChoice, type AsrTier, type Export } from './models'
 import { toFloat32 } from './pcm'
-import { dtypeFor, fallbackToWasm, message, type Device } from './runtime'
+import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
 import { serve } from './serve'
-import { webgpuAvailable } from './webgpu'
+import { webgpuAvailable, webgpuHalves } from './webgpu'
 
 interface Transcriber {
   (audio: Float32Array, options: { language: string; task: 'transcribe' }): Promise<{ text: string }>
@@ -29,6 +29,17 @@ function exportFor(lang: string): Export {
   const wanted = asrExport(choice, tier, lang)
   if (!wanted) throw new Error(`there is no ${tier} transcription model`)
   return { model: wanted.model, dtype: dtypeFor(device, wanted.dtype) }
+}
+
+async function chooseDevice(asr: AsrChoice): Promise<void> {
+  if (!(await webgpuAvailable().catch(() => false))) {
+    runOnCpu()
+    return
+  }
+  if (!needsHalves(asr.dtype) || (await webgpuHalves().catch(() => false))) return
+
+  if (asr.fallback && !needsHalves(asr.fallback.dtype)) tier = 'fallback'
+  else runOnCpu()
 }
 
 function runOnCpu(): void {
@@ -75,7 +86,7 @@ serve(async (request) => {
     case 'init': {
       configureTransformers(String(request.base))
       choice = request.asr as AsrChoice
-      if (!(await webgpuAvailable().catch(() => false))) runOnCpu()
+      await chooseDevice(choice)
       await transcriberFor(lang)
       return
     }
