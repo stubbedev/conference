@@ -43,8 +43,14 @@ const ttsProbe = workerProbe(
         const reply = await ask({ type: 'speak', text: ${JSON.stringify(SENTENCE)}, lang, voice: 'female' })
         times.push(Math.round(performance.now() - started))
         seconds = reply.pcm.length / reply.rate
+        let peak = 0
+        let broken = 0
+        for (const sample of reply.pcm) {
+          if (!Number.isFinite(sample)) broken++
+          else peak = Math.max(peak, Math.abs(sample))
+        }
+        spoken[lang] = { seconds, times, peak: Math.round(peak * 1000) / 1000, broken }
       }
-      spoken[lang] = { seconds, times }
     } catch (err) {
       spoken[lang] = { error: String(err?.message ?? err) }
     }
@@ -125,8 +131,9 @@ async function main() {
     }
 
     const tts = await probe(browser, 'voice', ttsProbe)
-    for (const [lang, { seconds, error }] of Object.entries(tts.spoken ?? {})) {
+    for (const [lang, { seconds, peak, broken, error }] of Object.entries(tts.spoken ?? {})) {
       check(`voice ${lang}`, !error && seconds > 1, error ?? `spoke ${seconds} s`)
+      check(`voice ${lang} is audible`, !error && broken === 0 && peak > 0.05, `peak ${peak}, ${broken} samples that are not numbers`)
     }
   } finally {
     await stopProcess(browser.proc)

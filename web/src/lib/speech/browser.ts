@@ -307,6 +307,13 @@ class BrowserEngines implements Engines {
   }
 }
 
+let shared: { key: string; engines: BrowserEngines } | null = null
+
 export function browserEngines(models: SpeechModels, languages: readonly Language[]): Engines {
-  return new BrowserEngines(models, languages)
+  const key = JSON.stringify([models, languages])
+  if (shared?.key === key) return shared.engines
+
+  shared?.engines.close()
+  shared = { key, engines: new BrowserEngines(models, languages) }
+  return shared.engines
 }

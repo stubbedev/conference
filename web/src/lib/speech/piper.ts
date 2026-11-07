@@ -120,8 +120,12 @@ async function load(base: string, name: string): Promise<Voice> {
   return { config, session: await session(url, await download(url)) }
 }
 
+const VOICE_CACHE = 'conference-voices'
+
 async function download(url: string): Promise<Uint8Array> {
-  const response = await fetch(url)
+  const cache = await caches.open(VOICE_CACHE)
+  const cached = await cache.match(url)
+  const response = cached ?? (await fetch(url))
   if (!response.ok || !response.body) throw new Error(`the voice model ${url} could not be fetched: ${response.status} ${response.statusText}`)
 
   const total = Number(response.headers.get('Content-Length') ?? 0)
@@ -138,6 +142,12 @@ async function download(url: string): Promise<Uint8Array> {
   for (const chunk of chunks) {
     bytes.set(chunk, offset)
     offset += chunk.length
+  }
+
+  if (!cached) {
+    await cache.put(url, new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } })).catch((err: unknown) => {
+      console.warn(`the voice model ${url} could not be kept on this device, so it will be fetched again next time:`, err)
+    })
   }
   return bytes
 }

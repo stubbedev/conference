@@ -147,7 +147,6 @@ export class LocalTranslator implements Translator {
     await this.playbackContext?.close()
     this.playbackContext = null
     this.player = null
-    this.engines.close()
   }
 
   private detach(): void {

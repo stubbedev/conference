@@ -203,7 +203,7 @@ function translationWarnings(status: TranslatorStatus, selfLang: string, languag
   }
   if (status.loading) {
     const mb = (bytes: number) => Math.round(bytes / 1e6)
-    warnings.push(`Downloading the speech models: ${mb(status.loading.loaded)} of ${mb(status.loading.total)} MB`)
+    warnings.push(`Loading the speech models: ${mb(status.loading.loaded)} of ${mb(status.loading.total)} MB`)
   }
   if (status.sameLanguage) {
     warnings.push(`Everyone here speaks ${languageName(languages, selfLang)}: nothing to translate`)
