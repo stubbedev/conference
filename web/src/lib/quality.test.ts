@@ -47,7 +47,7 @@ test('a clean stream earns its layer back after a run of samples', () => {
 })
 
 test('recovery stops at what the layout can use', () => {
-  let state = { ceiling: 'l', clean: 0 } as ReturnType<typeof newQualityState>
+  let state = newQualityState('l')
   for (let i = 0; i < 12; i += 1) state = nextQuality(state, 'm', clean)
   assert.equal(state.ceiling, 'm')
 })
@@ -61,4 +61,27 @@ test('a smaller layout pulls the ceiling down with it', () => {
 test('the lower of two layers wins', () => {
   assert.equal(lowerLayer('h', 'm'), 'm')
   assert.equal(lowerLayer('l', 'h'), 'l')
+})
+
+test('a layer lost again right after it came back waits twice as long next time, and a held layer forgives it', () => {
+  let state = nextQuality(newQualityState('h'), 'h', stalled)
+  const samplesToClimb = () => {
+    let samples = 0
+    while (state.ceiling !== 'h') {
+      state = nextQuality(state, 'h', clean)
+      samples += 1
+    }
+    return samples
+  }
+
+  const first = samplesToClimb()
+  state = nextQuality(state, 'h', stalled)
+  const second = samplesToClimb()
+  state = nextQuality(state, 'h', stalled)
+  const third = samplesToClimb()
+  assert.deepEqual([first, second, third], [3, 6, 12])
+
+  for (let i = 0; i < 30; i += 1) state = nextQuality(state, 'h', clean)
+  state = nextQuality(state, 'h', stalled)
+  assert.equal(samplesToClimb(), 3)
 })

@@ -214,3 +214,53 @@ func expectContinues(t *testing.T, last, next mungedPacket) {
 		t.Fatalf("timestamp %d after %d, want a small forward step", next.ts, last.ts)
 	}
 }
+
+func TestLadderBacksOffALayerItCannotHold(t *testing.T) {
+	t.Parallel()
+
+	steps := newLadder()
+	steps.observeLoss(congestedLossFraction+1, layerHigh)
+	steps.tick()
+
+	climb := func() int {
+		ticks := 0
+
+		for steps.ceiling != layerHigh {
+			steps.tick()
+
+			ticks++
+		}
+
+		return ticks
+	}
+
+	climbAndFail := func() int {
+		ticks := climb()
+
+		steps.observeLoss(congestedLossFraction+1, layerHigh)
+		steps.tick()
+
+		return ticks
+	}
+
+	first := climbAndFail()
+	second := climbAndFail()
+	third := climbAndFail()
+
+	if first != upswitchCleanTicks || second != 2*upswitchCleanTicks || third != 4*upswitchCleanTicks {
+		t.Fatalf("waited %d, %d and %d ticks before each attempt, want the wait to double from %d", first, second, third, upswitchCleanTicks)
+	}
+
+	climb()
+
+	for range settledTicks {
+		steps.tick()
+	}
+
+	steps.observeLoss(congestedLossFraction+1, layerHigh)
+	steps.tick()
+
+	if again := climbAndFail(); again != upswitchCleanTicks {
+		t.Fatalf("waited %d ticks after holding a layer for a minute, want the wait forgiven back to %d", again, upswitchCleanTicks)
+	}
+}

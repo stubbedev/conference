@@ -305,7 +305,10 @@ const (
 	// Receiver-report loss above which a viewer steps down one layer.
 	congestedLossFraction = highLossFraction
 	// Consecutive loss-free adaptation ticks before stepping back up.
-	upswitchCleanTicks = 5
+	upswitchCleanTicks    = 5
+	maxUpswitchCleanTicks = 40
+	failedUpswitchTicks   = 10
+	settledTicks          = 60
 )
 
 // ladder is a viewer's loss-driven quality ceiling for one simulcast
@@ -317,10 +320,12 @@ type ladder struct {
 	ceiling    int
 	congested  bool
 	cleanTicks int
+	wait       int
+	sinceUp    int
 }
 
 func newLadder() ladder {
-	return ladder{ceiling: layerHigh, congested: false, cleanTicks: 0}
+	return ladder{ceiling: layerHigh, congested: false, cleanTicks: 0, wait: upswitchCleanTicks, sinceUp: settledTicks}
 }
 
 // observeLoss records one receiver report's loss fraction (1/256 units).
@@ -331,6 +336,9 @@ func (l *ladder) observeLoss(fractionLost uint8, current int) {
 
 	if !l.congested {
 		l.ceiling = max(min(l.ceiling, current)-1, layerLow)
+		if l.sinceUp < failedUpswitchTicks {
+			l.wait = min(l.wait*2, maxUpswitchCleanTicks)
+		}
 	}
 
 	l.congested = true
@@ -346,9 +354,16 @@ func (l *ladder) tick() {
 	}
 
 	l.cleanTicks++
-	if l.cleanTicks >= upswitchCleanTicks && l.ceiling < layerHigh {
+	l.sinceUp = min(l.sinceUp+1, settledTicks)
+
+	if l.sinceUp >= settledTicks {
+		l.wait = upswitchCleanTicks
+	}
+
+	if l.cleanTicks >= l.wait && l.ceiling < layerHigh {
 		l.ceiling++
 		l.cleanTicks = 0
+		l.sinceUp = 0
 	}
 }
 

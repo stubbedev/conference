@@ -19,6 +19,12 @@ const LOST_PACKETS_LIMIT = 20
 /** Clean samples in a row before one layer is added back. */
 const RECOVER_SAMPLES = 3
 
+const MAX_RECOVER_SAMPLES = 24
+
+const FAILED_RECOVERY_SAMPLES = 5
+
+const SETTLED_SAMPLES = 30
+
 export interface InboundCounters {
  /** Frames this viewer's decoder dropped, cumulatively. */
  droppedFrames: number
@@ -31,10 +37,12 @@ export interface QualityState {
   ceiling: Layer
   /** Consecutive samples without trouble, towards adding a layer back. */
   clean: number
+  wait: number
+  sinceUp: number
 }
 
 export function newQualityState(layout: Layer): QualityState {
-  return { ceiling: layout, clean: 0 }
+  return { ceiling: layout, clean: 0, wait: RECOVER_SAMPLES, sinceUp: SETTLED_SAMPLES }
 }
 
 export function layerIndex(layer: Layer): number {
@@ -62,20 +70,29 @@ function troubled(health: InboundCounters): boolean {
  * sharpness rather than the rest of the call.
  */
 export function nextQuality(state: QualityState, layout: Layer, health: InboundCounters): QualityState {
- if (troubled(health)) {
-  return { ceiling: step(lowerLayer(state.ceiling, layout), -1), clean: 0 }
- }
+  const sinceUp = Math.min(state.sinceUp + 1, SETTLED_SAMPLES)
+  const settledWait = sinceUp >= SETTLED_SAMPLES ? RECOVER_SAMPLES : state.wait
 
- if (layerIndex(state.ceiling) >= layerIndex(layout)) {
-  return { ceiling: layout, clean: 0 }
- }
+  if (troubled(health)) {
+    const failed = state.sinceUp < FAILED_RECOVERY_SAMPLES
+    return {
+      ceiling: step(lowerLayer(state.ceiling, layout), -1),
+      clean: 0,
+      wait: failed ? Math.min(state.wait * 2, MAX_RECOVER_SAMPLES) : settledWait,
+      sinceUp,
+    }
+  }
 
- const clean = state.clean + 1
- if (clean < RECOVER_SAMPLES) {
-  return { ceiling: state.ceiling, clean: clean }
- }
+  if (layerIndex(state.ceiling) >= layerIndex(layout)) {
+    return { ceiling: layout, clean: 0, wait: settledWait, sinceUp }
+  }
 
- return { ceiling: step(state.ceiling, 1), clean: 0 }
+  const clean = state.clean + 1
+  if (clean < settledWait) {
+    return { ceiling: state.ceiling, clean, wait: settledWait, sinceUp }
+  }
+
+  return { ceiling: step(state.ceiling, 1), clean: 0, wait: settledWait, sinceUp: 0 }
 }
 
 /** The layer to ask for: what the layout wants, no more than the viewer can carry. */
