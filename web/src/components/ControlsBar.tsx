@@ -136,7 +136,7 @@ export const ControlsBar = memo(function ControlsBar({
         {recording && onRecord && (
           <Button
             variant="destructive"
-            className="h-8 shrink-0 gap-1.5 rounded-full px-3 text-xs font-semibold"
+            className="h-8 shrink-0 gap-1.5 rounded-full px-3 text-xs font-semibold pointer-coarse:h-11"
             onClick={onRecord}
             aria-label="Stop recording"
           >

@@ -55,7 +55,7 @@ export const PeoplePanel = memo(function PeoplePanel({
 }: PeoplePanelProps) {
   const translating = languages.length > 0
   return (
-    <ul className="h-full overflow-y-auto p-2">
+    <ul className="h-full overflow-y-auto p-2" aria-label="People in the call">
       {members.map((member) => {
         const self = member.id === selfId
         const lang = memberLangs[member.id]
@@ -92,7 +92,7 @@ export const PeoplePanel = memo(function PeoplePanel({
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="size-8 shrink-0 rounded-full opacity-60 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                    className="size-8 shrink-0 rounded-full opacity-60 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 pointer-coarse:opacity-100"
                     aria-label={`More actions for ${member.name}`}
                   >
                     <MoreVertical />
