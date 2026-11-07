@@ -18,7 +18,8 @@ import { clauses } from '@/lib/speech/clauses'
 import { assignTranslators, translatorFor, type Candidate } from '@/lib/speech/election'
 import type { Engines, Segmenter } from '@/lib/speech/engines'
 import { invented } from '@/lib/speech/invented'
-import { Pace } from '@/lib/speech/pace'
+import { nextRunAt, Pace } from '@/lib/speech/pace'
+import { Recent } from '@/lib/speech/recent'
 import { Sentences, type Line } from '@/lib/speech/sentences'
 import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
 import { webgpuAvailable } from '@/lib/speech/webgpu'
@@ -31,6 +32,15 @@ const QUEUED_UTTERANCES = 8
 const HOLD_MS = 1_500
 const TRANSLATION_WAIT_MS = 5_000
 const EARLIER_SENTENCES = 8
+const INTERIM_TRANSCRIPTION_GAP_MS = 1_000
+const INTERIM_TRANSLATION_GAP_MS = 1_500
+const REMEMBERED_TRANSLATIONS = 64
+
+interface PendingInterim {
+  caption: CaptionLine
+  earlier: readonly string[]
+  share: boolean
+}
 
 const NO_WEBGPU = 'This browser cannot transcribe: it needs WebGPU, and this server has no smaller model for the CPU.'
 
@@ -66,8 +76,12 @@ export class LocalTranslator implements Translator {
   private translates: TranslationLevel = 'none'
   private readonly earlier = new Map<string, string[]>()
   private readonly awaited = new Map<string, Awaited>()
-  private readonly interims = new Map<string, CaptionLine>()
+  private readonly interims = new Map<string, PendingInterim>()
   private readonly interimBusy = new Set<string>()
+  private readonly interimTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly interimAfter = new Map<string, number>()
+  private readonly translations = new Recent<string>(REMEMBERED_TRANSLATIONS)
+  private interimTranscriptionAfter = 0
   private readonly spoken = new Set<string>()
   private readonly voiceless = new Set<string>()
   private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
@@ -141,6 +155,9 @@ export class LocalTranslator implements Translator {
     this.detach()
     for (const { timer } of this.awaited.values()) if (timer) clearTimeout(timer)
     this.awaited.clear()
+    for (const timer of this.interimTimers.values()) clearTimeout(timer)
+    this.interimTimers.clear()
+    this.interims.clear()
     this.segmenter?.close()
     this.segmenter = null
     await this.capture.close()
@@ -204,7 +221,7 @@ export class LocalTranslator implements Translator {
     this.clearHold()
 
     if (segment.kind === 'partial') {
-      if (this.queued > 0) return
+      if (this.queued > 0 || performance.now() < this.interimTranscriptionAfter) return
       this.queue(segment.audio, (text) => this.sentences.partial(text))
       return
     }
@@ -217,7 +234,12 @@ export class LocalTranslator implements Translator {
     this.queued += 1
     this.transcribing = this.transcribing
       .then(async () => {
+        const started = performance.now()
         const text = await this.transcribe(audio, utterance)
+        if (!utterance) {
+          const finished = performance.now()
+          this.interimTranscriptionAfter = nextRunAt(finished, finished - started, INTERIM_TRANSCRIPTION_GAP_MS)
+        }
         if (text === null || this.stopped) return
         const said = line(text)
         if (said) this.publish(said)
@@ -364,30 +386,48 @@ export class LocalTranslator implements Translator {
 
   private translateFor(caption: CaptionLine, target: string, earlier: readonly string[], share: boolean): void {
     const key = `${caption.speaker}:${target}`
-    if (!caption.final) {
-      if (this.interimBusy.has(key)) {
-        this.interims.set(key, caption)
-        return
-      }
-      this.interimBusy.add(key)
-    } else {
+    if (caption.final) {
       this.interims.delete(key)
+      void this.translate(caption, target, earlier, share).catch((error: unknown) => this.failed(error, caption, target))
+      return
     }
+    this.interims.set(key, { caption, earlier, share })
+    this.pumpInterim(key, target)
+  }
 
-    void this.translate(caption, target, earlier, share)
-      .catch((error: unknown) => this.failed(error, caption, target))
+  private pumpInterim(key: string, target: string): void {
+    if (this.stopped || this.interimBusy.has(key) || this.interimTimers.has(key)) return
+    const wait = (this.interimAfter.get(key) ?? 0) - performance.now()
+    if (wait > 0) {
+      this.interimTimers.set(key, setTimeout(() => {
+        this.interimTimers.delete(key)
+        this.pumpInterim(key, target)
+      }, wait))
+      return
+    }
+    const next = this.interims.get(key)
+    if (!next) return
+    this.interims.delete(key)
+    this.interimBusy.add(key)
+    const started = performance.now()
+    void this.translate(next.caption, target, next.earlier, next.share)
+      .catch((error: unknown) => this.failed(error, next.caption, target))
       .finally(() => {
-        if (caption.final) return
+        const finished = performance.now()
+        this.interimAfter.set(key, nextRunAt(finished, finished - started, INTERIM_TRANSLATION_GAP_MS))
         this.interimBusy.delete(key)
-        const next = this.interims.get(key)
-        this.interims.delete(key)
-        if (next) this.translateFor(next, target, earlier, share)
+        this.pumpInterim(key, target)
       })
   }
 
   private async translate(caption: CaptionLine, target: string, earlier: readonly string[], share: boolean): Promise<void> {
-    const mt = await this.engines.mt(caption.lang, target)
-    const text = await mt.translate({ text: caption.text, source: caption.lang, target, earlier })
+    const remembered = `${caption.lang}\n${target}\n${caption.text}`
+    let text = this.translations.get(remembered)
+    if (text === undefined) {
+      const mt = await this.engines.mt(caption.lang, target)
+      text = await mt.translate({ text: caption.text, source: caption.lang, target, earlier })
+      this.translations.set(remembered, text)
+    }
     if (this.stopped) return
 
     const line: Translation = { speaker: caption.speaker, segId: translatedId(caption.segId, target), sourceLang: caption.lang, lang: target, text, final: caption.final }

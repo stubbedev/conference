@@ -18,3 +18,9 @@ export class Pace {
     this.factors.length = 0
   }
 }
+
+export const BACKGROUND_DUTY = 0.3
+
+export function nextRunAt(finishedAt: number, tookMs: number, minGapMs: number, duty = BACKGROUND_DUTY): number {
+  return finishedAt + Math.max(minGapMs, (tookMs * (1 - duty)) / duty)
+}
