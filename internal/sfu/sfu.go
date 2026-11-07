@@ -35,6 +35,9 @@ const (
 	ActionCam    = "cam"
 	ActionScreen = "screen"
 	ActionKick   = "kick"
+	// ActionLang sets the target's live-translation language, sealed with
+	// the room's chat key like their own lang message; they can change it back.
+	ActionLang = "lang"
 )
 
 // Internal tuning knobs.
@@ -1011,6 +1014,14 @@ func (m *Member) handleModerate(msg Message) {
 	case ActionKick:
 		target.send(Message{Type: "kicked"})
 		target.Leave()
+	case ActionLang:
+		if !sealed(msg, maxLangCiphertext) {
+			m.fail("bad-lang", ErrBadRequest)
+
+			return
+		}
+
+		target.send(Message{Type: "forced", Action: ActionLang, From: m.ID, IV: msg.IV, CT: msg.CT})
 	default:
 		m.fail("bad-action", ErrBadRequest)
 	}

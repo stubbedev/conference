@@ -138,6 +138,24 @@ interface ShownCaption {
   at: number
 }
 
+// Whether this browser has stored a language choice (any translation settings).
+function storedLangChoice(): boolean {
+  try {
+    return localStorage.getItem('conference:translation') !== null
+  } catch {
+    return false
+  }
+}
+
+// The first of the browser's preferred languages that live translation speaks.
+function browserLanguage(codes: readonly string[]): string | undefined {
+  for (const tag of navigator.languages ?? [navigator.language]) {
+    const code = tag.toLowerCase().split('-')[0]
+    if (codes.includes(code)) return code
+  }
+  return undefined
+}
+
 function localMicTrack(stream: MediaStream | null): MediaStreamTrack | null {
   return stream?.getAudioTracks()[0] ?? null
 }
@@ -306,6 +324,9 @@ export default function Room() {
     (stored) => (stored === 'people' || stored === 'chat' ? stored : null),
   )
   const chatOpen = sidebar === 'chat'
+  // Whether this browser ever chose a language; until then the browser's
+  // own language preference picks one (read before the default is stored).
+  const langChosenRef = useRef(storedLangChoice())
   const [langPrefs, setLangPrefs] = usePersistentState<LangPrefs>(
     'conference:translation',
     { lang: DEFAULT_LANGUAGE, voice: true, subtitles: true, voiceChoice: 'female' },
@@ -345,6 +366,7 @@ export default function Room() {
   const devicesRef = useLatest(devices)
   const chatOpenRef = useLatest(chatOpen)
   const membersRef = useLatest(members)
+  const translationRef = useLatest(translation)
   const langPrefsRef = useLatest(langPrefs)
   const kickedRef = useRef(false)
   const endedRef = useRef(false)
@@ -782,10 +804,21 @@ export default function Room() {
       .catch(() => setTranslation(TRANSLATION_UNKNOWN))
   }, [])
 
-  // A language the speech service no longer speaks falls back to the default.
+  // Nobody chose a language yet: start in the browser's own language when
+  // the speech service speaks it. A language the service no longer speaks
+  // falls back to the default.
   useEffect(() => {
     const codes = translation.languages.map((language) => language.code)
-    if (codes.length === 0 || codes.includes(langPrefs.lang)) return
+    if (codes.length === 0) return
+    if (!langChosenRef.current) {
+      langChosenRef.current = true
+      const preferred = browserLanguage(codes)
+      if (preferred && preferred !== langPrefs.lang) {
+        setLangPrefs({ ...langPrefs, lang: preferred })
+        return
+      }
+    }
+    if (codes.includes(langPrefs.lang)) return
     setLangPrefs({ ...langPrefs, lang: codes.includes(DEFAULT_LANGUAGE) ? DEFAULT_LANGUAGE : codes[0] })
   }, [translation, langPrefs, setLangPrefs])
 
@@ -888,10 +921,16 @@ export default function Room() {
   // Subtitles on screen are in the old language once it changes.
   const changeLangPrefs = useCallback(
     (prefs: LangPrefs) => {
+      langChosenRef.current = true
       setLangPrefs(prefs)
       setCaptions({})
     },
     [setLangPrefs],
+  )
+
+  const setMemberLanguage = useCallback(
+    (target: string, lang: string) => void clientRef.current?.setMemberLanguage(target, lang),
+    [],
   )
 
   useEffect(() => {
@@ -1192,6 +1231,16 @@ export default function Room() {
     if (phase !== 'live' || !client) return
 
     const unsubscribers = [
+      client.on('lang-set', ({ from, lang }) => {
+        if (!translationRef.current.languages.some((language) => language.code === lang)) return
+        langChosenRef.current = true
+        setLangPrefs((prefs) => ({ ...prefs, lang }))
+        setCaptions({})
+        const host = membersRef.current.find((member) => member.id === from)?.name ?? 'The host'
+        toast(`${host} set your language to ${languageName(translationRef.current.languages, lang)}`, {
+          description: 'You can change it in the settings.',
+        })
+      }),
       client.on('forced', ({ action }) => {
         if (action === 'mute') {
           toast('The host muted your microphone')
@@ -1215,7 +1264,7 @@ export default function Room() {
     return () => {
       for (const unsubscribe of unsubscribers) unsubscribe()
     }
-  }, [phase, clientGeneration, toggleTrack, toggleShare, navigate, controlsRef, kickedRef])
+  }, [phase, clientGeneration, toggleTrack, toggleShare, navigate, controlsRef, kickedRef, setLangPrefs, membersRef, translationRef])
 
   const switchDevice = useCallback(
     async (
@@ -1819,7 +1868,7 @@ export default function Room() {
           onJoin={() => void joinCall()}
           translation={
             translationAvailable ? (
-              <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} />
+              <TranslationSettings config={translation} prefs={langPrefs} onChange={changeLangPrefs} prominent />
             ) : undefined
           }
         />
@@ -1975,6 +2024,9 @@ export default function Room() {
                     selfId={selfMember.id}
                     canModerate={privileged}
                     onModerate={moderateMember}
+                    languages={translation.available ? translation.languages : []}
+                    memberLangs={memberLangs}
+                    onSetLanguage={setMemberLanguage}
                   />
                 }
                 chat={<ChatPanel messages={messages} onSend={sendChat} />}

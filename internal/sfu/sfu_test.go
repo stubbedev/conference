@@ -658,6 +658,46 @@ func TestLateVideoTrack(t *testing.T) {
 	}
 }
 
+func TestModerationSetsLanguage(t *testing.T) {
+	t.Parallel()
+
+	const (
+		moderate = "moderate"
+		sealedDE = "sealed-de"
+	)
+
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := newTestHub(t, engine)
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	guest.member.Handle(sfu.Message{Type: moderate, Target: host.member.ID, Action: sfu.ActionLang, IV: "iv", CT: sealedDE})
+
+	if msg := guest.next(t, "error"); msg.Code != codeNotAllowed {
+		t.Fatalf("a guest must not set languages, got %q", msg.Code)
+	}
+
+	// A host sets the guest's language, sealed; only the guest gets it.
+	host.member.Handle(sfu.Message{Type: moderate, Target: guest.member.ID, Action: sfu.ActionLang, IV: "iv", CT: sealedDE})
+
+	if msg := guest.next(t, "forced"); msg.Action != sfu.ActionLang || msg.CT != sealedDE || msg.From != host.member.ID {
+		t.Fatalf("guest expected a sealed language from the host, got %+v", msg)
+	}
+
+	host.member.Handle(sfu.Message{Type: moderate, Target: guest.member.ID, Action: sfu.ActionLang})
+
+	if msg := host.next(t, "error"); msg.Code != "bad-lang" {
+		t.Fatalf("an unsealed language must be refused, got %q", msg.Code)
+	}
+}
+
 func TestModeration(t *testing.T) {
 	t.Parallel()
 

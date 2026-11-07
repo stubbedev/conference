@@ -241,12 +241,18 @@ export const probe = `
 })()
 `
 
-export async function joinRoom(browser, url, relayTransport = null) {
+// beforeJoin, if given, runs on the join screen before "Join call" is clicked.
+export async function joinRoom(browser, url, relayTransport = null, beforeJoin = null) {
   const s = browser.sessionId
   await browser.cdp.send('Page.enable', {}, s)
   await browser.cdp.send('Runtime.enable', {}, s)
   await browser.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook(relayTransport) }, s)
   await browser.cdp.send('Page.navigate', { url }, s)
+  if (beforeJoin) {
+    const ready = `[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Join call' && !b.disabled)`
+    for (let t = 0; t < 80 && !(await evalJs(browser, ready)); t++) await sleep(250)
+    await beforeJoin(browser)
+  }
   for (let t = 0; t < 80; t++) {
     const r = await browser.cdp.send(
       'Runtime.evaluate',
