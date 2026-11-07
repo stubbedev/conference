@@ -6,11 +6,14 @@
 // scaled.
 //
 // The phonemizer is a program rather than a library: it is handed its
-// arguments once and exits, so every call builds one, which also keeps two
-// calls from writing over each other's output. The voice's session is
-// built once and kept, because loading a voice costs far more than
-// speaking a sentence, and it is tried on the GPU before the CPU for the
-// same reason: a sentence should be spoken as soon as it is translated.
+// arguments once and exits, so every call runs a fresh instance of it,
+// which keeps two calls from writing over each other's output. Its
+// WebAssembly is compiled and its espeak-ng data read once, so a fresh
+// instance costs an instantiation rather than a download. The voice's
+// session is built once and kept, because loading a voice costs far more
+// than speaking a sentence, and it is tried on the GPU before the CPU for
+// the same reason: a sentence should be spoken as soon as it is
+// translated.
 
 import { configureOrt, ort } from './ort'
 import { phonemeIds, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
@@ -28,15 +31,25 @@ const PHONEMIZER_DIR = '/piper/'
  */
 const ESPEAK_DATA = '/espeak-ng-data'
 
+
 /** The phonemizer as its build exports it: an Emscripten program with callMain. */
 interface Phonemizer {
   callMain(args: string[]): unknown
 }
 
+type ReceiveInstance = (instance: WebAssembly.Instance, module: WebAssembly.Module) => void
+
 interface PhonemizerOptions {
-  print?: (line: string) => void
-  printErr?: (line: string) => void
-  locateFile?: (file: string) => string
+  print: (line: string) => void
+  printErr: (line: string) => void
+  instantiateWasm: (imports: WebAssembly.Imports, receive: ReceiveInstance) => Record<string, never>
+  getPreloadedPackage: (name: string, size: number) => ArrayBuffer
+}
+
+interface PhonemizerAssets {
+  create: CreatePhonemizer
+  wasm: WebAssembly.Module
+  data: ArrayBuffer
 }
 
 type CreatePhonemizer = (options: PhonemizerOptions) => Promise<Phonemizer>
@@ -125,13 +138,25 @@ async function session(url: string): Promise<ort.InferenceSession> {
 async function phonemize(text: string, config: VoiceConfig): Promise<number[]> {
   const lines: string[] = []
   const complaints: string[] = []
-  const create = await phonemizer()
+  const { create, wasm, data } = await phonemizerAssets()
 
-  const module = await create({
-    print: (line) => lines.push(line),
-    printErr: (line) => complaints.push(line),
-    locateFile: (file) => PHONEMIZER_DIR + file,
+  let refuse: (err: unknown) => void = () => {}
+  const refused = new Promise<never>((_resolve, reject) => {
+    refuse = (err) => reject(new Error('the phonemizer could not start', { cause: err }))
   })
+
+  const module = await Promise.race([
+    create({
+      print: (line) => lines.push(line),
+      printErr: (line) => complaints.push(line),
+      instantiateWasm: (imports, receive) => {
+        WebAssembly.instantiate(wasm, imports).then((instance) => receive(instance, wasm), refuse)
+        return {}
+      },
+      getPreloadedPackage: () => data,
+    }),
+    refused,
+  ])
 
   module.callMain(['-l', config.espeak, '--input', JSON.stringify([{ text }]), '--espeak_data', ESPEAK_DATA])
 
@@ -144,12 +169,31 @@ async function phonemize(text: string, config: VoiceConfig): Promise<number[]> {
   return ids
 }
 
-/** A fresh phonemizer: it runs once and exits, so nothing is shared with the last call. */
-async function phonemizer(): Promise<CreatePhonemizer> {
+let assets: Promise<PhonemizerAssets> | null = null
+
+function phonemizerAssets(): Promise<PhonemizerAssets> {
+  assets ??= loadPhonemizer().catch((err: unknown) => {
+    assets = null
+    throw err
+  })
+  return assets
+}
+
+async function loadPhonemizer(): Promise<PhonemizerAssets> {
   // The phonemizer is built by Emscripten and ships no type declarations.
   // @ts-expect-error see above
   const module = await import('@diffusionstudio/piper-wasm/build/piper_phonemize.js')
-  return (module.default ?? module) as CreatePhonemizer
+  const [wasm, data] = await Promise.all([
+    WebAssembly.compileStreaming(fetchOk(`${PHONEMIZER_DIR}piper_phonemize.wasm`)),
+    fetchOk(`${PHONEMIZER_DIR}piper_phonemize.data`).then((response) => response.arrayBuffer()),
+  ])
+  return { create: (module.default ?? module) as CreatePhonemizer, wasm, data }
+}
+
+async function fetchOk(url: string): Promise<Response> {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`the phonemizer has no ${url}: ${response.status} ${response.statusText}`)
+  return response
 }
 
 function feeds(session: ort.InferenceSession, config: VoiceConfig, ids: readonly number[], choice: VoiceChoice): Record<string, ort.Tensor> {
