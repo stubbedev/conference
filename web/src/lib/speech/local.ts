@@ -69,6 +69,7 @@ export class LocalTranslator implements Translator {
   private readonly interims = new Map<string, CaptionLine>()
   private readonly interimBusy = new Set<string>()
   private readonly spoken = new Set<string>()
+  private readonly voiceless = new Set<string>()
   private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
   private selfPrefs: LangPrefs
   private stopped = false
@@ -418,6 +419,9 @@ export class LocalTranslator implements Translator {
       }
     } catch (error) {
       console.warn('live translation has no voice for', prefs.lang, error)
+      if (this.voiceless.has(prefs.lang)) return
+      this.voiceless.add(prefs.lang)
+      this.setStatus({ detail: `Translations are shown but not spoken: ${error instanceof Error ? error.message : String(error)}` })
     }
   }
 

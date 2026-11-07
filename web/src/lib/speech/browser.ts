@@ -89,6 +89,7 @@ class BrowserEngines implements Engines {
   private readonly files = new Map<string, Loading>()
   private readonly expected = new Set<string>()
   private loadingReport: ReturnType<typeof setTimeout> | null = null
+  private preparing = false
   private readonly builtin = new BuiltinTranslators()
   private onLoading: (loading: Loading | null) => void = () => {}
   private segments: SegmenterEvents | null = null
@@ -101,18 +102,22 @@ class BrowserEngines implements Engines {
 
   async prepare(lang: string, onLoading: (loading: Loading | null) => void): Promise<Prepared> {
     this.onLoading = onLoading
-    const room = await this.storageProblem(lang)
-    if (room) return { transcribes: false, translates: 'none', problems: [room] }
+    this.preparing = true
+    const room = await this.storageProblem(lang).catch((err: unknown) => {
+      this.preparing = false
+      throw err
+    })
+    if (room) {
+      this.preparing = false
+      return { transcribes: false, translates: 'none', problems: [room] }
+    }
 
     const vad = await settle(this.load('vad', { base: VAD_BASE }))
     const asr = await settle(this.load('asr', { base: this.models.base, asr: this.models.asr, lang }))
     const mt = await settle(this.load('mt', { base: this.models.base, mt: this.models.mt }))
     const tts = await settle(this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(null))
-    if (this.loadingReport) clearTimeout(this.loadingReport)
-    this.loadingReport = null
-    this.files.clear()
-    this.expected.clear()
-    this.onLoading(null)
+    this.preparing = false
+    this.publishLoading()
 
     const problems = [vad, asr, mt, tts].flatMap((result) => (result.status === 'rejected' ? [reason(result.reason)] : []))
     return {
@@ -237,8 +242,22 @@ class BrowserEngines implements Engines {
   private reportLoading(): void {
     this.loadingReport ??= setTimeout(() => {
       this.loadingReport = null
-      this.onLoading(this.total())
+      this.publishLoading()
     }, LOADING_REPORT_MS)
+  }
+
+  private publishLoading(): void {
+    const downloading = [...this.files.values()].some((file) => file.loaded < file.total)
+    if (this.preparing || downloading) {
+      this.onLoading(this.total())
+      return
+    }
+
+    if (this.loadingReport) clearTimeout(this.loadingReport)
+    this.loadingReport = null
+    this.files.clear()
+    this.expected.clear()
+    this.onLoading(null)
   }
 
   private total(): Loading {
