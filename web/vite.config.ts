@@ -19,6 +19,19 @@ const crossOriginIsolation = {
   'Cross-Origin-Embedder-Policy': 'credentialless',
 }
 
+const RUNTIME_PATH = '/ort/'
+
+const runtimeAsFiles = (): Plugin => ({
+  name: 'runtime-as-files',
+  configureServer(server) {
+    server.middlewares.use((req, _res, next) => {
+      const url = new URL(req.url ?? '/', 'http://dev')
+      if (url.pathname.startsWith(RUNTIME_PATH) && url.searchParams.has('import')) req.url = url.pathname
+      next()
+    })
+  },
+})
+
 const link = (attrs: Record<string, string>): HtmlTagDescriptor => ({ tag: 'link', attrs, injectTo: 'head' })
 
 const siteHead = (): Plugin => ({
@@ -43,7 +56,7 @@ const siteHead = (): Plugin => ({
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss(), siteHead()],
+  plugins: [react(), tailwindcss(), siteHead(), runtimeAsFiles()],
   build: {
     outDir: 'dist/app',
   },
