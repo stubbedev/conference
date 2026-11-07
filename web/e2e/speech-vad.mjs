@@ -72,7 +72,11 @@ function serve() {
         return
       }
 
-      res.writeHead(200, { 'Content-Type': CONTENT_TYPES[extname(target)] ?? 'application/octet-stream' })
+      res.writeHead(200, {
+        'Content-Type': CONTENT_TYPES[extname(target)] ?? 'application/octet-stream',
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'credentialless',
+      })
       createReadStream(target).pipe(res)
     })
 
@@ -126,7 +130,9 @@ const probe = (worker) => `(async () => {
       speech = Math.max(speech, probability)
     }
     const silent = await ask({ type: 'detect', frame: new Int16Array(512) })
-    return { speech, silence: silent.probability, frames: frames.length }
+    return { speech, silence: silent.probability, frames: frames.length, isolated: crossOriginIsolated }
+  } catch (err) {
+    return { error: String(err?.message ?? err) }
   } finally {
     voice.terminate()
   }
@@ -149,6 +155,7 @@ async function main() {
     check('voice detection', typeof value?.speech === 'number', `the worker never answered: ${JSON.stringify(value)}`)
     if (typeof value?.speech === 'number') {
       check('speech is found', value.speech > 0.5, `highest probability ${value.speech}`)
+      check('the page is cross-origin isolated', value.isolated === true, 'the worker runs on one thread')
       check('silence is not', value.silence < 0.2, `probability ${value.silence}`)
     }
 

@@ -14,6 +14,11 @@ const meta = (key: 'name' | 'property', value: string, content: string | number)
   injectTo: 'head',
 })
 
+const crossOriginIsolation = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'credentialless',
+}
+
 const link = (attrs: Record<string, string>): HtmlTagDescriptor => ({ tag: 'link', attrs, injectTo: 'head' })
 
 const siteHead = (): Plugin => ({
@@ -62,10 +67,14 @@ export default defineConfig({
     format: 'es',
   },
   server: {
+    headers: crossOriginIsolation,
     proxy: {
       '/api': backend,
       '/speech': backend,
       '/ws': { target: backend.replace(/^http/, 'ws'), ws: true },
     },
+  },
+  preview: {
+    headers: crossOriginIsolation,
   },
 })

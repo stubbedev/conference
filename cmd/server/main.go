@@ -99,7 +99,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           logRequests(mux),
+		Handler:           logRequests(isolate(mux)),
 		ReadHeaderTimeout: headerReadTimeout,
 	}
 
@@ -351,6 +351,14 @@ func (ui *webUI) serveFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ui.files.ServeHTTP(w, r)
+}
+
+func isolate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Embedder-Policy", "credentialless")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func logRequests(next http.Handler) http.Handler {
