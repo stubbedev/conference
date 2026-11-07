@@ -59,9 +59,9 @@ export function Prejoin({
 
   return (
     <div className="relative grid h-dvh place-items-center overflow-y-auto bg-muted/40 p-4">
-      <div className="grid w-full max-w-3xl gap-6 md:grid-cols-[1.4fr_1fr] md:gap-8">
+      <div className="grid w-full max-w-6xl items-center gap-8 md:grid-cols-[1.75fr_1fr] md:gap-12">
         <div
-          className="relative mx-auto w-full overflow-hidden rounded-2xl border bg-card shadow-xs"
+          className="relative mx-auto w-full overflow-hidden rounded-2xl bg-card shadow-lg"
           style={{
             aspectRatio: `${ratio}`,
             maxWidth: `calc(min(70dvh, 100%) * ${ratio})`,
@@ -77,8 +77,9 @@ export function Prejoin({
           ) : (
             <div className="relative h-full w-full">
               {mediaBusy && (
-                <div className="absolute inset-0 z-10 grid place-items-center bg-background/60">
-                  <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                <div className="absolute inset-0 z-10 grid place-content-center justify-items-center gap-3 bg-background/60 text-sm text-muted-foreground">
+                  <Loader2 className="size-6 animate-spin" />
+                  Starting your camera and microphone…
                 </div>
               )}
               <VideoTile
@@ -89,11 +90,12 @@ export function Prejoin({
                 mirrored
                 onAspectRatio={(_tileKey, ratio) => setRatio(ratio)}
               />
-              <div className="absolute inset-x-0 bottom-3 z-20 flex items-center justify-center gap-2">
+              <div className="absolute inset-x-0 bottom-4 z-20 flex items-center justify-center gap-3">
                 <Hint label={mic ? 'Mute microphone' : 'Unmute microphone'} side="top">
                   <Button
                     variant={mic ? 'secondary' : 'destructive'}
                     size="icon"
+                    className="size-12 rounded-full [&_svg]:size-5"
                     aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}
                     onClick={onToggleMic}
                   >
@@ -104,6 +106,7 @@ export function Prejoin({
                   <Button
                     variant={cam ? 'secondary' : 'destructive'}
                     size="icon"
+                    className="size-12 rounded-full [&_svg]:size-5"
                     aria-label={cam ? 'Turn off camera' : 'Turn on camera'}
                     onClick={onToggleCam}
                   >
@@ -115,6 +118,7 @@ export function Prejoin({
                     <Button
                       variant={blur ? 'default' : 'secondary'}
                       size="icon"
+                      className="size-12 rounded-full [&_svg]:size-5"
                       aria-label={blur ? 'Turn off background blur' : 'Blur background'}
                       aria-pressed={blur}
                       disabled={!cam}
@@ -131,7 +135,7 @@ export function Prejoin({
 
         <div className="flex flex-col gap-4">
           <div>
-            <h1 className="text-xl font-semibold tracking-tight">Ready to join?</h1>
+            <h1 className="text-3xl font-normal tracking-tight">Ready to join?</h1>
             <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
               {roomName || slug}
               <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
@@ -153,7 +157,7 @@ export function Prejoin({
 
           {translation && <Disclosure title="Language and subtitles">{translation}</Disclosure>}
 
-          <Button size="lg" onClick={onJoin} disabled={!canJoin}>
+          <Button size="lg" className="h-12 rounded-full text-base" onClick={onJoin} disabled={!canJoin}>
             {mediaBusy ? (
               <>
                 <Loader2 className="animate-spin" /> Setting up…

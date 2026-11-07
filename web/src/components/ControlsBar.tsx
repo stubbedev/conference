@@ -10,36 +10,37 @@ import {
   Minimize2,
   MonitorUp,
   MonitorX,
+  MoreVertical,
   PhoneOff,
-  Square,
+  Users,
   Video,
   VideoOff,
 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Hint } from '@/components/Hint'
-import { Separator } from '@/components/ui/separator'
+import { MeetingClock } from '@/components/MeetingClock'
 import { cn } from '@/lib/utils'
 
 interface ControlsBarProps {
+  roomName: string
   mic: boolean
   cam: boolean
   sharing: boolean
-  /** Whether the camera goes out with its background blurred. */
   blur: boolean
-  /** Browsers that can composite a blurred camera hide the control. */
   canBlur?: boolean
   blurUnavailable?: string
   onBlur?: () => void
+  peopleCount: number
+  peopleOpen: boolean
+  onTogglePeople: () => void
   chatOpen: boolean
   unread: number
   fullscreen: boolean
-  /** getDisplayMedia is missing on iOS Safari and some mobile browsers. */
   canShare?: boolean
-  /** Browsers without MediaRecorder canvas capture hide it. */
   canRecord?: boolean
   recording?: boolean
-  /** Host-only, and only while live translation is configured on the server. */
   canTranslate?: boolean
   translating?: boolean
   onTranslate?: () => void
@@ -54,12 +55,11 @@ interface ControlsBarProps {
 }
 
 const AUTO_HIDE_MS = 3000
-
-// Eight controls must fit a 360px phone screen: shrink the icons there,
-// keep the full size on anything wider.
-const ICON_BUTTON = 'size-8 sm:size-9'
+const ROUND = 'size-11 rounded-full [&_svg:not([class*="size-"])]:size-5'
+const SIDE = 'size-10 rounded-full [&_svg:not([class*="size-"])]:size-5'
 
 export const ControlsBar = memo(function ControlsBar({
+  roomName,
   mic,
   cam,
   sharing,
@@ -67,6 +67,9 @@ export const ControlsBar = memo(function ControlsBar({
   canBlur = false,
   blurUnavailable,
   onBlur,
+  peopleCount,
+  peopleOpen,
+  onTogglePeople,
   chatOpen,
   unread,
   fullscreen,
@@ -85,7 +88,6 @@ export const ControlsBar = memo(function ControlsBar({
   onToggleFullscreen,
   children,
 }: ControlsBarProps) {
-  // A room already translating can always be switched off.
   const translateLabel = translating ? 'Stop live translation' : 'Start live translation'
   const [revealed, setRevealed] = useState(true)
   const visible = !fullscreen || revealed
@@ -117,137 +119,170 @@ export const ControlsBar = memo(function ControlsBar({
       onPointerEnter={() => window.clearTimeout(hideTimer.current)}
       onPointerLeave={fullscreen ? show : undefined}
       className={cn(
-        'flex items-center justify-center gap-2',
-        fullscreen
-          ? cn(
-              'fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-2xl border bg-background/95 p-2 shadow-lg backdrop-blur transition-all duration-200',
-              visible ? 'opacity-100' : 'pointer-events-none translate-y-3 opacity-0',
-            )
-          : 'border-t px-2 py-3 sm:px-4',
+        'grid grid-cols-[1fr_auto_1fr] items-center gap-2 px-3 py-3 sm:px-5',
+        fullscreen &&
+          cn(
+            'fixed inset-x-0 bottom-0 z-50 bg-gradient-to-t from-black/60 to-transparent transition-all duration-200',
+            visible ? 'opacity-100' : 'pointer-events-none translate-y-3 opacity-0',
+          ),
       )}
     >
-      <Hint label={mic ? 'Mute microphone (M)' : 'Unmute microphone (M)'}>
-        <Button
-          variant={mic ? 'secondary' : 'destructive'}
-          size="icon"
-          className={ICON_BUTTON}
-          onClick={onMic}
-          aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}
-        >
-          {mic ? <Mic /> : <MicOff />}
-        </Button>
-      </Hint>
-      <Hint label={cam ? 'Turn camera off (V)' : 'Turn camera on (V)'}>
-        <Button
-          variant={cam ? 'secondary' : 'destructive'}
-          size="icon"
-          className={ICON_BUTTON}
-          onClick={onCam}
-          aria-label={cam ? 'Turn camera off' : 'Turn camera on'}
-        >
-          {cam ? <Video /> : <VideoOff />}
-        </Button>
-      </Hint>
-      {canBlur && onBlur && (
-        <Hint label={blurUnavailable || (blur ? 'Turn off background blur' : 'Blur background')}>
+      <div className="flex min-w-0 items-center gap-3 text-sm">
+        <span className="hidden shrink-0 tabular-nums sm:inline">
+          <MeetingClock />
+        </span>
+        <span className="hidden h-4 w-px shrink-0 bg-border sm:inline" />
+        <span className="hidden min-w-0 truncate font-medium md:inline">{roomName}</span>
+        {recording && onRecord && (
           <Button
-            variant={blur ? 'default' : 'secondary'}
-            size="icon"
-            className={ICON_BUTTON}
-            onClick={onBlur}
-            aria-label={blur ? 'Turn off background blur' : 'Blur background'}
-            aria-pressed={blur}
-            disabled={!cam}
-          >
-            <Contrast />
-          </Button>
-        </Hint>
-      )}
-      {canShare && (
-        <Hint label={sharing ? 'Stop sharing' : 'Share your screen'}>
-          <Button
-            variant={sharing ? 'destructive' : 'secondary'}
-            size="icon"
-            className={ICON_BUTTON}
-            onClick={onShare}
-            aria-label={sharing ? 'Stop sharing' : 'Share your screen'}
-          >
-            {sharing ? <MonitorX /> : <MonitorUp />}
-          </Button>
-        </Hint>
-      )}
-      {canRecord && onRecord && (
-        <Hint label={recording ? 'Stop recording' : 'Record the call'}>
-          <Button
-            variant={recording ? 'destructive' : 'secondary'}
-            size="icon"
-            className={ICON_BUTTON}
+            variant="destructive"
+            className="h-8 shrink-0 gap-1.5 rounded-full px-3 text-xs font-semibold"
             onClick={onRecord}
-            aria-label={recording ? 'Stop recording' : 'Record the call'}
+            aria-label="Stop recording"
           >
-            {recording ? <Square className="fill-current" /> : <Circle className="fill-current" />}
+            <span className="size-2 animate-pulse rounded-full bg-white" />
+            REC
           </Button>
-        </Hint>
-      )}
-      {canTranslate && onTranslate && (
-        <Hint label={translateLabel}>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 sm:gap-3">
+        <Hint label={mic ? 'Mute microphone (M)' : 'Unmute microphone (M)'}>
           <Button
-            variant={translating ? 'default' : 'secondary'}
+            variant={mic ? 'secondary' : 'destructive'}
             size="icon"
-            className={ICON_BUTTON}
-            onClick={onTranslate}
-            aria-label={translateLabel}
-            aria-pressed={translating}
+            className={ROUND}
+            onClick={onMic}
+            aria-label={mic ? 'Mute microphone' : 'Unmute microphone'}
           >
-            <Languages />
+            {mic ? <Mic /> : <MicOff />}
           </Button>
         </Hint>
-      )}
+        <Hint label={cam ? 'Turn camera off (V)' : 'Turn camera on (V)'}>
+          <Button
+            variant={cam ? 'secondary' : 'destructive'}
+            size="icon"
+            className={ROUND}
+            onClick={onCam}
+            aria-label={cam ? 'Turn camera off' : 'Turn camera on'}
+          >
+            {cam ? <Video /> : <VideoOff />}
+          </Button>
+        </Hint>
+        {canShare && (
+          <Hint label={sharing ? 'Stop sharing' : 'Share your screen'}>
+            <Button
+              variant={sharing ? 'default' : 'secondary'}
+              size="icon"
+              className={cn(ROUND, 'hidden sm:inline-flex')}
+              onClick={onShare}
+              aria-label={sharing ? 'Stop sharing' : 'Share your screen'}
+            >
+              {sharing ? <MonitorX /> : <MonitorUp />}
+            </Button>
+          </Hint>
+        )}
+        {canTranslate && onTranslate && (
+          <Hint label={translateLabel}>
+            <Button
+              variant={translating ? 'default' : 'secondary'}
+              size="icon"
+              className={ROUND}
+              onClick={onTranslate}
+              aria-label={translateLabel}
+              aria-pressed={translating}
+            >
+              <Languages />
+            </Button>
+          </Hint>
+        )}
+        <DropdownMenu>
+          <Hint label="More options">
+            <DropdownMenuTrigger asChild>
+              <Button variant="secondary" size="icon" className={ROUND} aria-label="More options">
+                <MoreVertical />
+              </Button>
+            </DropdownMenuTrigger>
+          </Hint>
+          <DropdownMenuContent side="top" align="center">
+            {canShare && (
+              <DropdownMenuItem className="sm:hidden" onSelect={onShare} aria-label={sharing ? 'Stop sharing' : 'Share your screen'}>
+                {sharing ? <MonitorX /> : <MonitorUp />}
+                {sharing ? 'Stop sharing' : 'Share your screen'}
+              </DropdownMenuItem>
+            )}
+            {canBlur && onBlur && (
+              <DropdownMenuItem
+                onSelect={onBlur}
+                disabled={!cam || Boolean(blurUnavailable)}
+                aria-label={blur ? 'Turn off background blur' : 'Blur background'}
+              >
+                <Contrast />
+                {blurUnavailable || (blur ? 'Turn off background blur' : 'Blur background')}
+              </DropdownMenuItem>
+            )}
+            {canRecord && onRecord && !recording && (
+              <DropdownMenuItem onSelect={onRecord} aria-label="Record the call">
+                <Circle className="fill-destructive text-destructive" />
+                Record the call
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem onSelect={onToggleFullscreen} aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
+              {fullscreen ? <Minimize2 /> : <Maximize2 />}
+              {fullscreen ? 'Exit full screen (F)' : 'Full screen (F)'}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator className="sm:hidden" />
+            <DropdownMenuItem className="sm:hidden" onSelect={onTogglePeople} aria-label="People">
+              <Users />
+              People ({peopleCount})
+            </DropdownMenuItem>
+            <DropdownMenuItem className="sm:hidden" onSelect={onToggleChat} aria-label={chatOpen ? 'Close chat' : 'Open chat'}>
+              <MessageSquare />
+              Chat{unread > 0 ? ` (${unread > 9 ? '9+' : unread} new)` : ''}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <Hint label="Leave call">
+          <Button variant="destructive" className="h-11 w-16 rounded-full [&_svg]:size-5" onClick={onLeave} aria-label="Leave">
+            <PhoneOff />
+          </Button>
+        </Hint>
+      </div>
 
-      <Separator orientation="vertical" className="mx-1 self-center" />
-
-      <Hint label={chatOpen ? 'Close chat (C)' : 'Open chat (C)'}>
-        <Button
-          variant={chatOpen ? 'secondary' : 'ghost'}
-          size="icon"
-          className={cn(ICON_BUTTON, 'relative')}
-          onClick={onToggleChat}
-          aria-label={chatOpen ? 'Close chat' : 'Open chat'}
-        >
-          <MessageSquare />
-          {unread > 0 && (
-            <span className="absolute top-0 right-0 grid size-4 -translate-y-1/4 translate-x-1/4 place-items-center rounded-full bg-destructive text-[10px] font-semibold leading-none text-white">
-              {unread > 9 ? '9+' : unread}
+      <div className="flex items-center justify-end gap-1">
+        <span className="hidden sm:contents">{children}</span>
+        <Hint label={peopleOpen ? 'Hide people' : 'Show everyone'}>
+          <Button
+            variant={peopleOpen ? 'secondary' : 'ghost'}
+            size="icon"
+            className={cn(SIDE, 'relative hidden sm:inline-flex')}
+            onClick={onTogglePeople}
+            aria-label="Participants"
+            aria-pressed={peopleOpen}
+          >
+            <Users />
+            <span className="absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-muted px-1 text-[10px] font-semibold leading-4 text-foreground">
+              {peopleCount}
             </span>
-          )}
-        </Button>
-      </Hint>
-      {children}
-      <Hint label={fullscreen ? 'Exit fullscreen (F)' : 'Enter fullscreen (F)'}>
-        <Button
-          variant="ghost"
-          size="icon"
-          className={ICON_BUTTON}
-          onClick={onToggleFullscreen}
-          aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-        >
-          {fullscreen ? <Minimize2 /> : <Maximize2 />}
-        </Button>
-      </Hint>
-
-      <Separator orientation="vertical" className="mx-1 self-center" />
-
-      <Hint label="Leave">
-        <Button
-          variant="destructive"
-          size="icon"
-          className={ICON_BUTTON}
-          onClick={onLeave}
-          aria-label="Leave"
-        >
-          <PhoneOff />
-        </Button>
-      </Hint>
+          </Button>
+        </Hint>
+        <Hint label={chatOpen ? 'Close chat (C)' : 'Chat with everyone (C)'}>
+          <Button
+            variant={chatOpen ? 'secondary' : 'ghost'}
+            size="icon"
+            className={cn(SIDE, 'relative hidden sm:inline-flex')}
+            onClick={onToggleChat}
+            aria-label={chatOpen ? 'Close chat' : 'Open chat'}
+          >
+            <MessageSquare />
+            {unread > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-4 text-primary-foreground">
+                {unread > 9 ? '9+' : unread}
+              </span>
+            )}
+          </Button>
+        </Hint>
+      </div>
     </footer>
   )
 })

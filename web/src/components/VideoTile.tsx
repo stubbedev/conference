@@ -11,6 +11,7 @@ import {
   resumeAudio,
   useSplitStreams,
 } from '@/hooks/media'
+import { avatarColor, initials } from '@/lib/names'
 import { cn } from '@/lib/utils'
 
 interface VideoTileProps {
@@ -28,6 +29,7 @@ interface VideoTileProps {
   pinned?: boolean
   onTogglePin?: (tileKey: string) => void
   compact?: boolean
+  fill?: boolean
   onAspectRatio?: (tileKey: string, ratio: number) => void
   /** Live-translation subtitle for what this member is saying. */
   caption?: string
@@ -78,6 +80,7 @@ export const VideoTile = memo(function VideoTile({
   pinned,
   onTogglePin,
   compact,
+  fill = false,
   onAspectRatio,
   caption,
   speaking: speakingOverride,
@@ -168,13 +171,6 @@ export const VideoTile = memo(function VideoTile({
     if (audio) playMediaElement(audio, setAudioBlocked)
   }
 
-  const initials =
-    name
-      .split(/\s+/)
-      .map((part) => part[0])
-      .join('')
-      .slice(0, 2)
-      .toUpperCase() || '?'
 
   const hideVideo = Boolean(camOff && !sharing)
   const speakingNow = (speakingOverride ?? speaking) && !micOff && !sharing
@@ -208,7 +204,8 @@ export const VideoTile = memo(function VideoTile({
           disablePictureInPicture
           disableRemotePlayback
           className={cn(
-            'h-full w-full object-contain',
+            'h-full w-full',
+            fill && !sharing ? 'object-cover' : 'object-contain',
             mirrored && !sharing && '-scale-x-100',
             hideVideo && 'opacity-0',
           )}
@@ -219,13 +216,13 @@ export const VideoTile = memo(function VideoTile({
             <div className={cn('flex flex-col items-center', compact ? 'gap-1' : 'gap-2')}>
               <div
                 className={cn(
-                  'grid place-items-center rounded-full bg-background/80 font-semibold text-foreground/70',
-                  compact ? 'size-8 text-xs' : 'size-16 text-xl',
+                  'grid place-items-center rounded-full font-semibold text-white',
+                  avatarColor(name),
+                  compact ? 'size-10 text-sm' : 'size-24 text-3xl',
                 )}
               >
-                {initials}
+                {initials(name)}
               </div>
-              {!compact && <span className="text-xs text-muted-foreground">Camera is off</span>}
             </div>
           </div>
         )}

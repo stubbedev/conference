@@ -1,17 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import { Circle, CircleAlert, Languages, Link2, Loader2, TriangleAlert, Users } from 'lucide-react'
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Circle, CircleAlert, Languages, Link2, Loader2, TriangleAlert } from 'lucide-react'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { useLatest } from '@/hooks/latest'
 import {
-  aspectRatioChanged,
   CAMERA_RESOLUTIONS,
   createMicPipeline,
   DEFAULT_AV_PREFS,
   DEFAULT_DEVICE_PREFS,
   DEVICE_LABELS,
-  FALLBACK_ASPECT_RATIO,
   facingFromLabel,
   facingFromTrack,
   isMobileDevice,
@@ -43,6 +41,8 @@ import {
   toB64,
 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
+import { useElementSize } from '@/hooks/element-size'
+import { bestGrid, tileRatio } from '@/lib/layout'
 import { CallRecorder, recorderKeepsPaceHidden, recorderSupported, type RecorderTile } from '@/lib/recorder'
 import { requestDisplay, SCREEN_AUDIO_KIND, screenTracks } from '@/lib/screen'
 import { tilesOfMembers } from '@/lib/reconnect'
@@ -71,6 +71,7 @@ import { JoinGate } from '@/components/JoinGate'
 import { PeoplePanel } from '@/components/PeoplePanel'
 import { SidePanel, type SidePanelTab } from '@/components/SidePanel'
 import { Prejoin } from '@/components/Prejoin'
+import { MeetingReady } from '@/components/MeetingReady'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { HudBackdrop } from '@/components/HudBackdrop'
 import { VideoTile } from '@/components/VideoTile'
@@ -100,6 +101,9 @@ const NO_PIN = 'none'
 const RECOVER_BACKOFF_MS = 5000
 const RECONNECT_TOAST = 'reconnect'
 const RECORDING_HIDDEN_TOAST = 'recording-hidden'
+const TILE_GAP = 8
+const STAGE_PADDING = 8
+const STAGE_TOP = 64
 const TRANSLATION_KIND_PREFIX = 'translation-'
 // A final subtitle stays up this long; an interim one that never got its
 // final (the speaker trailed off) is dropped after the longer hold.
@@ -242,6 +246,9 @@ function tileLabel(tile: Tile, displayName: string, members: MemberInfo[]): stri
 export default function Room() {
   const { slug = '' } = useParams()
   const [searchParams] = useSearchParams()
+  const routerLocation = useLocation()
+  const [roomKeyText, setRoomKeyText] = useState('')
+  const [meetingReady, setMeetingReady] = useState(() => (routerLocation.state as { created?: boolean } | null)?.created === true)
   const navigate = useNavigate()
 
   const [phase, setPhase] = useState<Phase>('checking')
@@ -269,7 +276,6 @@ export default function Room() {
   const [mediaBusy, setMediaBusy] = useState(false)
   const [unread, setUnread] = useState(0)
   const [userPin, setUserPin] = useState<string | null>(null)
-  const [tileRatios, setTileRatios] = useState<Record<string, number>>({})
   const [fullscreen, setFullscreen] = useState(false)
   const [privileged, setPrivileged] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
@@ -684,6 +690,7 @@ export default function Room() {
 
         sessionRef.current = session
         roomKeyRef.current = fromB64(keyB64)
+        setRoomKeyText(keyB64)
         setPhase('prejoin')
         void acquireMedia()
       } catch (err) {
@@ -1561,10 +1568,11 @@ export default function Room() {
     if (phase !== 'live' && phase !== 'prejoin') return
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
-      const target = event.target as HTMLElement | null
+      const target = event.target
       if (
-        target?.closest(
-          'input, textarea, [contenteditable="true"], [data-slot="select-trigger"], [data-slot="select-content"]',
+        target instanceof Element &&
+        target.closest(
+          'input, textarea, [contenteditable="true"], [data-slot="select-trigger"], [data-slot="select-content"], [role="menu"]',
         )
       ) {
         return
@@ -1579,9 +1587,15 @@ export default function Room() {
     return () => window.removeEventListener('keydown', onKey)
   }, [phase, toggleTrack, toggleChat, toggleFullscreen])
 
+  const passwordProtected = Boolean(roomInfo?.requiresPassword)
+  const inviteLink = () =>
+    passwordProtected || !roomKeyText
+      ? `${window.location.origin}/r/${slug}`
+      : `${window.location.origin}/r/${slug}#k=${roomKeyText}`
+
   const copyInvite = async () => {
-    await navigator.clipboard.writeText(`${location.origin}/r/${slug}`)
-    toast.success('Invite link copied')
+    await navigator.clipboard.writeText(inviteLink())
+    toast.success('Joining link copied')
   }
 
   // Five taps on the room name toggle the diagnostics panel and the
@@ -1746,12 +1760,6 @@ export default function Room() {
     recorderRef.current?.setTranslations(recordingVoices.map((stream) => ({ stream, local: false })))
   }, [recording, recordingVoices])
 
-  const handleTileRatio = useCallback((key: string, ratio: number) => {
-    setTileRatios((prev) =>
-      aspectRatioChanged(prev[key] ?? 0, ratio) ? { ...prev, [key]: ratio } : prev,
-    )
-  }, [])
-
   const pinnedKeyRef = useLatest(pinnedKey)
 
   const togglePin = useCallback(
@@ -1759,6 +1767,15 @@ export default function Room() {
       setUserPin(pinnedKeyRef.current === key ? NO_PIN : key)
     },
     [pinnedKeyRef],
+  )
+
+  const [stageRef, stage] = useElementSize<HTMLElement>()
+  const grid = bestGrid(
+    allTiles.length,
+    stage.width - 2 * STAGE_PADDING,
+    stage.height - STAGE_PADDING - STAGE_TOP,
+    tileRatio(stage.width, stage.height),
+    TILE_GAP,
   )
 
   const renderTile = (tile: Tile, compact = false) => {
@@ -1789,7 +1806,7 @@ export default function Room() {
         pinned={pinnedKey === tile.key}
         onTogglePin={allTiles.length > 1 ? togglePin : undefined}
         compact={compact}
-        onAspectRatio={compact ? undefined : handleTileRatio}
+        fill={!compact && !pinnedKey}
       />
     )
   }
@@ -1889,22 +1906,22 @@ export default function Room() {
   }
 
   return (
-    <div className="flex h-dvh flex-col">
-      <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-3 sm:px-4">
-        <div className="flex min-w-0 items-center gap-2">
+    <div className="relative flex h-dvh flex-col bg-muted/40">
+      <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex p-4">
+        <div className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 [&>*]:shadow-sm">
           <Hint label="Copy invite link (tap 5× for diagnostics)" side="bottom">
             <button
               type="button"
               onClick={onTitleTap}
               aria-label="Copy invite link"
-              className="group -mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-sm font-medium transition-colors hover:bg-secondary"
+              className="group flex min-w-0 cursor-pointer items-center gap-1.5 rounded-full bg-background/85 px-3 py-1.5 text-sm font-medium backdrop-blur transition-colors hover:bg-background"
             >
-              <span className="hud-title truncate">{roomInfo?.name || slug}</span>
-              <Link2 className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+              <span className="hud-title max-w-48 truncate sm:max-w-80">{roomInfo?.name || slug}</span>
+              <Link2 className="size-3.5 shrink-0 text-muted-foreground" />
             </button>
           </Hint>
           {recorder && (
-            <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+            <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-destructive px-2.5 py-1 text-xs font-medium text-white">
               <Circle className="size-2 animate-pulse fill-current" />
               Recording
             </span>
@@ -1917,7 +1934,7 @@ export default function Room() {
               ].join(' ')}
               side="bottom"
             >
-              <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+              <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-background/85 px-2.5 py-1 text-xs font-medium backdrop-blur">
                 <Languages className="size-3 shrink-0" />
                 <span className="truncate">
                   {translationLabel(translation)}
@@ -1931,7 +1948,7 @@ export default function Room() {
               <button
                 type="button"
                 onClick={() => setTranslationFailure('')}
-                className="flex min-w-0 items-center gap-1.5 rounded-full bg-destructive/15 px-2 py-0.5 text-xs font-medium text-destructive"
+                className="flex min-w-0 items-center gap-1.5 rounded-full bg-destructive px-2.5 py-1 text-xs font-medium text-white"
               >
                 <TriangleAlert className="size-3 shrink-0" />
                 <span className="truncate">Live translation failed: {translationFailure}</span>
@@ -1941,33 +1958,18 @@ export default function Room() {
           {translatorStatus && translationWarnings(translatorStatus, langPrefs.lang, translation.languages).map((warning) => (
             <span
               key={warning}
-              className="flex min-w-0 items-center gap-1.5 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400"
+              className="flex min-w-0 items-center gap-1.5 rounded-full bg-amber-400 px-2.5 py-1 text-xs font-medium text-black"
             >
               <TriangleAlert className="size-3 shrink-0" />
               <span className="truncate">{warning}</span>
             </span>
           ))}
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Hint label={sidebar === 'people' ? 'Hide participants' : 'Show participants'} side="bottom">
-            <Button
-              variant={sidebar === 'people' ? 'default' : 'secondary'}
-              className="h-7 gap-1 px-2.5 text-xs"
-              aria-label="Participants"
-              aria-pressed={sidebar === 'people'}
-              onClick={togglePeople}
-            >
-              <Users className="size-3.5" />
-              {memberList.length}
-            </Button>
-          </Hint>
-          <ThemeToggle />
-        </div>
       </header>
 
-      <div className="relative flex min-h-0 flex-1 bg-muted/40">
+      <div className="relative flex min-h-0 flex-1">
         {pinnedTile ? (
-          <main className="flex min-h-0 flex-1 flex-col gap-2 p-2">
+          <main className="flex min-h-0 flex-1 flex-col gap-2 px-2 pb-2" style={{ paddingTop: STAGE_TOP }}>
             <div className="min-h-0 flex-1">{renderTile(pinnedTile)}</div>
             {stripTiles.length > 0 && (
               <div className="no-scrollbar flex shrink-0 gap-2 overflow-x-auto pb-0.5">
@@ -1980,26 +1982,14 @@ export default function Room() {
             )}
           </main>
         ) : (
-          <main
-            className="grid min-h-0 flex-1 gap-2 overflow-y-auto p-2"
-            style={{
-              containerType: 'size',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))',
-              alignContent: 'safe center',
-            }}
-          >
-            {allTiles.map((tile) => {
-              const ratio = tileRatios[tile.key] ?? FALLBACK_ASPECT_RATIO
-              return (
-                <div
-                  key={tile.key}
-                  className="w-full justify-self-center"
-                  style={{ aspectRatio: `${ratio}`, maxWidth: `calc(96cqh * ${ratio})` }}
-                >
+          <main ref={stageRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-2" style={{ paddingTop: STAGE_TOP }}>
+            <div className="flex min-h-full flex-wrap content-center justify-center" style={{ gap: TILE_GAP }}>
+              {allTiles.map((tile) => (
+                <div key={tile.key} className="shrink-0" style={{ width: grid.width, height: grid.height }}>
                   {renderTile(tile, false)}
                 </div>
-              )
-            })}
+              ))}
+            </div>
           </main>
         )}
 
@@ -2037,6 +2027,10 @@ export default function Room() {
       </div>
 
       <ControlsBar
+        roomName={roomInfo?.name || slug}
+        peopleCount={memberList.length}
+        peopleOpen={sidebar === 'people'}
+        onTogglePeople={togglePeople}
         mic={controls.mic}
         cam={controls.cam}
         sharing={controls.sharing}
@@ -2073,6 +2067,14 @@ export default function Room() {
               volume={devicePrefs.volume}
             />
           ))}
+      {meetingReady && (
+        <MeetingReady
+          link={inviteLink()}
+          passwordProtected={passwordProtected}
+          onCopy={copyInvite}
+          onClose={() => setMeetingReady(false)}
+        />
+      )}
       {debugOpen && <DiagnosticsPanel clientRef={clientRef} errorsRef={pageErrorsRef} />}
     </div>
   )

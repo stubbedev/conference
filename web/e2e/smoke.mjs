@@ -122,11 +122,35 @@ function lanAddress() {
   throw new Error('no non-loopback IPv4 address: Chrome only relays TURN/UDP to a routable host')
 }
 
+// A control is a button on the bar or an item in its "More options"
+// menu, which Radix opens on pointerdown rather than click.
 function clickButtonByLabel(label) {
-  const button = [...document.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label)
-  if (!button) return false
-  button.click()
+  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].find((b) => b.getAttribute('aria-label') === label)
+  let control = find()
+  if (!control) {
+    const more = document.querySelector('button[aria-label="More options"]')
+    if (!more || more.getAttribute('aria-expanded') === 'true') return false
+    more.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }))
+    control = find()
+  }
+  if (!control) {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    return false
+  }
+  control.click()
   return true
+}
+
+async function controlPresent(label) {
+  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].some((b) => b.getAttribute('aria-label') === label)
+  if (find()) return true
+  const more = document.querySelector('button[aria-label="More options"]')
+  if (!more) return false
+  more.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }))
+  for (let i = 0; i < 20 && !find(); i++) await new Promise((resolve) => setTimeout(resolve, 50))
+  const present = find()
+  document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  return present
 }
 
 async function clickButtonByTitle(browser, label) {
@@ -217,6 +241,42 @@ const previewCameraLabel = `(() => {
   return track ? track.label : ''
 })()`
 
+// Starting a meeting from the home page goes straight to the join screen as
+// its host, and once in, offers a joining link that carries the room key.
+async function checkNewMeeting(failures, dir, base) {
+  const browser = await launch(6, dir)
+  try {
+    const session = browser.sessionId
+    await browser.cdp.send('Page.enable', {}, session)
+    await browser.cdp.send('Page.navigate', { url: `${base}/` }, session)
+    const started = await waitFor(
+      browser,
+      `(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'New meeting'); if (b && !b.disabled) { b.click(); return true } return false })()`,
+      Boolean,
+      15000,
+    )
+    check(failures, 'new meeting', started.ok, 'no New meeting button on the home page')
+    const lobby = await waitFor(browser, `location.pathname.startsWith('/r/') && location.search.startsWith('?p=') && location.hash.startsWith('#k=')`, Boolean, 15000)
+    check(failures, 'new meeting', lobby.ok, 'New meeting did not open the room as its host')
+    const joined = await waitFor(
+      browser,
+      `(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Join call'); if (b && !b.disabled) { b.click(); return true } return false })()`,
+      Boolean,
+      20000,
+    )
+    check(failures, 'new meeting', joined.ok, 'the new meeting could not be joined')
+    const card = await waitFor(
+      browser,
+      `document.querySelector('section[aria-label="Your meeting\\'s ready"]')?.textContent ?? ''`,
+      (text) => text.includes('/r/') && text.includes('#k='),
+      15000,
+    )
+    check(failures, 'new meeting', card.ok, `no joining link with the room key after starting a meeting: ${JSON.stringify(card.value)}`)
+  } finally {
+    await stopProcess(browser.proc)
+  }
+}
+
 async function checkBackgroundBlur(failures, dir, base) {
   const camera = join(dir, 'blur-camera.y4m')
   writeNoiseVideo(camera)
@@ -265,7 +325,6 @@ async function checkBackgroundBlur(failures, dir, base) {
     await stopProcess(browser.proc)
   }
 }
-const recordButtonPresent = `[...document.querySelectorAll('button')].some(b => b.getAttribute('aria-label') === 'Record the call')`
 
 // waitForBadge polls until the badge reaches the wanted state, so the
 // assertions do not depend on event-arrival timing.
@@ -443,6 +502,7 @@ async function main() {
 
     await checkSimulcast(failures, browsers[0], browsers[1])
 
+    await checkNewMeeting(failures, dir, `http://127.0.0.1:${port}`)
     await checkBackgroundBlur(failures, dir, `http://127.0.0.1:${port}`)
 
     await evalJs(browsers[1], 'window.__sockets.at(-1).close()')
@@ -487,7 +547,7 @@ async function main() {
 
     const hostRecordButton = await clickButtonByTitle(browsers[0], 'Record the call')
     check(failures, 'recording', hostRecordButton, 'record button missing on the privileged browser')
-    check(failures, 'recording', await evalJs(browsers[1], recordButtonPresent), 'record button missing on the unprivileged browser')
+    check(failures, 'recording', await callJs(browsers[1], controlPresent, 'Record the call'), 'record button missing on the unprivileged browser')
 
     if (hostRecordButton) {
       check(failures, 'recording', await waitForBadge(browsers[0], true), 'recording badge missing on the recorder page')
