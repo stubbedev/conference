@@ -53,6 +53,45 @@ const ttsProbe = workerProbe(
 `,
 )
 
+const RECORDINGS = { en: '/fixtures/english.wav', de: '/fixtures/german.wav', sv: '/fixtures/swedish.wav' }
+const SECONDS = 8
+
+const asrProbe = workerProbe(
+  { asr: builtWorker('asr') },
+  `
+  const { ask, events } = workers.asr
+  const heard = {}
+  for (const [lang, url] of Object.entries(${JSON.stringify(RECORDINGS)})) {
+    const audio = (await readWav(url)).slice(0, ${SECONDS} * 16000)
+    if (Object.keys(heard).length === 0) await ask({ type: 'init', base: '/speech/', asr: ${JSON.stringify(chosen.asr)}, lang })
+    const started = performance.now()
+    const { text } = await ask({ type: 'transcribe', audio, lang })
+    heard[lang] = { text, ms: Math.round(performance.now() - started) }
+  }
+  return { heard, loading: events.filter((event) => event.event === 'loading').length }
+`,
+)
+
+const pairs = Object.keys(chosen.mt.pairs ?? {})
+const multilingual = ['de-da', 'da-de', 'en-da', 'de-en'].find((pair) => !pairs.includes(pair)) ?? 'de-en'
+const TEXTS = { en: 'Good morning, shall we start with the budget?', de: 'Guten Morgen, sollen wir mit dem Budget anfangen?', da: 'Godmorgen, skal vi starte med budgettet?' }
+
+const mtProbe = workerProbe(
+  { mt: builtWorker('mt') },
+  `
+  const { ask } = workers.mt
+  await ask({ type: 'init', base: '/speech/', mt: ${JSON.stringify(chosen.mt)} })
+  const translated = {}
+  for (const pair of ${JSON.stringify([...pairs.slice(0, 1), multilingual])}) {
+    const [source, target] = pair.split('-')
+    const started = performance.now()
+    const { text } = await ask({ type: 'translate', text: ${JSON.stringify(TEXTS)}[source], source, target, system: '' })
+    translated[pair] = { text, ms: Math.round(performance.now() - started) }
+  }
+  return { translated }
+`,
+)
+
 async function probe(browser, label, expression) {
   const value = await Promise.race([evalJs(browser, expression), sleep(TIMEOUT_MS).then(() => ({ error: 'timed out' }))])
   console.log(`${label}: ${JSON.stringify(value)}`)
@@ -66,6 +105,18 @@ async function main() {
   try {
     await browser.cdp.send('Page.navigate', { url: `${server.origin}/` }, browser.sessionId)
     await sleep(1_000)
+
+    const asr = await probe(browser, 'transcription', asrProbe)
+    for (const [lang, { text }] of Object.entries(asr.heard ?? {})) {
+      check(`transcription ${lang}`, typeof text === 'string' && text.trim().split(/\s+/).length >= 4, `heard ${JSON.stringify(text)}`)
+    }
+    check('transcription reports its download', asr.loading > 0 || process.env.CACHED === '1', 'no loading events')
+
+    const mt = await probe(browser, 'translation', mtProbe)
+    for (const [pair, { text }] of Object.entries(mt.translated ?? {})) {
+      const source = TEXTS[pair.split('-')[0]]
+      check(`translation ${pair}`, typeof text === 'string' && text.length > 10 && text !== source, `translated ${JSON.stringify(text)}`)
+    }
 
     const tts = await probe(browser, 'voice', ttsProbe)
     for (const [lang, { seconds, error }] of Object.entries(tts.spoken ?? {})) {

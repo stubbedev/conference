@@ -22,7 +22,7 @@ import {
   screenSenderParameters,
 } from '@/lib/encodings'
 import { SCREEN_AUDIO_KIND } from '@/lib/screen'
-import { isLangPrefs, isRoomCaption, type LangPrefs, type RoomCaption } from '@/lib/translate/types'
+import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage } from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -165,8 +165,8 @@ interface Events {
   'track-removed': { sourceId: string; mid: string }
   chat: ChatMessage
   recording: { from: string; on: boolean }
-  lang: { from: string; prefs: LangPrefs }
-  caption: { from: string; caption: RoomCaption }
+  lang: { from: string; prefs: LangAnnouncement }
+  caption: { from: string; caption: RoomMessage }
   translating: { from: string; on: boolean }
   'translate-token': { token: string }
   error: { code: string; text: string }
@@ -236,7 +236,8 @@ export class RoomClient {
   private translationTrackLangs = new Map<string, string>()
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
-  private memberLangs = new Map<string, LangPrefs>()
+  private memberLangs = new Map<string, LangAnnouncement>()
+  private translates = false
   private negotiation: Promise<void> = Promise.resolve()
   private transformed = new WeakSet<object>()
   private selfId = ''
@@ -375,7 +376,7 @@ export class RoomClient {
   }
 
   /** Language settings other members have announced so far. */
-  get memberLangPrefs(): ReadonlyMap<string, LangPrefs> {
+  get memberLangPrefs(): ReadonlyMap<string, LangAnnouncement> {
     return this.memberLangs
   }
 
@@ -568,6 +569,12 @@ export class RoomClient {
     void this.sendLang()
   }
 
+  setTranslates(translates: boolean): void {
+    if (this.translates === translates) return
+    this.translates = translates
+    void this.sendLang()
+  }
+
   // announceTranslating switches the room's live translation on or off
   // (hosts only). While it is on, the server hands every member a
   // translate-token event for the speech service.
@@ -580,7 +587,7 @@ export class RoomClient {
     this.send({ type: 'translate-token-request' })
   }
 
-  async sendCaption(caption: RoomCaption): Promise<void> {
+  async sendCaption(caption: RoomMessage): Promise<void> {
     const sealed = await encryptChat(this.opts.chatKey, JSON.stringify(caption))
     this.send({ type: 'caption', iv: sealed.iv, ct: sealed.ct })
   }
@@ -657,7 +664,7 @@ export class RoomClient {
 
   private async sendLang(): Promise<void> {
     if (!this.langPrefs) return
-    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify(this.langPrefs))
+    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify({ ...this.langPrefs, translates: this.translates }))
     this.send({ type: 'lang', iv: sealed.iv, ct: sealed.ct })
   }
 
@@ -812,8 +819,8 @@ export class RoomClient {
         if (msg.from) this.emit('recording', { from: msg.from, on: msg.on ?? false })
         return
       case 'lang': {
-        const prefs = await this.openSealed(msg)
-        if (msg.from && isLangPrefs(prefs)) {
+        const prefs = announcement(await this.openSealed(msg))
+        if (msg.from && prefs) {
           this.memberLangs.set(msg.from, prefs)
           this.emit('lang', { from: msg.from, prefs })
         }
@@ -821,9 +828,9 @@ export class RoomClient {
       }
       case 'caption': {
         const caption = await this.openSealed(msg)
-        // Everyone captions their own speech: a caption naming any other
-        // speaker than its sender is dropped.
-        if (msg.from && isRoomCaption(caption) && caption.speaker === msg.from) {
+        // Everyone captions their own speech, and a translation names its
+        // translator: anything claiming to come from another member is dropped.
+        if (msg.from && isRoomMessage(caption) && (caption.k === 'translation' ? caption.by : caption.speaker) === msg.from) {
           this.emit('caption', { from: msg.from, caption })
         }
         return

@@ -15,7 +15,7 @@ test('a stand-in translation names the target language', async () => {
   const engines = new StandInEngines()
   const mt = await engines.mt('en', 'de')
 
-  assert.equal(await mt.translate('hello', 'en', 'de'), '[de] hello')
+  assert.equal(await mt.translate({ text: 'hello', source: 'en', target: 'de', earlier: [] }), '[de] hello')
   assert.equal(standInTranslation('en', standInTranscript('de', 1)), '[en] de utterance 1')
 })
 
@@ -31,4 +31,20 @@ test('a stand-in voice is a tone at the capture rate', async () => {
 
 test('stand-in engines need no WebGPU', async () => {
   assert.equal(new StandInEngines().requiresWebGpu, false)
+})
+
+test('the stand-in segmenter cuts loud audio into an utterance, and flushes the one in progress', async () => {
+  const segments: string[] = []
+  const engines = new StandInEngines()
+  const segmenter = await engines.segmenter({
+    onSegment: (segment) => segments.push(segment.kind),
+    onError: (error) => assert.fail(error),
+  })
+
+  segmenter.push(new Int16Array(RATE).fill(8000))
+  segmenter.flush()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+
+  assert.equal(segments.at(-1), 'utterance')
+  assert.ok(segments.includes('partial'))
 })

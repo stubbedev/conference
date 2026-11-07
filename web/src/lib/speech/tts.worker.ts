@@ -14,7 +14,9 @@ serve(async (request) => {
   switch (request.type) {
     case 'init': {
       voices = (request.voices ?? {}) as Record<string, string>
-      piper = new Piper(String(request.base))
+      piper ??= new Piper(String(request.base))
+      const voice = voices[String(request.lang)]
+      if (voice) await piper.prepare(voice)
       return
     }
 

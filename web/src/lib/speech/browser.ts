@@ -1,35 +1,16 @@
-// The engines as this member's browser runs them: four workers, one per
-// purpose, each started the first time it is needed and kept for the rest
-// of the call. Nothing here loads a model; that happens inside a worker,
-// on its own thread, so the page keeps drawing while a telephone-sized
-// model is read and a GPU session is built.
-//
-// Every call into a worker goes through one queue per worker, because the
-// page asks the same engine for work from several places at once (an
-// interim caption while a sentence is still being spoken, one translation
-// per listener language) and a worker holds one session.
-//
-// A worker that fails says so in words a member can read, and those words
-// become the error the page shows. There is no silent fall back to a
-// stand-in voice or a stand-in sentence here: if the engines cannot run,
-// the member is told why rather than shown something that is not a
-// translation.
-
-import type { AsrEngine, Detector, Engines, MtEngine, TtsEngine, Voiced } from '@/lib/speech/engines'
-import type { SpeechModels } from '@/lib/speech/models'
+import type { AsrEngine, Engines, MtEngine, Prepared, Segmenter, SegmenterEvents, Sentence, TtsEngine } from '@/lib/speech/engines'
+import { BuiltinTranslators } from '@/lib/speech/builtin'
+import { asrExport, bytesFor, renderPrompt, type SpeechModels } from '@/lib/speech/models'
 import { Serial } from '@/lib/speech/serial'
-import { WorkerRpc, type WorkerReply } from '@/lib/speech/worker'
-import type { VoiceChoice } from '@/lib/translate/types'
+import { WorkerRpc, type WorkerEvent, type WorkerReply } from '@/lib/speech/worker'
+import { languageName, type Language } from '@/lib/translate/languages'
+import type { Loading, VoiceChoice } from '@/lib/translate/types'
 
-/** The four things a worker can be asked to do. */
 type Purpose = 'vad' | 'asr' | 'mt' | 'tts'
 
-/** Where the web UI serves the voice detection model the build vendors. */
 const VAD_BASE = '/vad/'
-
-interface ProbabilityReply extends WorkerReply {
-  probability: number
-}
+const MODEL_CACHE = 'transformers-cache'
+const MEGABYTE = 1e6
 
 interface TextReply extends WorkerReply {
   text: string
@@ -40,23 +21,24 @@ interface SpokenReply extends WorkerReply {
   rate: number
 }
 
-/** One worker and the one request it is running. */
+interface SteppedReply extends WorkerReply {
+  model: string | null
+}
+
 class Channel {
   private readonly rpc: WorkerRpc
   private readonly queue = new Serial()
 
-  constructor(worker: Worker) {
-    this.rpc = new WorkerRpc(worker)
+  constructor(worker: Worker, onEvent: (event: WorkerEvent) => void) {
+    this.rpc = new WorkerRpc(worker, onEvent)
   }
 
-  /**
-   * Calls the worker once everything asked of it before has answered.
-   * What the page sends is copied rather than handed over: a detection
-   * frame is a window on audio the page still needs, and taking its
-   * buffer would take that audio too.
-   */
-  call<T extends WorkerReply>(message: Record<string, unknown>): Promise<T> {
-    return this.queue.run(() => this.rpc.call<T>(message))
+  call<T extends WorkerReply>(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
+    return this.queue.run(() => this.rpc.call<T>(message, transfer))
+  }
+
+  post(message: Record<string, unknown>, transfer: Transferable[] = []): void {
+    this.rpc.post(message, transfer)
   }
 
   close(): void {
@@ -64,7 +46,6 @@ class Channel {
   }
 }
 
-/** Starts the worker for purpose. The URL has to stay literal for the bundler. */
 function start(purpose: Purpose): Worker {
   switch (purpose) {
     case 'vad':
@@ -78,107 +59,181 @@ function start(purpose: Purpose): Worker {
   }
 }
 
+function megabytes(bytes: number): string {
+  return `${Math.round(bytes / MEGABYTE)} MB`
+}
+
+function reason(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
 class BrowserEngines implements Engines {
-  /**
-   * Transcription needs a GPU: a whisper-sized model on the CPU cannot keep
-   * up with a conversation, so the page says so before anyone speaks.
-   */
-  readonly requiresWebGpu = true
+  readonly requiresWebGpu: boolean
 
   private readonly models: SpeechModels
+  private readonly languages: readonly Language[]
   private readonly channels = new Map<Purpose, Channel>()
   private readonly loading = new Map<Purpose, Promise<void>>()
-  private detectorEngine: Promise<Detector> | null = null
-  private asrEngine: AsrEngine | null = null
-  private mtEngine: MtEngine | null = null
-  private ttsEngine: TtsEngine | null = null
+  private readonly files = new Map<string, Loading>()
+  private readonly builtin = new BuiltinTranslators()
+  private onLoading: (loading: Loading | null) => void = () => {}
+  private segments: SegmenterEvents | null = null
 
-  constructor(models: SpeechModels) {
+  constructor(models: SpeechModels, languages: readonly Language[]) {
     this.models = models
+    this.languages = languages
+    this.requiresWebGpu = !models.asr.fallback
   }
 
-  async detector(): Promise<Detector> {
-    this.detectorEngine ??= this.makeDetector()
-    return this.detectorEngine
+  async prepare(lang: string, onLoading: (loading: Loading | null) => void): Promise<Prepared> {
+    this.onLoading = onLoading
+    const room = await this.storageProblem(lang)
+    if (room) return { transcribes: false, translates: false, problems: [room] }
+
+    const [vad, asr, mt, tts] = await Promise.allSettled([
+      this.load('vad', { base: VAD_BASE }),
+      this.load('asr', { base: this.models.base, asr: this.models.asr, lang }),
+      this.load('mt', { base: this.models.base, mt: this.models.mt }),
+      this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(),
+    ])
+    this.files.clear()
+    this.onLoading(null)
+
+    const problems = [vad, asr, mt, tts].flatMap((result) => (result.status === 'rejected' ? [reason(result.reason)] : []))
+    return {
+      transcribes: vad.status === 'fulfilled' && asr.status === 'fulfilled',
+      translates: mt.status === 'fulfilled',
+      problems,
+    }
+  }
+
+  async segmenter(events: SegmenterEvents): Promise<Segmenter> {
+    this.segments = events
+    await this.load('vad', { base: VAD_BASE })
+    const channel = this.channel('vad')
+
+    return {
+      push: (pcm) => channel.post({ type: 'audio', pcm }, [pcm.buffer]),
+      flush: () => channel.post({ type: 'flush' }),
+      reset: () => channel.post({ type: 'reset' }),
+      close: () => {
+        this.segments = null
+        this.closeChannel('vad')
+      },
+    }
   }
 
   async asr(lang: string): Promise<AsrEngine> {
-    await this.load('asr', {
-      base: this.models.base,
-      model: this.models.asr.model,
-      dtype: this.models.asr.dtype,
-      languages: this.models.asr.languages,
-      lang,
-    })
-
-    this.asrEngine ??= {
+    await this.load('asr', { base: this.models.base, asr: this.models.asr, lang })
+    return {
       transcribe: async (audio, transcribeIn) => {
-        const reply = await this.channel('asr').call<TextReply>({ type: 'transcribe', audio, lang: transcribeIn })
+        const reply = await this.channel('asr').call<TextReply>({ type: 'transcribe', audio, lang: transcribeIn }, [audio.buffer])
         return reply.text
       },
     }
-
-    return this.asrEngine
   }
 
-  async mt(_source: string, _target: string): Promise<MtEngine> {
-    await this.load('mt', { base: this.models.base, model: this.models.mt.model, dtype: this.models.mt.dtype })
-
-    this.mtEngine ??= {
-      translate: async (text, source, target) => {
-        const reply = await this.channel('mt').call<TextReply>({ type: 'translate', text, source, target })
-        return reply.text
-      },
-    }
-
-    return this.mtEngine
+  async stepDown(lang: string): Promise<string | null> {
+    if (!asrExport(this.models.asr, 'fallback', lang)) return null
+    const reply = await this.channel('asr').call<SteppedReply>({ type: 'step-down', lang })
+    return reply.model
   }
 
-  async tts(_lang: string): Promise<TtsEngine> {
-    await this.load('tts', { base: this.models.base, voices: this.models.voices })
+  async mt(source: string, target: string): Promise<MtEngine> {
+    const builtin = this.models.mt.builtin ? await this.builtin.for(source, target) : null
+    if (builtin) return { translate: (sentence) => builtin.translate(sentence.text) }
 
-    this.ttsEngine ??= {
-      speak: async (text, lang, voice) => this.speak(text, lang, voice),
-    }
+    await this.load('mt', { base: this.models.base, mt: this.models.mt })
+    return { translate: (sentence) => this.translate(sentence) }
+  }
 
-    return this.ttsEngine
+  async tts(lang: string): Promise<TtsEngine> {
+    await this.load('tts', { base: this.models.base, voices: this.models.voices, lang })
+    return { speak: (text, speakIn, voice) => this.speak(text, speakIn, voice) }
   }
 
   close(): void {
     for (const purpose of [...this.channels.keys()]) this.closeChannel(purpose)
   }
 
-  private async speak(text: string, lang: string, voice: VoiceChoice): Promise<Voiced> {
+  private async translate(sentence: Sentence): Promise<string> {
+    const reply = await this.channel('mt').call<TextReply>({
+      type: 'translate',
+      text: sentence.text,
+      source: sentence.source,
+      target: sentence.target,
+      system: this.system(sentence),
+    })
+    return reply.text
+  }
+
+  private system(sentence: Sentence): string {
+    const prompt = this.models.prompt
+    if (!prompt) return ''
+    const language = (code: string): Language => ({ code, name: languageName(this.languages, code) })
+    return renderPrompt(prompt, language(sentence.source), language(sentence.target), sentence.earlier)
+  }
+
+  private async speak(text: string, lang: string, voice: VoiceChoice) {
     const reply = await this.channel('tts').call<SpokenReply>({ type: 'speak', text, lang, voice })
     return { pcm: reply.pcm, rate: reply.rate }
   }
 
-  private makeDetector(): Promise<Detector> {
-    return this.load('vad', { base: VAD_BASE }).then(() => ({
-      probability: async (frame) => {
-        const reply = await this.channel('vad').call<ProbabilityReply>({ type: 'detect', frame })
-        return reply.probability
-      },
-      close: () => {
-        this.closeChannel('vad')
-        this.detectorEngine = null
-      },
-    }))
+  private async storageProblem(lang: string): Promise<string | null> {
+    const storage = navigator.storage
+    if (!storage?.estimate) return null
+
+    await storage.persist?.().catch(() => false)
+    const { quota, usage } = await storage.estimate()
+    if (quota === undefined || usage === undefined) return null
+
+    const needed = bytesFor(this.models, lang)
+    if (needed <= quota - usage || (await this.cached(lang))) return null
+
+    return `Live translation needs ${megabytes(needed)} of storage for its models, and this browser has ${megabytes(Math.max(quota - usage, 0))} left.`
+  }
+
+  private async cached(lang: string): Promise<boolean> {
+    const asr = asrExport(this.models.asr, 'primary', lang)
+    if (!asr || typeof caches === 'undefined') return false
+    const cache = await caches.open(MODEL_CACHE)
+    return Boolean(await cache.match(new URL(`${this.models.base}${asr.model}/config.json`, location.href).href))
+  }
+
+  private event(event: WorkerEvent): void {
+    switch (event.event) {
+      case 'loading':
+        this.files.set(String(event.file), { loaded: Number(event.loaded), total: Number(event.total) })
+        this.onLoading(this.total())
+        return
+      case 'segment':
+        this.segments?.onSegment({ kind: event.kind === 'partial' ? 'partial' : 'utterance', audio: event.audio as Int16Array })
+        return
+      case 'error':
+        this.segments?.onError(new Error(String(event.message)))
+        return
+    }
+  }
+
+  private total(): Loading {
+    let loaded = 0
+    let total = 0
+    for (const file of this.files.values()) {
+      loaded += file.loaded
+      total += file.total
+    }
+    return { loaded, total }
   }
 
   private channel(purpose: Purpose): Channel {
     const known = this.channels.get(purpose)
     if (known) return known
 
-    const channel = new Channel(start(purpose))
+    const channel = new Channel(start(purpose), (event) => this.event(event))
     this.channels.set(purpose, channel)
     return channel
   }
 
-  /**
-   * Loads what purpose needs, once. A load that fails is not remembered,
-   * so the next call tries again and the member sees the new reason.
-   */
   private load(purpose: Purpose, settings: Record<string, unknown>): Promise<void> {
     const known = this.loading.get(purpose)
     if (known) return known
@@ -206,7 +261,6 @@ class BrowserEngines implements Engines {
   }
 }
 
-/** Engines this member's browser runs itself, from the models the server serves. */
-export function browserEngines(models: SpeechModels): Engines {
-  return new BrowserEngines(models)
+export function browserEngines(models: SpeechModels, languages: readonly Language[]): Engines {
+  return new BrowserEngines(models, languages)
 }

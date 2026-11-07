@@ -50,10 +50,14 @@ export function serve(handler: Handler): void {
     void queue.run(async () => {
       try {
         const [body, transfer] = (await handler(request)) ?? [{}]
-        scope.postMessage({ ...body, id: request.id, type: 'done' }, transfer ?? [])
+        if (request.id !== undefined) scope.postMessage({ ...body, id: request.id, type: 'done' }, transfer ?? [])
       } catch (err) {
         scope.postMessage({ id: request.id, type: 'error', message: reason(err) })
       }
     })
   }
+}
+
+export function notify(event: string, body: Record<string, unknown>, transfer: Transferable[] = []): void {
+  scope.postMessage({ ...body, event }, transfer)
 }

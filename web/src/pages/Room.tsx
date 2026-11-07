@@ -51,7 +51,6 @@ import { DEFAULT_LANGUAGE, languageName, type Language } from '@/lib/translate/l
 import { browserEngines } from '@/lib/speech/browser'
 import { StandInEngines } from '@/lib/speech/standin'
 import { LocalTranslator } from '@/lib/speech/local'
-import { speechModels } from '@/lib/speech/models'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { isVoiceChoice, type LangPrefs, type RoomCaption, type TranslatorStatus } from '@/lib/translate/types'
 import {
@@ -186,9 +185,8 @@ function buildTranslator(
   if (config.mode !== 'browser') return new ServerTranslator(prefs, events)
   if (config.fake) return new LocalTranslator(prefs, events, new StandInEngines())
 
-  const models = speechModels(config)
-  if (!models) return null
-  return new LocalTranslator(prefs, events, browserEngines(models))
+  if (!config.models) return null
+  return new LocalTranslator(prefs, events, browserEngines(config.models, config.languages))
 }
 
 // What live translation is doing, in a few words, for the room's badge.
@@ -200,8 +198,12 @@ function translationLabel(config: TranslationConfig): string {
 // Why this member's speech is not translated, in words.
 function translationWarnings(status: TranslatorStatus, selfLang: string, languages: readonly Language[]): string[] {
   const warnings: string[] = []
-  if (status.state === 'failed' && status.detail) {
+  if ((status.state === 'failed' || status.state === 'live') && status.detail) {
     warnings.push(status.detail)
+  }
+  if (status.loading) {
+    const mb = (bytes: number) => Math.round(bytes / 1e6)
+    warnings.push(`Downloading the speech models: ${mb(status.loading.loaded)} of ${mb(status.loading.total)} MB`)
   }
   if (status.sameLanguage) {
     warnings.push(`Everyone here speaks ${languageName(languages, selfLang)}: nothing to translate`)
@@ -994,7 +996,7 @@ export default function Room() {
       client.on('caption', ({ caption }) => {
         const translator = translatorRef.current
         if (translator) translator.receive(caption)
-        else handleRoomCaption(caption)
+        else if (caption.k !== 'translation') handleRoomCaption(caption)
       })
       client.on('lang', ({ from, prefs }) => setMemberLangs((prev) => ({ ...prev, [from]: prefs.lang })))
       client.on('translating', ({ from, on }) => {

@@ -1,80 +1,123 @@
-// Translation in a worker of its own: one sentence in a speaker's
-// language, the same sentence in a listener's, through the multilingual
-// model the server serves. A model that cannot run on this browser's GPU
-// is run on the CPU in its 8-bit export; one that cannot run at all is
-// reported with what the runtime said.
-
 import { pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers } from './hf'
+import { reportLoading } from './loading'
+import { pairFor, type Export, type MtChoice } from './models'
 import { dtypeFor, fallbackToWasm, message, type Device } from './runtime'
 import { serve } from './serve'
 import { webgpuAvailable } from './webgpu'
 
-interface Translator {
-  (text: string, options: { src_lang: string; tgt_lang: string }): Promise<{ translation_text: string }[]>
+const MAX_NEW_TOKENS = 384
+const THINKING = /<think>[\s\S]*?<\/think>/g
+
+interface Seq2Seq {
+  (text: string, options?: { src_lang: string; tgt_lang: string }): Promise<{ translation_text: string }[]>
+  model: { config: { model_type: string } }
 }
 
-let model = ''
-let dtype = ''
-let translator: Translator | null = null
-
-/** One sentence translated, or the reason it could not be. */
-async function translate(text: string, source: string, target: string): Promise<string> {
-  if (!translator) throw new Error('translation was asked before the model was loaded')
-
-  const [translated] = await translator(text, { src_lang: source, tgt_lang: target })
-  if (!translated) throw new Error(`the translation model translated nothing into ${target}`)
-
-  return translated.translation_text
+interface ChatMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
 }
 
-/** The model on the GPU when it can be and on the CPU when it cannot. */
-async function load(): Promise<Translator> {
-  let refused = ''
+interface Generator {
+  (
+    messages: ChatMessage[],
+    options: { max_new_tokens: number; do_sample: false; tokenizer_encode_kwargs: { enable_thinking: false } },
+  ): Promise<{ generated_text: ChatMessage[] }[]>
+}
 
-  if (await gpu()) {
-    try {
-      return await create('webgpu', dtype)
-    } catch (err) {
-      if (!fallbackToWasm(err)) throw new Error(`the translation model ${model} could not start on WebGPU: ${message(err)}`)
-      refused = message(err)
-    }
+type Model = { kind: 'seq2seq'; run: Seq2Seq } | { kind: 'llm'; run: Generator }
 
-    console.warn(`mt: ${model} cannot run on this browser's WebGPU (${refused}); translating on the CPU instead`)
+let choice: MtChoice | null = null
+let device: Device = 'webgpu'
+const models = new Map<string, Promise<Model>>()
+
+function chosen(): MtChoice {
+  if (!choice) throw new Error('translation was asked before it was set up')
+  return choice
+}
+
+function modelFor(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
+  const known = models.get(wanted.model)
+  if (known) return known
+
+  const pending = load(wanted, kind).catch((err: unknown) => {
+    models.delete(wanted.model)
+    throw err
+  })
+  models.set(wanted.model, pending)
+  return pending
+}
+
+async function load(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
+  if (kind === 'llm' && device !== 'webgpu') {
+    throw new Error(`the translation model ${wanted.model} is a language model, which needs WebGPU`)
   }
 
+  const dtype = dtypeFor(device, wanted.dtype) as DataType
   try {
-    return await create('wasm', dtypeFor('wasm', dtype))
+    if (kind === 'llm') {
+      const run = await pipeline('text-generation', wanted.model, { device, dtype, progress_callback: reportLoading })
+      return { kind, run: run as unknown as Generator }
+    }
+    const run = await pipeline('translation', wanted.model, { device, dtype, progress_callback: reportLoading })
+    return { kind, run: run as unknown as Seq2Seq }
   } catch (err) {
-    const onDevice = refused ? ` on WebGPU (${refused}) or on the CPU` : ''
-    throw new Error(`the translation model ${model} could not start${onDevice} (${message(err)})`)
+    if (device === 'webgpu' && kind === 'seq2seq' && fallbackToWasm(err)) {
+      console.warn(`mt: ${wanted.model} cannot run on this browser's WebGPU (${message(err)}); translating on the CPU instead`)
+      device = 'wasm'
+      return load(wanted, kind)
+    }
+    const on = device === 'webgpu' ? 'WebGPU' : 'the CPU'
+    throw new Error(`the translation model ${wanted.model} could not start on ${on}: ${message(err)}`)
   }
 }
 
-async function create(device: Device, as: string): Promise<Translator> {
-  const translator = await pipeline('translation', model, { device, dtype: as as DataType })
-  return translator as Translator
-}
+async function translateWith(model: Model, text: string, source: string, target: string, system: string): Promise<string> {
+  if (model.kind === 'llm') {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: system },
+      { role: 'user', content: text },
+    ]
+    const [output] = await model.run(messages, {
+      max_new_tokens: MAX_NEW_TOKENS,
+      do_sample: false,
+      tokenizer_encode_kwargs: { enable_thinking: false },
+    })
+    const reply = output?.generated_text.at(-1)
+    if (reply?.role !== 'assistant') throw new Error(`the translation model gave no answer for ${target}`)
+    return reply.content.replace(THINKING, '').trim()
+  }
 
-/** Whether this browser gives the worker a GPU, and not one it cannot use. */
-async function gpu(): Promise<boolean> {
-  return webgpuAvailable().catch(() => false)
+  const type = model.run.model.config.model_type
+  const options = type === 'm2m_100' ? { src_lang: source, tgt_lang: target } : undefined
+  if (type !== 'm2m_100' && type !== 'marian') throw new Error(`a ${type} model is not one this app translates with`)
+
+  const [translated] = await model.run(text, options)
+  if (!translated) throw new Error(`the translation model translated nothing into ${target}`)
+  return translated.translation_text
 }
 
 serve(async (request) => {
   switch (request.type) {
     case 'init': {
       configureTransformers(String(request.base))
-      model = String(request.model)
-      dtype = String(request.dtype)
-      translator = await load()
+      choice = request.mt as MtChoice
+      if (!(await webgpuAvailable().catch(() => false))) device = 'wasm'
+      await modelFor(choice, choice.kind)
       return
     }
 
-    case 'translate':
-      return [{ text: await translate(String(request.text), String(request.source), String(request.target)) }]
+    case 'translate': {
+      const mt = chosen()
+      const source = String(request.source)
+      const target = String(request.target)
+      const pair = pairFor(mt, source, target)
+      const model = pair ? await modelFor(pair, 'seq2seq') : await modelFor(mt, mt.kind)
+      return [{ text: await translateWith(model, String(request.text), source, target, String(request.system ?? '')) }]
+    }
 
     default:
       throw new Error(`translation does not know "${request.type}"`)

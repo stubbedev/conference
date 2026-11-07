@@ -217,13 +217,37 @@ CDN at call time. `SPEECH_ENGINES=fake` gives stand-in engines with no
 files at all, which the browser tests use.
 
 What moves between browsers is the text of what each member said, sealed
-with the room's chat key, exactly as the server runtime's subtitles are:
-each listener translates it into their own language on their own machine
-and speaks it there. A room of ten languages therefore costs the speaker
-nothing extra, and the translated voice never travels. Two things follow
-from that: there are no interim subtitles, since a sentence is
-recognised once it has ended, and a listener whose browser has no WebGPU
-still reads every subtitle, because only transcription needs a GPU.
+with the room's chat key, exactly as the server runtime's subtitles are.
+A room of ten languages therefore costs the speaker nothing extra, and
+the translated voice never travels: each listener speaks it on their own
+machine.
+
+- **Interim subtitles.** The speaker's browser transcribes a sentence
+  again every 600 ms while it is still being said, and shares each
+  version; the final one replaces it. A pause that cuts a sentence short
+  does not end it: the fragment is shown and held until the sentence
+  ends with its full stop, question or exclamation mark, or until 1.5 s
+  pass with nothing more said, so it is translated whole.
+- **One translator per language.** Of the members who speak a language
+  and whose browser can translate, the one with the lowest member id
+  translates every sentence into it and shares the translation, sealed
+  like everything else; the others show it and speak it. A translation
+  is accepted only from the member every browser of that language agrees
+  on, and a browser that waited 5 s for one translates the sentence
+  itself. A listener whose browser cannot translate at all still gets
+  every sentence from whoever can.
+- **Keeping up.** A browser loads its models when live translation
+  starts, not when the first sentence arrives, asks for persistent
+  storage, refuses with the size when the models will not fit, and shows
+  the download as it goes. Transcription that falls behind, three
+  sentences in a row taking longer than they lasted, steps down to
+  `asr.fallback` once and says so; a browser without a usable GPU runs
+  the fallback on the CPU from the start, so only a server without a
+  fallback needs its members to have WebGPU. Whisper's invented
+  sentences ("Thank you for watching", subtitle credits, a line repeated
+  over and over) are dropped before anyone sees them.
+- **The voice** speaks a long translation a clause at a time, starting
+  on the first while the rest is still being made.
 
 The web UI carries the pieces every install needs rather than asking for
 them: ONNX Runtime's WebAssembly builds, the Silero voice detection
@@ -233,7 +257,10 @@ time.
 
 `just e2e-speech` checks the voice detection model in a real browser
 against a recording, and `just e2e-translate-browser` runs the whole
-pipeline in two browsers on the stand-in engines.
+pipeline in three browsers on the stand-in engines. `just
+e2e-speech-engines <model dir>` runs the built workers on the real
+models in a model directory: it transcribes the fixtures, translates
+through a pair and the multilingual model, and speaks with every voice.
 
 ## Streams
 

@@ -3,7 +3,7 @@
 // this member's own browser.
 
 import type { RoomClient } from '@/lib/sfu'
-import type { LangPrefs, RoomCaption, TranslatorStatus } from '@/lib/translate/types'
+import type { LangPrefs, RoomCaption, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
 
 export interface TranslatorEvents {
   /** A caption or voice cue for this member, as this member gets it. */
@@ -27,7 +27,7 @@ export interface Translator {
   setLocalMic(track: MediaStreamTrack | null): void
   setSelfPrefs(prefs: LangPrefs): void
   /** A caption or voice cue another member's bridge sent the room. */
-  receive(caption: RoomCaption): void
+  receive(caption: RoomMessage): void
   /** Stops translating this member's speech. */
   stop(): Promise<void>
 }

@@ -7,44 +7,55 @@
 //
 // What travels to the room is the text of what this member said, sealed
 // with the room's chat key, exactly as the speech service's subtitles
-// do: a listener translates it into its own language on its own machine,
-// which is why a room of ten languages costs the speaker nothing.
+// do. One member per language translates it for everyone who speaks that
+// language and shares the translation the same way; the others fall back
+// to translating it themselves when no translation arrives.
 
 import type { RoomClient } from '@/lib/sfu'
-import type { Detector, Engines } from '@/lib/speech/engines'
-import { Frames, MIN_UTTERANCE_SAMPLES, Utterances } from '@/lib/speech/vad'
+import { clauses } from '@/lib/speech/clauses'
+import { translatorFor, type Candidate } from '@/lib/speech/election'
+import type { Engines, Segmenter } from '@/lib/speech/engines'
+import { invented } from '@/lib/speech/invented'
+import { Pace } from '@/lib/speech/pace'
+import { Sentences, type Line } from '@/lib/speech/sentences'
+import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
 import { webgpuAvailable } from '@/lib/speech/webgpu'
 import { MicCapture } from '@/lib/translate/capture'
-import type { CaptionLine, LangPrefs, RoomCaption, TranslatorStatus } from '@/lib/translate/types'
+import type { CaptionLine, LangPrefs, RoomMessage, TranslationLine, TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
 
-/** How many sentences wait their turn to be transcribed; older ones are dropped. */
 const QUEUED_UTTERANCES = 8
+const HOLD_MS = 1_500
+const TRANSLATION_WAIT_MS = 5_000
+const EARLIER_SENTENCES = 8
 
-const NO_WEBGPU = 'This browser cannot transcribe: it needs WebGPU.'
+const NO_WEBGPU = 'This browser cannot transcribe: it needs WebGPU, and this server has no smaller model for the CPU.'
+
+type Translation = Pick<CaptionLine, 'speaker' | 'segId' | 'sourceLang' | 'lang' | 'text' | 'final'>
 
 export class LocalTranslator implements Translator {
   private client: RoomClient | null = null
   private unsubscribe: (() => void)[] = []
-  private capture: MicCapture
+  private readonly capture: MicCapture
   private playbackContext: AudioContext | null = null
   private player: VoicePlayer | null = null
   private readonly engines: Engines
-  private detector: Detector | null = null
-  private readonly frames = new Frames()
-  private readonly utterances = new Utterances()
-  /** Detection runs in order, one chunk of audio after another. */
-  private detecting: Promise<void> = Promise.resolve()
-  /** Transcription runs in order too, so subtitles cannot overtake each other. */
+  private segmenter: Segmenter | null = null
+  private readonly sentences = new Sentences()
+  private readonly pace = new Pace()
+  private holdTimer: ReturnType<typeof setTimeout> | null = null
   private transcribing: Promise<void> = Promise.resolve()
   private queued = 0
-  private segs = 0
-  /** Whether this browser can transcribe at all, which a phone without WebGPU cannot. */
+  private steppedDown = false
   private canTranscribe = true
-  /** The other members' announced languages: what this member translates into. */
-  private otherLangs = new Map<string, string>()
-  private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0 }
+  private translates = false
+  private readonly earlier = new Map<string, string[]>()
+  private readonly awaited = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly interims = new Map<string, CaptionLine>()
+  private readonly interimBusy = new Set<string>()
+  private readonly spoken = new Set<string>()
+  private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
   private selfPrefs: LangPrefs
   private stopped = false
   private readonly events: TranslatorEvents
@@ -54,45 +65,37 @@ export class LocalTranslator implements Translator {
     this.events = events
     this.engines = engines
     this.capture = new MicCapture({
-      onAudio: (pcm) => this.addAudio(pcm),
-      // A sentence cut short by the microphone closing is still a sentence.
-      onStop: () => {
-        const tail = this.utterances.flush()
-        if (tail) this.enqueue(tail)
-      },
+      onAudio: (pcm) => this.segmenter?.push(new Int16Array(pcm)),
+      onStop: () => this.segmenter?.flush(),
     })
   }
 
   attach(client: RoomClient): void {
     this.detach()
     this.client = client
+    client.setTranslates(this.translates)
     this.playbackContext ??= new AudioContext()
     this.player ??= new VoicePlayer(this.playbackContext, (speaker, track) => {
       this.events.onStream?.(speaker, this.selfPrefs.lang, track)
     })
 
-    for (const [memberId, prefs] of client.memberLangPrefs) this.otherLangs.set(memberId, prefs.lang)
-
     this.unsubscribe = [
-      client.on('lang', ({ from, prefs }) => {
-        this.otherLangs.set(from, prefs.lang)
-        this.setSameLanguage()
-      }),
+      client.on('lang', () => this.setSameLanguage()),
       client.on('member-left', ({ id }) => {
-        this.otherLangs.delete(id)
         this.player?.forget(id)
+        this.earlier.delete(id)
         this.setSameLanguage()
       }),
     ]
+    this.setSameLanguage()
   }
 
   start(localMic: MediaStreamTrack | null): void {
-    const client = this.client
-    if (!client) return
+    if (!this.client) return
     void this.capture.start(localMic)
-    if (this.playbackContext && this.playbackContext.state === 'suspended') void this.playbackContext.resume()
+    if (this.playbackContext?.state === 'suspended') void this.playbackContext.resume()
     this.setStatus({ state: 'live', detail: '' })
-    void this.checkWebGpu()
+    void this.prepare().catch((error: unknown) => this.fail(error))
   }
 
   setLocalMic(track: MediaStreamTrack | null): void {
@@ -104,19 +107,27 @@ export class LocalTranslator implements Translator {
     this.setSameLanguage()
   }
 
-  /** Another member's caption, in whatever language they spoke it. */
-  receive(caption: RoomCaption): void {
-    if (caption.k !== 'caption' || caption.lang === this.selfPrefs.lang) {
-      this.events.onCaption(caption)
-      return
+  receive(message: RoomMessage): void {
+    switch (message.k) {
+      case 'voice':
+        this.events.onCaption(message)
+        return
+      case 'caption':
+        this.heard(message)
+        return
+      case 'translation':
+        this.translated(message)
+        return
     }
-
-    void this.translate(caption).catch((error: unknown) => this.failed(error, caption))
   }
 
   async stop(): Promise<void> {
     this.stopped = true
     this.detach()
+    for (const timer of this.awaited.values()) clearTimeout(timer)
+    this.awaited.clear()
+    this.segmenter?.close()
+    this.segmenter = null
     await this.capture.close()
     await this.playbackContext?.close()
     this.playbackContext = null
@@ -128,27 +139,43 @@ export class LocalTranslator implements Translator {
     for (const off of this.unsubscribe) off()
     this.unsubscribe = []
     this.capture.stop()
-    this.frames.reset()
-    this.utterances.flush()
+    this.segmenter?.reset()
+    this.expire()
     this.client = null
   }
 
-  /** Says so before anyone speaks into a browser that cannot transcribe, and keeps the rest running. */
-  private async checkWebGpu(): Promise<void> {
-    if (!this.engines.requiresWebGpu || this.stopped) return
+  private async prepare(): Promise<void> {
+    if (this.engines.requiresWebGpu && !(await webgpuAvailable())) {
+      this.canTranscribe = false
+      this.setStatus({ state: 'failed', detail: NO_WEBGPU })
+    }
 
-    const available = await webgpuAvailable()
-    if (available || this.stopped) return
+    const prepared = await this.engines.prepare(this.selfPrefs.lang, (loading) => this.setStatus({ loading }))
+    if (this.stopped) return
 
-    // Translating what others say still works without a GPU; this member's
-    // own speech is the part that cannot be recognised.
-    this.canTranscribe = false
-    this.capture.stop()
-    this.setStatus({ state: 'failed', detail: NO_WEBGPU })
+    this.canTranscribe &&= prepared.transcribes
+    this.translates = prepared.translates
+    this.client?.setTranslates(this.translates)
+
+    if (prepared.problems.length > 0) {
+      const detail = prepared.problems.join(' ')
+      this.setStatus(this.canTranscribe ? { detail } : { state: 'failed', detail })
+      console.warn('live translation:', detail)
+    }
+
+    if (!this.canTranscribe) return
+    this.segmenter = await this.engines.segmenter({
+      onSegment: (segment) => this.segmented(segment),
+      onError: (error) => this.fail(error),
+    })
+
+    for (const prefs of this.client?.memberLangPrefs.values() ?? []) {
+      if (prefs.lang !== this.selfPrefs.lang) void this.engines.mt(prefs.lang, this.selfPrefs.lang).catch(() => {})
+    }
   }
 
   private setSameLanguage(): void {
-    const languages = new Set([this.selfPrefs.lang, ...this.otherLangs.values()])
+    const languages = new Set([this.selfPrefs.lang, ...[...(this.client?.memberLangPrefs.values() ?? [])].map((prefs) => prefs.lang)])
     const sameLanguage = languages.size < 2
     if (sameLanguage !== this.status.sameLanguage) this.setStatus({ sameLanguage })
   }
@@ -158,100 +185,205 @@ export class LocalTranslator implements Translator {
     this.events.onStatus?.(this.status)
   }
 
-  private addAudio(pcm: ArrayBuffer): void {
-    if (this.stopped) return
-    const samples = new Int16Array(pcm)
-    this.detecting = this.detecting.then(() => this.segment(samples)).catch((error: unknown) => this.failed(error))
-  }
+  private segmented(segment: Segment): void {
+    if (this.stopped || !this.canTranscribe) return
+    this.clearHold()
 
-  /** Cuts the audio into utterances, one detector call per frame. */
-  private async segment(pcm: Int16Array): Promise<void> {
-    const detector = this.detector ?? (this.detector = await this.engines.detector())
-
-    for (const frame of this.frames.push(pcm)) {
-      const utterance = this.utterances.detect(await detector.probability(frame), frame)
-      if (utterance) this.enqueue(utterance)
+    if (segment.kind === 'partial') {
+      if (this.queued > 0) return
+      this.queue(segment.audio, (text) => this.sentences.partial(text))
+      return
     }
+
+    if (segment.audio.length < MIN_UTTERANCE_SAMPLES || this.queued >= QUEUED_UTTERANCES) return
+    this.queue(segment.audio, (text) => this.sentences.utterance(text), true)
   }
 
-  private enqueue(audio: Int16Array): void {
-    if (!this.canTranscribe || audio.length < MIN_UTTERANCE_SAMPLES || this.queued >= QUEUED_UTTERANCES) return
+  private queue(audio: Int16Array, line: (text: string) => Line | null, utterance = false): void {
     this.queued += 1
     this.transcribing = this.transcribing
-      .then(() => this.transcribe(audio))
-      .catch((error: unknown) => this.failed(error))
+      .then(async () => {
+        const text = await this.transcribe(audio, utterance)
+        if (text === null || this.stopped) return
+        const said = line(text)
+        if (said) this.publish(said)
+        if (utterance && this.sentences.holding) this.holdTimer = setTimeout(() => this.expire(), HOLD_MS)
+      })
+      .catch((error: unknown) => this.fail(error))
       .finally(() => {
         this.queued -= 1
       })
   }
 
-  /** Subtitle of what this member just said, in the language they said it. */
-  private async transcribe(audio: Int16Array): Promise<void> {
-    const speaker = this.client?.memberId
+  private async transcribe(audio: Int16Array, utterance: boolean): Promise<string | null> {
     const lang = this.selfPrefs.lang
-    if (!speaker || this.stopped) return
+    const seconds = audio.length / RATE
+    const started = performance.now()
 
     const asr = await this.engines.asr(lang)
     const text = (await asr.transcribe(audio, lang)).trim()
-    if (!text || this.stopped) return
 
-    this.publish({
-      k: 'caption',
-      speaker,
-      segId: `${speaker}-${this.segs++}`,
-      sourceLang: lang,
-      lang,
-      text,
-      final: true,
-    })
+    if (utterance) {
+      this.pace.record(seconds, (performance.now() - started) / 1000)
+      void this.keepUp()
+    }
+
+    if (!text || (await invented(text))) return null
+    return text
   }
 
-  /** Turns another member's sentence into this member's language. */
-  private async translate(caption: CaptionLine): Promise<void> {
-    const prefs = this.selfPrefs
-    const mt = await this.engines.mt(caption.lang, prefs.lang)
-    const text = await mt.translate(caption.text, caption.lang, prefs.lang)
+  private async keepUp(): Promise<void> {
+    if (this.steppedDown || !(this.pace.behind || this.queued >= QUEUED_UTTERANCES / 2)) return
+    this.steppedDown = true
+
+    const model = await this.engines.stepDown(this.selfPrefs.lang)
+    this.pace.reset()
+    if (model) this.setStatus({ detail: `This device could not transcribe in time, so it now uses the smaller ${model}.` })
+  }
+
+  private clearHold(): void {
+    if (this.holdTimer === null) return
+    clearTimeout(this.holdTimer)
+    this.holdTimer = null
+  }
+
+  private expire(): void {
+    this.clearHold()
+    const line = this.sentences.expire()
+    if (line) this.publish(line)
+  }
+
+  private publish(line: Line): void {
+    const speaker = this.client?.memberId
+    if (!speaker) return
+
+    const lang = this.selfPrefs.lang
+    const caption: CaptionLine = { k: 'caption', speaker, segId: `${speaker}-${line.seq}`, sourceLang: lang, lang, text: line.text, final: line.final }
+    void this.client?.sendCaption(caption)
+    this.events.onCaption(caption)
+  }
+
+  private candidates(): Candidate[] {
+    const client = this.client
+    if (!client) return []
+    const others = [...client.memberLangPrefs].map(([id, prefs]) => ({ id, lang: prefs.lang, translates: prefs.translates }))
+    return [...others, { id: client.memberId, lang: this.selfPrefs.lang, translates: this.translates }]
+  }
+
+  private heard(caption: CaptionLine): void {
+    const context = this.earlier.get(caption.speaker) ?? []
+    if (caption.final) this.earlier.set(caption.speaker, [...context, caption.text].slice(-EARLIER_SENTENCES))
+
+    if (caption.lang === this.selfPrefs.lang) {
+      this.events.onCaption(caption)
+      return
+    }
+
+    const translator = translatorFor(this.selfPrefs.lang, this.candidates())
+    const self = this.client?.memberId
+    if (translator === self) {
+      this.translateFor(caption, context, true)
+      return
+    }
+    if (!caption.final) return
+
+    const segId = this.translatedId(caption.segId)
+    if (translator === null) {
+      this.translateFor(caption, context, false)
+      return
+    }
+
+    this.awaited.set(
+      segId,
+      setTimeout(() => {
+        this.awaited.delete(segId)
+        this.translateFor(caption, context, false)
+      }, TRANSLATION_WAIT_MS),
+    )
+  }
+
+  private translated(line: TranslationLine): void {
+    if (line.lang !== this.selfPrefs.lang || line.by !== translatorFor(this.selfPrefs.lang, this.candidates())) return
+
+    const timer = this.awaited.get(line.segId)
+    if (timer !== undefined) clearTimeout(timer)
+    this.awaited.delete(line.segId)
+    this.show(line, false)
+  }
+
+  private translatedId(segId: string): string {
+    return `${segId}-${this.selfPrefs.lang}`
+  }
+
+  private translateFor(caption: CaptionLine, earlier: readonly string[], share: boolean): void {
+    if (!caption.final) {
+      if (this.interimBusy.has(caption.speaker)) {
+        this.interims.set(caption.speaker, caption)
+        return
+      }
+      this.interimBusy.add(caption.speaker)
+    } else {
+      this.interims.delete(caption.speaker)
+    }
+
+    void this.translate(caption, earlier, share)
+      .catch((error: unknown) => this.failed(error, caption))
+      .finally(() => {
+        if (caption.final) return
+        this.interimBusy.delete(caption.speaker)
+        const next = this.interims.get(caption.speaker)
+        this.interims.delete(caption.speaker)
+        if (next) this.translateFor(next, earlier, share)
+      })
+  }
+
+  private async translate(caption: CaptionLine, earlier: readonly string[], share: boolean): Promise<void> {
+    const target = this.selfPrefs.lang
+    const mt = await this.engines.mt(caption.lang, target)
+    const text = await mt.translate({ text: caption.text, source: caption.lang, target, earlier })
     if (this.stopped) return
 
-    const segId = `${caption.segId}-${prefs.lang}`
-    this.events.onCaption({ ...caption, segId, lang: prefs.lang, text })
-
-    if (prefs.voice) await this.speak(caption.speaker, segId, text)
+    const line: Translation = { speaker: caption.speaker, segId: this.translatedId(caption.segId), sourceLang: caption.lang, lang: target, text, final: caption.final }
+    const self = this.client?.memberId
+    if (share && self) void this.client?.sendCaption({ k: 'translation', by: self, ...line })
+    this.show(line, true)
   }
 
-  /** Speaks a translated sentence here; a language without a voice still gets its subtitles. */
-  private async speak(speaker: string, segId: string, text: string): Promise<void> {
-    const prefs = this.selfPrefs
+  private show(line: Translation, own: boolean): void {
+    if (!own && !line.final && this.spoken.has(line.segId)) return
+    this.events.onCaption({ k: 'caption', ...line })
+    if (line.final && this.selfPrefs.voice) void this.speak(line.speaker, line.segId, line.text)
+  }
 
+  private async speak(speaker: string, segId: string, text: string): Promise<void> {
+    if (this.spoken.has(segId)) return
+    this.spoken.add(segId)
+
+    const prefs = this.selfPrefs
     try {
       const tts = await this.engines.tts(prefs.lang)
-      const voiced = await tts.speak(text, prefs.lang, prefs.voiceChoice)
-      const cue = this.player?.play(speaker, voiced.pcm, voiced.rate)
-      if (!cue || this.stopped) return
-
-      this.events.onCaption({
-        k: 'voice',
-        speaker,
-        segId,
-        lang: prefs.lang,
-        startInMs: cue.startInMs,
-        durationMs: cue.durationMs,
-      })
+      const pending = clauses(text).map((clause) => tts.speak(clause, prefs.lang, prefs.voiceChoice))
+      for (const voiced of pending) {
+        const { pcm, rate } = await voiced
+        const cue = this.player?.play(speaker, pcm, rate)
+        if (!cue || this.stopped) return
+        this.events.onCaption({ k: 'voice', speaker, segId, lang: prefs.lang, startInMs: cue.startInMs, durationMs: cue.durationMs })
+      }
     } catch (error) {
       console.warn('live translation has no voice for', prefs.lang, error)
     }
   }
 
-  /** A sentence that could not be translated reaches this member as it was said. */
-  private failed(error: unknown, caption?: CaptionLine): void {
+  private fail(error: unknown): void {
     if (this.stopped) return
-    if (caption) this.events.onCaption(caption)
-    this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
     console.warn('live translation:', error)
+    this.setStatus({ detail: error instanceof Error ? error.message : String(error) })
   }
 
-  private publish(caption: CaptionLine): void {
-    void this.client?.sendCaption(caption)
+  private failed(error: unknown, caption: CaptionLine): void {
+    if (this.stopped) return
     this.events.onCaption(caption)
+    this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
+    console.warn('live translation:', error)
   }
 }

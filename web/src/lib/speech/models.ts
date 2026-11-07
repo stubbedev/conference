@@ -1,36 +1,69 @@
-// What a member's browser loads when the browsers run the speech engines:
-// the models this server serves, chosen by whoever runs it. The shape
-// matches internal/speech/service's Models in /api/config.
+import type { Language } from '../translate/languages.ts'
 
-import type { TranslationConfig } from '@/lib/api'
-
-/** One purpose's model, as transformers.js names it. */
-export interface ModelChoice {
-  /** The model's directory under the base path, owner and name. */
+export interface Export {
   model: string
-  /** The ONNX export to load, e.g. q4f16 or q8. */
   dtype: string
-  /** The languages that load a model of their own instead, e.g. a Danish fine-tune. */
+}
+
+export interface ModelChoice extends Export {
   languages?: Record<string, string>
 }
 
-/** What this server serves for the browsers. */
+export interface AsrChoice extends ModelChoice {
+  fallback?: ModelChoice
+}
+
+export type MtKind = 'seq2seq' | 'llm'
+
+export interface MtChoice extends Export {
+  kind: MtKind
+  pairs?: Record<string, Export>
+  builtin?: boolean
+}
+
+export interface Prompt {
+  task: string
+  address: Record<string, string>
+  glossary?: string
+  earlier: string
+  sentences: number
+}
+
 export interface SpeechModels {
-  /** Where the files are served; transformers.js resolves model ids under it. */
   base: string
-  asr: ModelChoice
-  mt: ModelChoice
-  /** The Piper voice each language speaks in, named as Piper names them. */
+  asr: AsrChoice
+  mt: MtChoice
   voices: Record<string, string>
+  sizes: Record<string, number>
+  prompt?: Prompt
 }
 
-/** The voice a language speaks in, when the server has one for it. */
-export function voiceFor(models: SpeechModels, lang: string): string | null {
-  return models.voices[lang] ?? null
+export type AsrTier = 'primary' | 'fallback'
+
+export function asrExport(asr: AsrChoice, tier: AsrTier, lang: string): Export | null {
+  const choice = tier === 'primary' ? asr : asr.fallback
+  if (!choice) return null
+  return { model: choice.languages?.[lang] ?? choice.model, dtype: choice.dtype }
 }
 
-/** The models to load, or null when live translation is not in the browser. */
-export function speechModels(config: TranslationConfig): SpeechModels | null {
-  if (config.mode !== 'browser' || !config.models) return null
-  return config.models
+export function pairFor(mt: MtChoice, source: string, target: string): Export | null {
+  return mt.pairs?.[`${source}-${target}`] ?? null
 }
+
+export function voiceKey(voice: string): string {
+  return `piper/${voice}`
+}
+
+export function bytesFor(models: SpeechModels, lang: string): number {
+  const asr = asrExport(models.asr, 'primary', lang)
+  const voice = models.voices[lang]
+  const keys = [asr?.model, models.mt.model, voice === undefined ? undefined : voiceKey(voice)]
+  return keys.reduce((total, key) => total + (key === undefined ? 0 : (models.sizes[key] ?? 0)), 0)
+}
+
+export function renderPrompt(prompt: Prompt, source: Language, target: Language, earlier: readonly string[]): string {
+  const task = prompt.task.replaceAll('{source}', source.name).replaceAll('{target}', target.name)
+  const context = earlier.length > 0 ? prompt.earlier + earlier.slice(-prompt.sentences).join(' ') : ''
+  return task + (prompt.address[target.code] ?? '') + (prompt.glossary ?? '') + context
+}
+

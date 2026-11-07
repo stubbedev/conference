@@ -42,6 +42,28 @@ export interface VoiceCue {
 
 export type RoomCaption = CaptionLine | VoiceCue
 
+export interface TranslationLine {
+  k: 'translation'
+  by: string
+  speaker: string
+  segId: string
+  sourceLang: string
+  lang: string
+  text: string
+  final: boolean
+}
+
+export type RoomMessage = RoomCaption | TranslationLine
+
+export interface LangAnnouncement extends LangPrefs {
+  translates: boolean
+}
+
+export interface Loading {
+  loaded: number
+  total: number
+}
+
 /** What a member sees about its own bridge, for spotting problems. */
 export interface TranslatorStatus {
   state: 'claiming' | 'connecting' | 'live' | 'retrying' | 'failed'
@@ -51,12 +73,21 @@ export interface TranslatorStatus {
   sameLanguage: boolean
   /** Sentences the speech service could not translate and sent as said. */
   failedTranslations: number
+  loading: Loading | null
 }
 
-export function isRoomCaption(value: unknown): value is RoomCaption {
+function isTranslationLine(value: Record<string, unknown>): boolean {
+  return (
+    ['by', 'speaker', 'segId', 'sourceLang', 'lang', 'text'].every((key) => typeof value[key] === 'string') &&
+    typeof value.final === 'boolean'
+  )
+}
+
+export function isRoomMessage(value: unknown): value is RoomMessage {
   if (typeof value !== 'object' || value === null) return false
-  const k = (value as { k?: unknown }).k
-  return k === 'caption' || k === 'voice'
+  const message = value as Record<string, unknown>
+  if (message.k === 'translation') return isTranslationLine(message)
+  return message.k === 'caption' || message.k === 'voice'
 }
 
 export function isLangPrefs(value: unknown): value is LangPrefs {
@@ -68,4 +99,9 @@ export function isLangPrefs(value: unknown): value is LangPrefs {
     typeof prefs.subtitles === 'boolean' &&
     isVoiceChoice(prefs.voiceChoice)
   )
+}
+
+export function announcement(value: unknown): LangAnnouncement | null {
+  if (!isLangPrefs(value)) return null
+  return { ...value, translates: (value as { translates?: unknown }).translates === true }
 }

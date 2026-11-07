@@ -15,6 +15,7 @@
 // the same reason: a sentence should be spoken as soon as it is
 // translated.
 
+import { reportLoading } from './loading'
 import { configureOrt, ort } from './ort'
 import { phonemeIds, phonemes, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
 import { fallbackToWasm, message } from './runtime'
@@ -73,6 +74,10 @@ export class Piper {
     this.base = base
   }
 
+  async prepare(voice: string): Promise<void> {
+    await this.voice(voice)
+  }
+
   /** Speaks text in voice, whose speaker is chosen by choice. */
   async speak(text: string, voice: string, choice: VoiceChoice): Promise<Spoken> {
     const { config, session } = await this.voice(voice)
@@ -111,16 +116,39 @@ async function load(base: string, name: string): Promise<Voice> {
   if (!response.ok) throw new Error(`the voice ${name} has no settings: ${response.status} ${response.statusText}`)
 
   const config = readVoiceConfig(await response.json())
-  return { config, session: await session(modelURL(base, 'piper', `${name}.onnx`)) }
+  const url = modelURL(base, 'piper', `${name}.onnx`)
+  return { config, session: await session(url, await download(url)) }
+}
+
+async function download(url: string): Promise<Uint8Array> {
+  const response = await fetch(url)
+  if (!response.ok || !response.body) throw new Error(`the voice model ${url} could not be fetched: ${response.status} ${response.statusText}`)
+
+  const total = Number(response.headers.get('Content-Length') ?? 0)
+  const chunks: Uint8Array[] = []
+  let loaded = 0
+  for await (const chunk of response.body) {
+    chunks.push(chunk)
+    loaded += chunk.length
+    reportLoading({ status: 'progress', name: 'piper', file: url, loaded, total: Math.max(total, loaded) })
+  }
+
+  const bytes = new Uint8Array(loaded)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.length
+  }
+  return bytes
 }
 
 /** Starts url on the GPU, or on the CPU when this browser's GPU refuses it. */
-async function session(url: string): Promise<ort.InferenceSession> {
+async function session(url: string, model: Uint8Array): Promise<ort.InferenceSession> {
   configureOrt()
 
   let refusal: string
   try {
-    return await ort.InferenceSession.create(url, { executionProviders: ['webgpu', 'wasm'] })
+    return await ort.InferenceSession.create(model, { executionProviders: ['webgpu', 'wasm'] })
   } catch (err) {
     if (!fallbackToWasm(err)) throw new Error(`the voice model ${url} could not start: ${message(err)}`)
     refusal = message(err)
@@ -128,7 +156,7 @@ async function session(url: string): Promise<ort.InferenceSession> {
 
   console.warn(`tts: ${url} cannot run on this browser's WebGPU (${refusal}); speaking on the CPU instead`)
   try {
-    return await ort.InferenceSession.create(url, { executionProviders: ['wasm'] })
+    return await ort.InferenceSession.create(model, { executionProviders: ['wasm'] })
   } catch (err) {
     throw new Error(`the voice model ${url} could not start on the GPU (${refusal}) or on the CPU (${message(err)})`)
   }

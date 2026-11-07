@@ -155,6 +155,11 @@ e2e-translate-browser:
 e2e-speech:
     node web/e2e/speech-vad.mjs
 
+# The browser engines on the real models in DIR, which
+# `just speech-models` fills; needs a built UI.
+e2e-speech-engines dir:
+    SPEECH_MODEL_DIR={{dir}} node web/e2e/speech-engines.mjs
+
 # Live-translation demo: you (English, real mic) and a guest; options: hear, sv, male, openai.
 translate-demo *args:
     node web/e2e/translate-demo.mjs {{args}}

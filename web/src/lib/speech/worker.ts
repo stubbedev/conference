@@ -2,6 +2,11 @@
 // call, a reply with the same id, and an error reply instead of a thrown
 // exception the caller cannot see.
 
+export interface WorkerEvent {
+  event: string
+  [key: string]: unknown
+}
+
 export interface WorkerReply {
   id?: number
   type: 'done' | 'error'
@@ -20,11 +25,18 @@ export class WorkerRpc {
   private readonly pending = new Map<number, Pending>()
   private next = 0
   private closed = false
+  private readonly onEvent: (event: WorkerEvent) => void
 
-  constructor(worker: Worker) {
+  constructor(worker: Worker, onEvent: (event: WorkerEvent) => void) {
     this.worker = worker
-    worker.onmessage = (event: MessageEvent<WorkerReply>) => this.settle(event.data)
+    this.onEvent = onEvent
+    worker.onmessage = (event: MessageEvent<WorkerReply | WorkerEvent>) => this.receive(event.data)
     worker.onerror = (event) => this.failAll(new Error(event.message || 'the speech worker failed'))
+  }
+
+  post(message: Record<string, unknown>, transfer: Transferable[] = []): void {
+    if (this.closed) return
+    this.worker.postMessage(message, transfer)
   }
 
   call<T extends WorkerReply>(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
@@ -43,8 +55,19 @@ export class WorkerRpc {
     this.worker.terminate()
   }
 
+  private receive(message: WorkerReply | WorkerEvent): void {
+    if ('event' in message && typeof message.event === 'string') {
+      this.onEvent(message as WorkerEvent)
+      return
+    }
+    this.settle(message as WorkerReply)
+  }
+
   private settle(reply: WorkerReply): void {
-    if (reply.id === undefined) return
+    if (reply.id === undefined) {
+      if (reply.type === 'error') this.onEvent({ event: 'error', message: reply.message ?? 'the speech worker failed' })
+      return
+    }
     const pending = this.pending.get(reply.id)
     if (!pending) return
     this.pending.delete(reply.id)

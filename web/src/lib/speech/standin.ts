@@ -4,16 +4,15 @@
 // run the real capture, voice detection, room mode and caption relay, so
 // a test sees the whole pipeline without a model or a GPU.
 
-import type { AsrEngine, Detector, Engines, MtEngine, TtsEngine, Voiced } from './engines.ts'
+import type { AsrEngine, Engines, MtEngine, Prepared, Segmenter, SegmenterEvents, Sentence, TtsEngine, Voiced } from './engines.ts'
 import { loudness } from './energy.ts'
-import { RATE } from './vad.ts'
+import { RATE, Segmentation } from './vad.ts'
 import type { VoiceChoice } from '../translate/types.ts'
 
 const TONE_SECONDS = 0.4
 const TONE_HZ = 440
 const TONE_LEVEL = 0.2
 
-/** How the stand-in answers, in the words the speech service uses. */
 export function standInTranscript(lang: string, count: number): string {
   return `${lang} utterance ${count}`
 }
@@ -22,7 +21,6 @@ export function standInTranslation(target: string, text: string): string {
   return `[${target}] ${text}`
 }
 
-/** The tone a stand-in voice is: what a translated voice sounds like in a test. */
 export function standInTone(): Voiced {
   const pcm = new Float32Array(Math.round(TONE_SECONDS * RATE))
   for (let i = 0; i < pcm.length; i++) pcm[i] = TONE_LEVEL * Math.sin((2 * Math.PI * TONE_HZ * i) / RATE)
@@ -39,8 +37,8 @@ export class StandInAsr implements AsrEngine {
 }
 
 export class StandInMt implements MtEngine {
-  async translate(text: string, _source: string, target: string): Promise<string> {
-    return standInTranslation(target, text)
+  async translate(sentence: Sentence): Promise<string> {
+    return standInTranslation(sentence.target, sentence.text)
   }
 }
 
@@ -50,7 +48,39 @@ export class StandInTts implements TtsEngine {
   }
 }
 
-/** Engines that answer without a model: one of each, shared. */
+export class StandInSegmenter implements Segmenter {
+  private readonly segmentation = new Segmentation()
+  private readonly events: SegmenterEvents
+  private pending: Promise<void> = Promise.resolve()
+
+  constructor(events: SegmenterEvents) {
+    this.events = events
+  }
+
+  push(pcm: Int16Array): void {
+    this.pending = this.pending
+      .then(async () => {
+        for (const segment of await this.segmentation.push(pcm, loudness)) this.events.onSegment(segment)
+      })
+      .catch((err: unknown) => this.events.onError(err instanceof Error ? err : new Error(String(err))))
+  }
+
+  flush(): void {
+    this.pending = this.pending.then(() => {
+      const segment = this.segmentation.flush()
+      if (segment) this.events.onSegment(segment)
+    })
+  }
+
+  reset(): void {
+    this.pending = this.pending.then(() => this.segmentation.reset())
+  }
+
+  close(): void {
+    this.reset()
+  }
+}
+
 export class StandInEngines implements Engines {
   readonly requiresWebGpu = false
 
@@ -58,12 +88,20 @@ export class StandInEngines implements Engines {
   private readonly mtEngine = new StandInMt()
   private readonly ttsEngine = new StandInTts()
 
-  async detector(): Promise<Detector> {
-    return { probability: async (frame) => loudness(frame), close: () => {} }
+  async prepare(): Promise<Prepared> {
+    return { transcribes: true, translates: true, problems: [] }
+  }
+
+  async segmenter(events: SegmenterEvents): Promise<Segmenter> {
+    return new StandInSegmenter(events)
   }
 
   async asr(_lang: string): Promise<AsrEngine> {
     return this.asrEngine
+  }
+
+  async stepDown(_lang: string): Promise<string | null> {
+    return null
   }
 
   async mt(_source: string, _target: string): Promise<MtEngine> {

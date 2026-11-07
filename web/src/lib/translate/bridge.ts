@@ -13,7 +13,7 @@
 
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import { MicCapture } from '@/lib/translate/capture'
-import type { CaptionLine, LangPrefs, RoomCaption, TranslatorStatus } from '@/lib/translate/types'
+import type { CaptionLine, LangPrefs, RoomCaption, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
 
@@ -58,7 +58,7 @@ export class ServerTranslator implements Translator {
   /** The other members' announced languages: what this speech is translated into. */
   private otherLangs = new Map<string, string>()
   private refusedConnects = 0
-  private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0 }
+  private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
   private selfPrefs: LangPrefs
   private stopped = false
   private readonly events: TranslatorEvents
@@ -131,8 +131,8 @@ export class ServerTranslator implements Translator {
   }
 
   /** The speech service already translated what it relays: nothing to do. */
-  receive(caption: RoomCaption): void {
-    this.events.onCaption(caption)
+  receive(caption: RoomMessage): void {
+    if (caption.k !== 'translation') this.events.onCaption(caption)
   }
 
   /** Stops translating this member's speech and removes its voice tracks. */

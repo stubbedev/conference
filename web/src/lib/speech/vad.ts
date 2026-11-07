@@ -119,6 +119,10 @@ export class Utterances {
     return null
   }
 
+  snapshot(): Int16Array {
+    return join(this.speech, this.length)
+  }
+
   /** Ends the current utterance and returns it, or null if there is none. */
   flush(): Int16Array | null {
     if (!this.active) return null
@@ -133,5 +137,51 @@ export class Utterances {
 
   private samplesOf(chunks: readonly Int16Array[]): number {
     return chunks.reduce((total, chunk) => total + chunk.length, 0)
+  }
+}
+
+export const INTERIM_SAMPLES = Math.round(RATE * 0.6)
+
+export interface Segment {
+  kind: 'partial' | 'utterance'
+  audio: Int16Array
+}
+
+export type Probability = (frame: Int16Array) => Promise<number> | number
+
+export class Segmentation {
+  private readonly frames = new Frames()
+  private readonly utterances = new Utterances()
+  private reported = 0
+
+  async push(pcm: Int16Array, probability: Probability): Promise<Segment[]> {
+    const segments: Segment[] = []
+    for (const frame of this.frames.push(pcm)) {
+      const utterance = this.utterances.detect(await probability(frame), frame)
+      if (utterance) {
+        this.reported = 0
+        segments.push({ kind: 'utterance', audio: utterance })
+        continue
+      }
+
+      const samples = this.utterances.samples
+      if (samples >= MIN_UTTERANCE_SAMPLES && samples - this.reported >= INTERIM_SAMPLES) {
+        this.reported = samples
+        segments.push({ kind: 'partial', audio: this.utterances.snapshot() })
+      }
+    }
+    return segments
+  }
+
+  flush(): Segment | null {
+    this.reported = 0
+    const utterance = this.utterances.flush()
+    return utterance ? { kind: 'utterance', audio: utterance } : null
+  }
+
+  reset(): void {
+    this.frames.reset()
+    this.utterances.flush()
+    this.reported = 0
   }
 }

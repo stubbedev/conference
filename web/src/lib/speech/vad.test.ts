@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { FRAME, Frames, MAX_UTTERANCE_SECONDS, RATE, Utterances } from './vad.ts'
+import { FRAME, Frames, MAX_UTTERANCE_SECONDS, RATE, Segmentation, Utterances } from './vad.ts'
 
 const frame = (value = 0): Int16Array => new Int16Array(FRAME).fill(value)
 const silence = 0.1
@@ -88,4 +88,33 @@ test('reset drops the partial frame', () => {
   framesIn.push(new Int16Array(FRAME - 1))
   framesIn.reset()
   assert.deepEqual(framesIn.push(new Int16Array(1)), [])
+})
+
+test('a growing utterance is reported every 600 ms once it is long enough, then ends as one', async () => {
+  const segmentation = new Segmentation()
+  const seconds = (count: number) => new Int16Array(Math.round(count * RATE))
+  const loud = (frame: Int16Array) => (frame[0] === 1 ? 0.9 : 0.1)
+
+  const speaking = seconds(2).fill(1)
+  const segments = await segmentation.push(speaking, loud)
+  const partials = segments.filter((segment) => segment.kind === 'partial')
+  assert.equal(segments.every((segment) => segment.kind === 'partial'), true)
+  assert.equal(partials.length, 3)
+  assert.ok(partials.every((partial, i) => i === 0 || partial.audio.length > partials[i - 1].audio.length))
+
+  const ended = await segmentation.push(seconds(1), loud)
+  const utterances = ended.filter((segment) => segment.kind === 'utterance')
+  assert.equal(utterances.length, 1)
+  assert.ok(utterances[0].audio.length >= speaking.length)
+})
+
+test('a segmentation that is flushed hands back the utterance in progress, and nothing after a reset', async () => {
+  const segmentation = new Segmentation()
+  await segmentation.push(new Int16Array(RATE).fill(1), () => 0.9)
+  assert.equal(segmentation.flush()?.kind, 'utterance')
+  assert.equal(segmentation.flush(), null)
+
+  await segmentation.push(new Int16Array(RATE).fill(1), () => 0.9)
+  segmentation.reset()
+  assert.equal(segmentation.flush(), null)
 })
