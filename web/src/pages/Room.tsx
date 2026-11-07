@@ -79,6 +79,7 @@ export default function Room() {
         name: tileLabel(tile, displayName, members),
         local: tile.sourceId === LOCAL_SOURCE,
         pinned: pinnedKey === tile.key,
+        screen: tile.kind === SCREEN_KIND,
         audioMuted: tile.kind !== SCREEN_KIND && speaksOtherLanguage(tile.sourceId),
       })),
     [allTiles, displayName, members, pinnedKey, speaksOtherLanguage],

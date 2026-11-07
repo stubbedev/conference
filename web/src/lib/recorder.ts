@@ -6,6 +6,9 @@
 
 import { audioContext, playMediaElement } from '@/hooks/media'
 import { ElementSource, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
+import { initials } from './names.ts'
+import { focusKey, gridRects, NO_SPEAKER, nextSpeakerFocus, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
+import { isSpeaking, nextLevel, SPEAKING_SAMPLE_MS } from './speaking.ts'
 import { withDuration } from './webm.ts'
 
 export interface RecorderTile {
@@ -15,6 +18,7 @@ export interface RecorderTile {
   local: boolean
   /** Spotlights the tile, mirroring the recorder's pinned view. */
   pinned: boolean
+  screen: boolean
   /** Left out of the mix: live translation replaces this speaker's voice. */
   audioMuted?: boolean
 }
@@ -60,10 +64,8 @@ export function saveFile(file: Blob, filename: string): void {
 }
 
 interface RecorderEntry {
-  name: string
   source: VideoSource
   track: MediaStreamTrack
-  pinned: boolean
 }
 
 type Canvas2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
@@ -83,8 +85,15 @@ interface MixedSource {
   track: MediaStreamTrack
   source: AudioNode
   gain: GainNode
+  analyser: AnalyserNode
+  level: number
   element?: HTMLAudioElement
 }
+
+const TILE_GAP = 8
+const TILE_RADIUS = 10
+const PLACEHOLDER_FILL = '#26262b'
+const INITIALS_FONT = '600 40px system-ui, sans-serif'
 
 // A translated voice in the recorder's language, so the file plays as
 // one conversation in that language. A remote (received) stream takes
@@ -138,6 +147,9 @@ export class CallRecorder {
   private frame = 0
   private paintTimer = 0
   private lastPaint = 0
+  private lastListen = 0
+  private samples = new Float32Array(0)
+  private speaker: SpeakerFocus = NO_SPEAKER
   private endedReason = ''
   private startedAt = 0
   private finishing: Promise<void> | null = null
@@ -173,11 +185,9 @@ export class CallRecorder {
 
       let entry = this.entries.get(tile.key)
       if (!entry) {
-        entry = { name: tile.name, source: this.sourceFor(track), track, pinned: tile.pinned }
+        entry = { source: this.sourceFor(track), track }
         this.entries.set(tile.key, entry)
       } else {
-        if (entry.name !== tile.name) entry.name = tile.name
-        if (entry.pinned !== tile.pinned) entry.pinned = tile.pinned
         // A device switch replaces the tile's track under the same key;
         // re-bind so the composite follows the live capture.
         if (entry.track !== track) {
@@ -538,14 +548,18 @@ export class CallRecorder {
       source = ctx.createMediaElementSource(element)
     }
     const gain = ctx.createGain()
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 512
     source.connect(gain).connect(mixer)
-    return { track, source, gain, element }
+    source.connect(analyser)
+    return { track, source, gain, analyser, level: 0, element }
   }
 
   private disconnectMixed(mixed: MixedSource): void {
     try {
       mixed.source.disconnect()
       mixed.gain.disconnect()
+      mixed.analyser.disconnect()
     } catch {
       // already detached
     }
@@ -582,73 +596,82 @@ export class CallRecorder {
     const { ctx, canvas } = this
     ctx.fillStyle = '#000000'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
-    if (this.entries.size === 0) return
+    const tiles = this.latest
+    if (tiles.length === 0) return
 
-    // Mirror the recorder's view: a pinned tile gets the spotlight with
-    // the rest in a bottom strip, exactly like the room layout (which
-    // also auto-pins screen shares). No pin, uniform grid.
-    const pinned = [...this.entries.values()].find((entry) => entry.pinned)
-    if (pinned) {
-      this.paintSpotlight(pinned)
+    this.listen()
+    const area = { x: TILE_GAP, y: TILE_GAP, width: canvas.width - 2 * TILE_GAP, height: canvas.height - 2 * TILE_GAP }
+    const focus = focusKey(tiles, this.speaker.key)
+    const featured = focus === null ? undefined : tiles.find((tile) => tile.key === focus)
+    if (!featured) {
+      gridRects(tiles.length, area, TILE_GAP).forEach((rect, index) => {
+        const tile = tiles[index]
+        if (tile) this.drawTile(tile, rect)
+      })
       return
     }
 
-    // A video without decoded frames yet would draw nothing and leave a
-    // black cell; skipping it keeps the grid packed instead.
-    const entries = [...this.entries.values()].filter((entry) => entry.source.image !== null)
-    if (entries.length === 0) return
-
-    const cols = Math.ceil(Math.sqrt(entries.length))
-    const rows = Math.ceil(entries.length / cols)
-    const cellWidth = canvas.width / cols
-    const cellHeight = canvas.height / rows
-
-    entries.forEach((entry, index) => {
-      const x = (index % cols) * cellWidth
-      const y = Math.floor(index / cols) * cellHeight
-      this.drawCover(entry.source, x, y, cellWidth, cellHeight)
-      this.drawLabel(entry.name, x, y, cellWidth, cellHeight)
+    const others = tiles.filter((tile) => tile !== featured)
+    const { main, strip } = spotlightRects(others.length, area, TILE_GAP)
+    this.drawTile(featured, main)
+    others.forEach((tile, index) => {
+      const rect = strip[index]
+      if (rect) this.drawTile(tile, rect)
     })
   }
 
-  private paintSpotlight(pinned: RecorderEntry): void {
-    const { canvas } = this
-    const gap = 8
-    const others = [...this.entries.values()].filter((entry) => entry !== pinned)
-    const stripHeight = others.length > 0 ? Math.round(canvas.height * 0.18) : 0
-    const mainHeight = canvas.height - (stripHeight > 0 ? stripHeight + gap : 0)
-
-    // The pinned cell stays black until frames arrive; the layout does
-    // not jump around while it decodes.
-    if (pinned.source.image) {
-      this.drawCover(pinned.source, 0, 0, canvas.width, mainHeight)
-      this.drawLabel(pinned.name, 0, 0, canvas.width, mainHeight)
+  private listen(): void {
+    const now = performance.now()
+    if (now - this.lastListen < SPEAKING_SAMPLE_MS) return
+    this.lastListen = now
+    for (const mixed of this.mixed.values()) {
+      if (this.samples.length !== mixed.analyser.fftSize) this.samples = new Float32Array(mixed.analyser.fftSize)
+      mixed.analyser.getFloatTimeDomainData(this.samples)
+      let sum = 0
+      for (const sample of this.samples) sum += sample * sample
+      mixed.level = nextLevel(mixed.level, Math.sqrt(sum / this.samples.length))
     }
-
-    if (stripHeight === 0) return
-
-    const cellWidth = Math.round((stripHeight * 16) / 9)
-    let x = 0
-    for (const entry of others) {
-      // Overflow clips like the live strip's horizontal scroll.
-      if (x >= canvas.width) break
-      if (!entry.source.image) continue
-      this.drawCover(entry.source, x, canvas.height - stripHeight, cellWidth, stripHeight)
-      this.drawLabel(entry.name, x, canvas.height - stripHeight, cellWidth, stripHeight)
-      x += cellWidth + gap
-    }
+    const speaking = this.latest
+      .filter((tile) => !tile.screen && (tile.stream?.getAudioTracks() ?? []).some((track) => isSpeaking(this.mixed.get(track)?.level ?? 0)))
+      .map((tile) => tile.key)
+    this.speaker = nextSpeakerFocus(this.speaker, speaking, now)
   }
 
-  private drawCover(source: VideoSource, x: number, y: number, w: number, h: number): void {
+  private drawTile(tile: RecorderTile, rect: Rect): void {
+    const ctx = this.ctx
+    const source = this.entries.get(tile.key)?.source
+    ctx.save()
+    ctx.beginPath()
+    ctx.roundRect(rect.x, rect.y, rect.width, rect.height, TILE_RADIUS)
+    ctx.clip()
+    ctx.fillStyle = PLACEHOLDER_FILL
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
+    if (source?.image) {
+      this.drawFitted(source, rect, tile.screen ? 'contain' : 'cover')
+    } else {
+      ctx.fillStyle = '#ffffff'
+      ctx.font = INITIALS_FONT
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(initials(tile.name), rect.x + rect.width / 2, rect.y + rect.height / 2)
+      ctx.textAlign = 'start'
+      ctx.textBaseline = 'alphabetic'
+    }
+    ctx.restore()
+    this.drawLabel(tile.name, rect.x, rect.y, rect.width, rect.height)
+  }
+
+  private drawFitted(source: VideoSource, rect: Rect, fit: 'cover' | 'contain'): void {
     const image = source.image
     const videoWidth = source.width
     const videoHeight = source.height
     if (!image || !videoWidth || !videoHeight) return
 
-    const scale = Math.max(w / videoWidth, h / videoHeight)
+    const pick = fit === 'cover' ? Math.max : Math.min
+    const scale = pick(rect.width / videoWidth, rect.height / videoHeight)
     const drawWidth = videoWidth * scale
     const drawHeight = videoHeight * scale
-    this.ctx.drawImage(image, x + (w - drawWidth) / 2, y + (h - drawHeight) / 2, drawWidth, drawHeight)
+    this.ctx.drawImage(image, rect.x + (rect.width - drawWidth) / 2, rect.y + (rect.height - drawHeight) / 2, drawWidth, drawHeight)
   }
 
   private drawLabel(name: string, x: number, y: number, w: number, h: number): void {
