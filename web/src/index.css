@@ -133,7 +133,7 @@
 }
 
 /*
- * HUD theme (class "hud" on <html>, set by next-themes): deep blue-black
+ * HUD theme (class "hud" on <html>, set by lib/theme.tsx): deep blue-black
  * glass, teal light, green highlights, cut corners and corner brackets.
  * Everything below is scoped to .hud, so the light and dark themes above
  * stay exactly as upstream. The rules are unlayered on purpose: they

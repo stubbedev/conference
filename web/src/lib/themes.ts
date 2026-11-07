@@ -10,3 +10,25 @@ export const THEME_LABELS: Record<Theme, string> = { dark: 'Dark', light: 'Light
 
 /** The themes the header's toggle switches between, in order. */
 export const TOGGLE_THEMES = ['dark', 'light'] as const satisfies readonly Theme[]
+
+export function nextToggleTheme(current: Theme): Theme {
+  return TOGGLE_THEMES[(TOGGLE_THEMES.findIndex((theme) => theme === current) + 1) % TOGGLE_THEMES.length]
+}
+
+export type ThemeChoice = Theme | 'system'
+
+export const DEFAULT_THEME: ThemeChoice = 'dark'
+
+export function parseThemeChoice(stored: string | null): ThemeChoice {
+  if (stored === 'system') return stored
+  return THEMES.find((theme) => theme === stored) ?? DEFAULT_THEME
+}
+
+export function resolveTheme(choice: ThemeChoice, systemDark: boolean): Theme {
+  if (choice !== 'system') return choice
+  return systemDark ? 'dark' : 'light'
+}
+
+export function colorScheme(theme: Theme): 'dark' | 'light' {
+  return theme === 'light' ? 'light' : 'dark'
+}
