@@ -245,6 +245,10 @@ func TestSlackMeetRejectsForeignResponseURL(t *testing.T) {
 		"http://hooks.slack.com/x",
 		"https://attacker.example/x",
 		"https://hooks.slack.com.attacker.example/x",
+		"https://hooks.slack.com/commands/T1/42/abc?redirect=https://attacker.example",
+		"https://user@hooks.slack.com/commands/T1/42/abc",
+		"https://hooks.slack.com/../attacker",
+		"https://hooks.slack.com/services/T1/B1/abc",
 		"",
 	} {
 		form := slackForm("x")
