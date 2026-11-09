@@ -1,3 +1,5 @@
+import { message } from './runtime.ts'
+
 interface BuiltinTranslator {
   translate(text: string): Promise<string>
 }
@@ -12,15 +14,40 @@ interface TranslatorFactory {
   create(languages: Languages): Promise<BuiltinTranslator>
 }
 
+type Outcome =
+  | { kind: 'ready'; translator: BuiltinTranslator }
+  | { kind: 'refused'; warning: string }
+  | { kind: 'absent' }
+
 function factory(): TranslatorFactory | null {
   return (globalThis as { Translator?: TranslatorFactory }).Translator ?? null
 }
 
 export class BuiltinTranslators {
-  private readonly pairs = new Map<string, Promise<BuiltinTranslator | null>>()
+  private readonly pairs = new Map<string, Promise<Outcome>>()
+  private readonly told = new Set<string>()
+  private readonly onRefused: (warning: string) => void
 
-  for(source: string, target: string): Promise<BuiltinTranslator | null> {
+  constructor(onRefused: (warning: string) => void) {
+    this.onRefused = onRefused
+  }
+
+  async for(source: string, target: string): Promise<BuiltinTranslator | null> {
     const key = `${source}-${target}`
+    const outcome = await this.outcome(key, source, target)
+    if (outcome.kind === 'ready') return outcome.translator
+    if (outcome.kind === 'refused' && !this.told.has(key)) {
+      this.told.add(key)
+      this.onRefused(outcome.warning)
+    }
+    return null
+  }
+
+  tellAgain(): void {
+    this.told.clear()
+  }
+
+  private outcome(key: string, source: string, target: string): Promise<Outcome> {
     const known = this.pairs.get(key)
     if (known) return known
 
@@ -30,15 +57,20 @@ export class BuiltinTranslators {
   }
 }
 
-async function create(sourceLanguage: string, targetLanguage: string): Promise<BuiltinTranslator | null> {
+function refused(source: string, target: string, reason: string): Outcome {
+  return { kind: 'refused', warning: `The browser's own translator cannot translate ${source} into ${target} (${reason}), so those sentences use the downloaded model.` }
+}
+
+async function create(sourceLanguage: string, targetLanguage: string): Promise<Outcome> {
   const translators = factory()
-  if (!translators) return null
+  if (!translators) return { kind: 'absent' }
 
   try {
-    if ((await translators.availability({ sourceLanguage, targetLanguage })) === 'unavailable') return null
-    return await translators.create({ sourceLanguage, targetLanguage })
+    if ((await translators.availability({ sourceLanguage, targetLanguage })) === 'unavailable') {
+      return refused(sourceLanguage, targetLanguage, 'the browser reports this pair as unavailable')
+    }
+    return { kind: 'ready', translator: await translators.create({ sourceLanguage, targetLanguage }) }
   } catch (err) {
-    console.warn(`the browser's own translator cannot translate ${sourceLanguage} into ${targetLanguage}:`, err)
-    return null
+    return refused(sourceLanguage, targetLanguage, message(err))
   }
 }

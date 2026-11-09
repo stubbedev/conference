@@ -96,7 +96,7 @@ class BrowserEngines implements Engines {
   private readonly progress = new Progress()
   private runtime: Promise<Runtime> | null = null
   private loadingReport: ReturnType<typeof setTimeout> | null = null
-  private readonly builtin = new BuiltinTranslators()
+  private readonly builtin = new BuiltinTranslators((warning) => this.warn(warning))
   private events: PrepareEvents | null = null
   private segments: SegmenterEvents | null = null
 
@@ -108,6 +108,7 @@ class BrowserEngines implements Engines {
 
   async prepare(lang: string, events: PrepareEvents): Promise<Prepared> {
     this.events = events
+    this.builtin.tellAgain()
     const room = await this.storageProblem(lang)
     if (room) return { transcribes: false, translates: 'none', problems: [room] }
 
