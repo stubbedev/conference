@@ -25,6 +25,8 @@ const (
 	testRoomName  = "Integration"
 	msgRecording  = "recording"
 	testTURNPort  = 3478
+
+	testPublishKbps = 2500
 )
 
 func newTestHub(t *testing.T, engine *sfu.Engine) *sfu.Hub {
@@ -35,7 +37,9 @@ func newTestHub(t *testing.T, engine *sfu.Engine) *sfu.Hub {
 		t.Fatal(err)
 	}
 
-	return sfu.NewHub(sfu.HubConfig{Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500, Speech: nil, Translate: false})
+	return sfu.NewHub(sfu.HubConfig{
+		Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: testPublishKbps, Speech: nil, Translate: false,
+	})
 }
 
 // testPeer wires one test-side peer connection to one hub member. The
@@ -1089,7 +1093,7 @@ type singleLayerCall struct {
 
 // singleLayerCeiling is the room's default publish ceiling in bits per
 // second, which one single-layer stream may use in full.
-const singleLayerCeiling = 2_500_000.0
+const singleLayerCeiling = testPublishKbps * 1000.0
 
 func newSingleLayerCall(t *testing.T) singleLayerCall {
 	t.Helper()
@@ -1157,6 +1161,23 @@ func belowCeiling(bitrate float64) bool { return !atCeiling(bitrate) }
 // TestWelcomeCarriesRelayCredentials checks that a member is handed
 // TURN credentials for the host it signaled on, and that the hub
 // vouches for them exactly while the member is in the call.
+func TestWelcomeCarriesPublishCeiling(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	peer := newTestPeer(t, newTestHub(t, engine), engine, "alice", false)
+
+	if welcome := peer.next(t, "welcome"); welcome.PublishKbps != testPublishKbps {
+		t.Fatalf("welcome publish ceiling %d kbps, want the hub's %d", welcome.PublishKbps, testPublishKbps)
+	}
+}
+
 func TestWelcomeCarriesRelayCredentials(t *testing.T) {
 	t.Parallel()
 

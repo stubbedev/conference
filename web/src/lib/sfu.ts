@@ -66,6 +66,8 @@ export function translationKindLang(kind: string): string | null {
 /** Simulcast layer of a camera, as the SFU names the encodings. */
 export type { Layer } from '@/lib/quality'
 
+const BITS_PER_KILOBIT = 1000
+
 /** How often a viewer's own statistics are checked for trouble. */
 const QUALITY_SAMPLE_MS = 2000
 
@@ -186,6 +188,7 @@ interface WireMessage {
   on?: boolean
   recorder?: string
   iceServers?: RTCIceServer[]
+  publishKbps?: number
   resume?: string
   replaces?: string
   kind?: TileKind
@@ -279,6 +282,7 @@ export class RoomClient {
   private transformed = new WeakSet<object>()
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
+  private publishCeilingBps: number | null = null
   private resumeToken = ''
   private layerPrefs = new Map<string, LayerName>()
   private layoutLayers = new Map<string, LayerName>()
@@ -364,6 +368,7 @@ export class RoomClient {
             return
           }
           this.iceServers = msg.iceServers
+          this.publishCeilingBps = msg.publishKbps ? msg.publishKbps * BITS_PER_KILOBIT : null
           this.resumeToken = msg.resume ?? ''
           if (msg.self) this.selfId = msg.self.id
           for (const member of msg.members ?? []) this.members.set(member.id, member)
@@ -777,7 +782,7 @@ export class RoomClient {
     const transceiver = pc.addTransceiver(track, {
       direction: 'sendonly',
       streams: [stream],
-      sendEncodings: screenLayers(),
+      sendEncodings: screenLayers(this.publishCeilingBps),
     })
     preferVP8(transceiver)
     return transceiver.sender

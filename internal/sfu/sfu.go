@@ -145,6 +145,10 @@ type Message struct {
 
 	ICEServers []relay.ICEServer `json:"iceServers,omitempty"`
 
+	// PublishKbps is the upload ceiling the server holds the member to,
+	// absent when it holds them to none.
+	PublishKbps int `json:"publishKbps,omitempty"`
+
 	// media
 	PC        string                   `json:"pc,omitempty"`
 	SDP       string                   `json:"sdp,omitempty"`
@@ -441,6 +445,7 @@ func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 		Type: "welcome", Self: &self, Members: others, Recorder: r.recorder, TranslatingBy: r.translatingBy,
 		RoomInfo:   &RoomInfo{Slug: r.slug, Name: r.name, Live: len(r.members), Limit: r.limit},
 		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
+		PublishKbps: max(r.cfg.MaxPublishKbps, 0),
 	})
 
 	return admission{

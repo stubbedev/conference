@@ -6,7 +6,7 @@
 // never hold it back for everyone else.
 
 /** How many frames a second a shared screen is encoded at. */
-export const SCREEN_SHARE_FPS = 30
+export const SCREEN_SHARE_FPS = 60
 
 export const SCREEN_SHARE_LOW_FPS = 5
 export const SCREEN_SHARE_LOW_MAX_BITRATE = 500_000
@@ -17,11 +17,7 @@ export const SCREEN_SHARE_PRIORITY: RTCPriorityType = 'high'
 export const CAMERA_PRIORITY = DEFAULT_PRIORITY
 export const CAMERA_SHARING_PRIORITY: RTCPriorityType = 'very-low'
 
-/** The default publish ceiling of a server, in bits per second. */
-export const PUBLISH_CEILING_BPS = 4_000_000
-
-/** Both encodings of a share together may use the whole ceiling. */
-export const SCREEN_SHARE_MAX_BITRATE = PUBLISH_CEILING_BPS - SCREEN_SHARE_LOW_MAX_BITRATE
+export const SCREEN_SHARE_FLUID_MAX_BITRATE = 12_000_000
 
 export const LAYER_RIDS = ['l', 'm', 'h'] as const
 
@@ -94,7 +90,13 @@ export function cameraSenderParameters(
     : withSenderPriority(relayerParameters(parameters, layers), CAMERA_PRIORITY)
 }
 
-export function screenLayers(): RTCRtpEncodingParameters[] {
+export function fluidShareBitrate(publishCeilingBps: number | null): number {
+  if (publishCeilingBps === null) return SCREEN_SHARE_FLUID_MAX_BITRATE
+  const leftForFluid = Math.max(publishCeilingBps - SCREEN_SHARE_LOW_MAX_BITRATE, SCREEN_SHARE_LOW_MAX_BITRATE)
+  return Math.min(SCREEN_SHARE_FLUID_MAX_BITRATE, leftForFluid)
+}
+
+export function screenLayers(publishCeilingBps: number | null): RTCRtpEncodingParameters[] {
   return [
     {
       rid: LAYER_RIDS[0],
@@ -105,7 +107,7 @@ export function screenLayers(): RTCRtpEncodingParameters[] {
     {
       rid: LAYER_RIDS[2],
       scaleResolutionDownBy: 1,
-      maxBitrate: SCREEN_SHARE_MAX_BITRATE,
+      maxBitrate: fluidShareBitrate(publishCeilingBps),
       maxFramerate: SCREEN_SHARE_FPS,
     },
   ]

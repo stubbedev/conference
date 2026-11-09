@@ -570,8 +570,8 @@ const fakeDisplay = `(() => {
       frame++
     }
     draw()
-    setInterval(draw, 33)
-    return canvas.captureStream(30)
+    setInterval(draw, 16)
+    return canvas.captureStream(60)
   }
   return true
 })()`

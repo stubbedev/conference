@@ -22,7 +22,7 @@ const (
 	defaultICEUDPPort     = 5000
 	defaultTURNPort       = 3478
 	maxPort               = 65535
-	defaultMaxPublishKbps = 4000
+	defaultMaxPublishKbps = 15000
 	defaultMaxRoomMembers = 16
 	defaultRoomTTLDays    = 365
 	defaultSessionDays    = 365
