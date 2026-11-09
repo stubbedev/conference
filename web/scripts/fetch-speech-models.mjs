@@ -10,10 +10,7 @@
 // voices come from piper-voices' voices.json. A voice with one speaker
 // goes before one with several, whose speakers are anything from
 // emotions to corpus ids and which speaks with its first unless they are
-// named female and male. A voice whose model card is CC0 or Apache-2.0 is
-// preferred, medium before high, low and x_low. A language with only
-// other licenses still gets a voice, with the license named, rather than
-// no voice at all.
+// named female and male, and medium goes before high, low and x_low.
 //
 // A model a browser without a usable GPU runs comes with its 8-bit
 // export as well: the transcription fallback, or the transcription model
@@ -112,7 +109,6 @@ const VALUED = [
 const FLAGS = ['builtin']
 
 const PAIR_OWNERS = ['Xenova', 'onnx-community']
-const PAIR_LICENSES = ['cc-by-4.0', 'apache-2.0']
 
 function codeList(option, value) {
   const codes = [...new Set(String(value).split(',').map((code) => code.trim()).filter(Boolean))]
@@ -200,13 +196,6 @@ async function getJSON(url) {
   return response.json()
 }
 
-async function getText(url) {
-  const response = await fetch(url)
-  if (!response.ok) throw new Error(`cannot read ${url}: ${response.status} ${response.statusText}`)
-
-  return response.text()
-}
-
 class MissingExport extends Error {}
 
 async function languageCodes(asked) {
@@ -229,12 +218,12 @@ async function revisionOf(model) {
   return sha
 }
 
-async function modelInfo(model) {
-  const response = await fetch(`${HUB}/api/models/${model}`)
-  if (response.status === 404 || response.status === 401) return null
+async function modelExists(model) {
+  const response = await fetch(`${HUB}/api/models/${model}`, { method: 'HEAD' })
+  if (response.status === 404 || response.status === 401) return false
   if (!response.ok) throw new Error(`cannot look up ${model}: ${response.status} ${response.statusText}`)
 
-  return response.json()
+  return true
 }
 
 // modelFiles is what one transformers.js model needs in each of the
@@ -288,7 +277,7 @@ function moonshineCandidates(code) {
 
 async function moonshineFor(dir, code, dtypes) {
   for (const model of moonshineCandidates(code)) {
-    if ((await modelInfo(model)) === null) continue
+    if (!(await modelExists(model))) continue
 
     try {
       return { model, files: await modelFiles(dir, model, 'seq2seq', dtypes) }
@@ -301,35 +290,7 @@ async function moonshineFor(dir, code, dtypes) {
   return null
 }
 
-function baseModelOf(model, info) {
-  const base = info.cardData?.base_model
-  const bases = Array.isArray(base) ? base : base === undefined ? [] : [base]
-  if (bases.length !== 1) {
-    throw new Error(`${model} names no license on its model card and ${bases.length === 0 ? 'no base model' : `the base models ${bases.join(', ')}`} to take one from`)
-  }
-
-  return bases[0]
-}
-
-async function pairLicense(model, info, lookup) {
-  let card = model
-  let license = info.cardData?.license
-
-  if (license === undefined) {
-    card = baseModelOf(model, info)
-    const base = await lookup(card)
-    if (base === null) throw new Error(`${model} names ${card} as its base model, which the hub does not have`)
-    license = base.cardData?.license
-  }
-
-  if (!PAIR_LICENSES.includes(license)) {
-    throw new Error(`${card}, the model card of ${model}, names the license ${JSON.stringify(license ?? null)}, not ${PAIR_LICENSES.join(' or ')}`)
-  }
-
-  return { license, card }
-}
-
-export async function planPairs(languages, lookup) {
+export async function planPairs(languages, exists) {
   const found = []
   const skipped = []
 
@@ -339,22 +300,21 @@ export async function planPairs(languages, lookup) {
 
       const pair = `${source}-${target}`
       const candidates = PAIR_OWNERS.map((owner) => `${owner}/opus-mt-${pair}`)
-      let match = null
+      let model = null
 
-      for (const model of candidates) {
-        const info = await lookup(model)
-        if (info === null) continue
+      for (const candidate of candidates) {
+        if (!(await exists(candidate))) continue
 
-        match = { model, info }
+        model = candidate
         break
       }
 
-      if (match === null) {
+      if (model === null) {
         skipped.push({ pair, reason: `none of ${candidates.join(', ')} is on the hub` })
         continue
       }
 
-      found.push({ pair, model: match.model, ...(await pairLicense(match.model, match.info, lookup)) })
+      found.push({ pair, model })
     }
   }
 
@@ -362,7 +322,7 @@ export async function planPairs(languages, lookup) {
 }
 
 async function pairModels(dir, languages, dtype) {
-  const { found, skipped } = await planPairs(languages, modelInfo)
+  const { found, skipped } = await planPairs(languages, modelExists)
   const pairs = []
   const files = []
 
@@ -380,38 +340,8 @@ async function pairModels(dir, languages, dtype) {
 }
 
 function reportPairs(pairs, skipped, multilingual) {
-  for (const { pair, model, license, card } of pairs) process.stderr.write(`${pair}: ${model}, ${license} as ${card} names it\n`)
+  for (const { pair, model } of pairs) process.stderr.write(`${pair}: ${model}\n`)
   for (const { pair, reason } of skipped) console.warn(`warning: no OPUS-MT export for ${pair}, so ${multilingual} translates it: ${reason}`)
-
-  if (pairs.length > 0) {
-    const licenses = [...new Set(pairs.map((entry) => entry.license))].sort()
-    process.stderr.write(`the pair models are OPUS-MT, ${licenses.join(' and ')}: credit the Helsinki-NLP OPUS-MT project where you ship them\n`)
-  }
-}
-
-// cardURL is a voice's model card, which names the license of its data.
-function cardURL(voice) {
-  const card = Object.keys(voice.files).find((name) => path.posix.basename(name) === 'MODEL_CARD') ?? ''
-
-  return `${HUB}/${PIPER_REPO}/resolve/${PIPER_REVISION}/${card}`
-}
-
-// permissive reports whether a voice's model card names CC0 or Apache-2.0
-// as the license of the data it was trained on.
-async function permissive(voice) {
-  const card = Object.keys(voice.files).find((name) => path.posix.basename(name) === 'MODEL_CARD')
-  if (!card) return false
-
-  const url = cardURL(voice)
-  const license = (await getText(url))
-    .split('\n')
-    .find((line) => /^\s*[*-]\s*license:/i.test(line))
-  if (!license) return false
-
-  const terms = license.slice(license.indexOf(':') + 1).trim().toLowerCase()
-
-  return terms.startsWith('cc0') || terms.startsWith('apache') ||
-    terms.includes('license-2.0') || terms.includes('publicdomain/zero')
 }
 
 // QUALITIES is the order a voice is chosen in: a medium voice runs in
@@ -423,10 +353,8 @@ function rank(voice) {
   return quality === -1 ? QUALITIES.length : quality
 }
 
-// voiceFor picks a voice of a language: the best one whose model card is
-// permissive, and otherwise the best one there is, saying whose license
-// it carries.
-async function voiceFor(code, voices) {
+// voiceFor picks the best voice of a language.
+function voiceFor(code, voices) {
   const candidates = Object.values(voices)
     .filter((voice) => voice.language.family === code)
     .sort((a, b) => Number(a.num_speakers > 1) - Number(b.num_speakers > 1) || rank(a) - rank(b) || a.key.localeCompare(b.key))
@@ -436,14 +364,7 @@ async function voiceFor(code, voices) {
     return null
   }
 
-  for (const candidate of candidates) {
-    if (await permissive(candidate)) return candidate
-  }
-
-  const voice = candidates[0]
-  console.warn(`warning: ${code} has no CC0 or Apache-2.0 voice; ${voice.key} carries the license its model card names, so read ${cardURL(voice)} before shipping it`)
-
-  return voice
+  return candidates[0]
 }
 
 // voiceFiles is a voice's model and the JSON beside it, as the repository
@@ -595,7 +516,7 @@ async function main() {
   const tts = {}
 
   for (const code of languages) {
-    const voice = await voiceFor(code, voices)
+    const voice = voiceFor(code, voices)
     if (!voice) continue
 
     tts[code] = voice.key

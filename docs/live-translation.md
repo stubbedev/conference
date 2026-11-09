@@ -215,33 +215,25 @@ whose repository lacks the `--pair-dtype` or 8-bit export, is left out of
 it, as it does every pair `models.json` does not list.
 
 Voices are chosen by quality first, medium before high, low and x_low,
-a voice with one speaker before one with several, and the first one
-whose model card is CC0 or Apache-2.0 wins. A voice with several
-speakers speaks with the member's choice where they are named female
-and male, and with its first one otherwise, as Estonian's and Serbian's
-do. Piper has no voice for Belarusian, Bosnian, Croatian, Macedonian or
-Maltese, so those get subtitles only; the script says so and carries on.
-The Moonshine models for the fallback are found the same way, by
-looking for one per language. A language with no such voice still gets its best
-one, with the license it carries named on stderr, so French ships a CC0
-low voice and Italian a medium one under a license to read before
-shipping it.
+and a voice with one speaker before one with several. A voice with
+several speakers speaks with the member's choice where they are named
+female and male, and with its first one otherwise, as Estonian's and
+Serbian's do. Piper has no voice for Belarusian, Bosnian, Croatian,
+Macedonian or Maltese, so those get subtitles only; the script says so
+and carries on. The Moonshine models for the fallback are found the same
+way, by looking for one per language.
 
-A pair model carries the license its model card names, or the card of
-the Helsinki-NLP model it was exported from when its own names none. The
-script prints each pair's license, and stops if one is missing or other
-than CC-BY-4.0 or Apache-2.0, both of which ask for credit to the
-Helsinki-NLP OPUS-MT project where the model ships. Between English,
-German and Danish:
+Between English, German and Danish, OPUS-MT has a pair model for every
+direction but German to Danish, which m2m100 translates:
 
-| Pair | Model | License |
-|---|---|---|
-| en-de | `Xenova/opus-mt-en-de` | CC-BY-4.0 |
-| de-en | `Xenova/opus-mt-de-en` | Apache-2.0 |
-| en-da | `Xenova/opus-mt-en-da` | Apache-2.0 |
-| da-en | `Xenova/opus-mt-da-en` | Apache-2.0 |
-| da-de | `Xenova/opus-mt-da-de` | Apache-2.0 |
-| de-da | none, m2m100 translates it | |
+| Pair | Model |
+|---|---|
+| en-de | `Xenova/opus-mt-en-de` |
+| de-en | `Xenova/opus-mt-de-en` |
+| en-da | `Xenova/opus-mt-en-da` |
+| da-en | `Xenova/opus-mt-da-en` |
+| da-de | `Xenova/opus-mt-da-de` |
+| de-da | none, m2m100 translates it |
 
 Every model and voice file is served from the server's own origin under
 `/speech/`, with immutable caching, so nothing comes from a model hub or
