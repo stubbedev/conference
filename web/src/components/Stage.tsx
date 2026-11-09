@@ -71,7 +71,7 @@ export function Stage({
         {stripTiles.length > 0 && (
           <div className="no-scrollbar flex shrink-0 gap-2 overflow-x-auto pb-0.5">
             {stripTiles.map((tile) => (
-              <div key={tile.key} className="aspect-video w-40 shrink-0 sm:w-52">
+              <div key={tile.key} className="aspect-video w-40 shrink-0 first:ml-auto last:mr-auto sm:w-52">
                 {renderTile(tile, true)}
               </div>
             ))}
