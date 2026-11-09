@@ -295,9 +295,12 @@ an external service".
   browser end the recording itself, everything captured until then is
   still downloaded. The container follows the browser: WebM on Chrome
   and Firefox, MP4 on Safari.
-- Screen shares go out as one full-quality encoding, and the SFU hands a
-  publisher the whole upload budget for it: a screen share that is
-  starved of bitrate drops frames until it looks frozen.
+- Screen shares are encoded as detailed content, so they stay sharp and
+  drop frames rather than resolution when bandwidth runs short. They go
+  out as two full-resolution encodings, a fluid one and a slow one, so a
+  viewer on a bad connection gets the slow one instead of holding the
+  share back for everyone. While a screen is shared, it outranks the
+  presenter's camera for the upload.
 - Background blur runs in the browser, before the camera is published:
   MediaPipe's selfie segmentation model, served from this app
   (`/vision/`) rather than a CDN, composited at the capture's frame rate
@@ -401,9 +404,9 @@ Galène-style SFU (selective forwarding unit):
 - Transport-wide congestion control feedback on every upload, so the
   publisher's browser measures its own uplink and probes back up after a
   dip instead of creeping back from packet loss alone.
-- Simulcast cameras, with each viewer getting the layer that fits, and
-  a loss-driven bitrate ceiling that climbs back as the network does: a
-  layer or a screen share lost to one bad minute comes back, and the
+- Simulcast cameras and screen shares, with each viewer getting the
+  layer that fits, and a loss-driven bitrate ceiling that climbs back as
+  the network does: a layer lost to one bad minute comes back, and the
   viewer's own REMB is taken as evidence that its link recovered.
 - A built-in TURN relay over UDP, TCP and TLS on 443. No coturn and no
   third-party STUN.
@@ -434,6 +437,8 @@ detector and points headless Chromes with fake cameras at one room. It
 checks that both browsers receive each other's audio and video through
 the encryption transform with zero dropped frames and exactly one tile
 per participant. Then it pins tiles, checks simulcast layer switching,
+shares a screen (both encodings at full size, fluid when pinned, slow in
+the strip),
 drops a browser's signaling and restarts the server mid-call (both must
 reconnect), records (the file must contain the other participant's
 voice), and forces a call through the TURN relay over UDP and TCP. It

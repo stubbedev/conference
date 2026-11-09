@@ -15,8 +15,17 @@ import {
   type Layer as LayerName,
   type QualityState,
 } from '@/lib/quality'
-import { cameraLayers, demandParameters, LAYER_RIDS, relayerParameters, screenSenderParameters, sharingLayers } from '@/lib/encodings'
+import {
+  cameraLayers,
+  cameraSenderParameters,
+  demandParameters,
+  LAYER_RIDS,
+  SCREEN_CONTENT_HINT,
+  screenLayers,
+  screenSenderParameters,
+} from '@/lib/encodings'
 import { SCREEN_AUDIO_KIND } from '@/lib/screen'
+import { CAMERA_KIND, SCREEN_KIND, type TileKind } from '@/lib/tiles'
 import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
 export interface MemberInfo {
@@ -60,28 +69,51 @@ export type { Layer } from '@/lib/quality'
 /** How often a viewer's own statistics are checked for trouble. */
 const QUALITY_SAMPLE_MS = 2000
 
+const LAYERED_KINDS: readonly TileKind[] = [CAMERA_KIND, SCREEN_KIND]
+
+function isLayeredKind(kind: string | undefined): kind is TileKind {
+  return LAYERED_KINDS.some((layered) => layered === kind)
+}
+
+function streamKey(sourceId: string, kind: TileKind): string {
+  return `${sourceId}:${kind}`
+}
+
 /**
  * readInboundCounters sums this connection's cumulative video decoder
- * counters, the ones that say trouble has already reached the picture.
+ * counters per stream, the ones that say trouble has already reached the
+ * picture. kindOf names the stream a received track belongs to.
  */
-async function readInboundCounters(pc: RTCPeerConnection): Promise<InboundCounters | null> {
-  let seen = false
-  const counters: InboundCounters = { droppedFrames: 0, lostPackets: 0 }
+async function readInboundCounters(
+  pc: RTCPeerConnection,
+  kindOf: (mid: string) => string | undefined,
+): Promise<Map<TileKind, InboundCounters> | null> {
+  const mids = new Map<string, string>()
+  for (const transceiver of pc.getTransceivers()) {
+    if (transceiver.mid !== null) mids.set(transceiver.receiver.track.id, transceiver.mid)
+  }
+
+  const counters = new Map<TileKind, InboundCounters>()
 
   try {
     for (const report of (await pc.getStats()).values()) {
       const entry = report as unknown as Record<string, unknown>
       if (entry.type !== 'inbound-rtp' || entry.kind !== 'video') continue
 
-      seen = true
-      counters.droppedFrames += Number(entry.framesDropped ?? 0)
-      counters.lostPackets += Number(entry.packetsLost ?? 0)
+      const mid = mids.get(String(entry.trackIdentifier))
+      const kind = mid === undefined ? undefined : kindOf(mid)
+      if (!isLayeredKind(kind)) continue
+
+      const sum = counters.get(kind) ?? { droppedFrames: 0, lostPackets: 0 }
+      sum.droppedFrames += Number(entry.framesDropped ?? 0)
+      sum.lostPackets += Number(entry.packetsLost ?? 0)
+      counters.set(kind, sum)
     }
   } catch {
     return null
   }
 
-  return seen ? counters : null
+  return counters
 }
 export type ForcedAction = Exclude<ModerateAction, 'kick'>
 
@@ -156,6 +188,7 @@ interface WireMessage {
   iceServers?: RTCIceServer[]
   resume?: string
   replaces?: string
+  kind?: TileKind
   layer?: LayerName
   mid?: string
   active?: unknown
@@ -420,19 +453,11 @@ export class RoomClient {
       // every member hears what is shared.
       this.screenTrackIds.add(track.id)
 
-      const sender = pc.addTrack(track, stream)
+      const sender = track.kind === 'video' ? this.addScreenVideo(pc, track, stream) : pc.addTrack(track, stream)
       this.screenSenders.push(sender)
-      const transceiver = pc.getTransceivers().find((t) => t.sender === sender)
-      if (transceiver) preferVP8(transceiver)
       this.installSenderTransform(sender)
 
-      if (track.kind === 'video') {
-        // 'motion' tells the browser this is a moving picture to keep up
-        // with, not a scan of text to keep sharp: a shared window that
-        // keeps its frame rate is what a call is missing otherwise.
-        track.contentHint = 'motion'
-        await tuneScreenSender(sender)
-      }
+      if (track.kind === 'video') await tuneScreenSender(sender)
     }
 
     this.state = { ...this.state, sharing: true }
@@ -472,7 +497,7 @@ export class RoomClient {
 
     const layers = cameraLayers(track.getSettings())
     return this.retune(sender, 'tuning the camera encoder', (parameters) =>
-      relayerParameters(parameters, this.state.sharing ? sharingLayers(layers) : layers),
+      cameraSenderParameters(parameters, layers, this.state.sharing),
     )
   }
 
@@ -509,22 +534,24 @@ export class RoomClient {
     else this.localCam = track
   }
 
-  /** Tells the SFU the highest camera layer this page's layout can use for a source. */
-  preferLayer(sourceId: string, layer: LayerName): void {
-    if (this.layoutLayers.get(sourceId) === layer) return
+  /** Tells the SFU the highest layer this page's layout can use for a source's camera or screen. */
+  preferLayer(sourceId: string, kind: TileKind, layer: LayerName): void {
+    const key = streamKey(sourceId, kind)
+    if (this.layoutLayers.get(key) === layer) return
 
-    this.layoutLayers.set(sourceId, layer)
+    this.layoutLayers.set(key, layer)
 
-    const quality = this.quality.get(sourceId) ?? newQualityState(layer)
-    this.quality.set(sourceId, quality)
-    this.requestLayer(sourceId, preferredLayer(layer, quality.ceiling))
+    const quality = this.quality.get(key) ?? newQualityState(layer)
+    this.quality.set(key, quality)
+    this.requestLayer(sourceId, kind, preferredLayer(layer, quality.ceiling))
   }
 
-  private requestLayer(sourceId: string, layer: LayerName): void {
-    if (this.layerPrefs.get(sourceId) === layer) return
+  private requestLayer(sourceId: string, kind: TileKind, layer: LayerName): void {
+    const key = streamKey(sourceId, kind)
+    if (this.layerPrefs.get(key) === layer) return
 
-    this.layerPrefs.set(sourceId, layer)
-    this.send({ type: 'layer', member: sourceId, layer })
+    this.layerPrefs.set(key, layer)
+    this.send({ type: 'layer', member: sourceId, kind, layer })
   }
 
   // watchQuality samples every downstream connection and lets each viewer's
@@ -544,25 +571,30 @@ export class RoomClient {
 
   private async sampleQuality(): Promise<void> {
     for (const [sourceId, pc] of this.downs) {
-      const counters = await readInboundCounters(pc)
-      if (!counters) continue
+      const streams = await readInboundCounters(pc, (mid) => this.downKinds.get(`${sourceId}:${mid}`))
+      if (!streams) continue
 
-      const previous = this.inbound.get(sourceId)
-      this.inbound.set(sourceId, counters)
+      for (const [kind, counters] of streams) this.stepQuality(sourceId, kind, counters)
+    }
+  }
 
-      const layout = this.layoutLayers.get(sourceId)
-      if (!previous || !layout) continue
+  private stepQuality(sourceId: string, kind: TileKind, counters: InboundCounters): void {
+    const key = streamKey(sourceId, kind)
+    const previous = this.inbound.get(key)
+    this.inbound.set(key, counters)
 
-      const quality = this.quality.get(sourceId) ?? newQualityState(layout)
-      const stepped = nextQuality(quality, layout, {
-        droppedFrames: since(previous.droppedFrames, counters.droppedFrames),
-        lostPackets: since(previous.lostPackets, counters.lostPackets),
-      })
-      this.quality.set(sourceId, stepped)
+    const layout = this.layoutLayers.get(key)
+    if (!previous || !layout) return
 
-      if (stepped.ceiling !== quality.ceiling) {
-        this.requestLayer(sourceId, preferredLayer(layout, stepped.ceiling))
-      }
+    const quality = this.quality.get(key) ?? newQualityState(layout)
+    const stepped = nextQuality(quality, layout, {
+      droppedFrames: since(previous.droppedFrames, counters.droppedFrames),
+      lostPackets: since(previous.lostPackets, counters.lostPackets),
+    })
+    this.quality.set(key, stepped)
+
+    if (stepped.ceiling !== quality.ceiling) {
+      this.requestLayer(sourceId, kind, preferredLayer(layout, stepped.ceiling))
     }
   }
 
@@ -740,6 +772,17 @@ export class RoomClient {
     receiver.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'recv' })
   }
 
+  private addScreenVideo(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): RTCRtpSender {
+    track.contentHint = SCREEN_CONTENT_HINT
+    const transceiver = pc.addTransceiver(track, {
+      direction: 'sendonly',
+      streams: [stream],
+      sendEncodings: screenLayers(),
+    })
+    preferVP8(transceiver)
+    return transceiver.sender
+  }
+
   private addCamera(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): RTCRtpSender {
     const transceiver = pc.addTransceiver(track, {
       direction: 'sendonly',
@@ -895,10 +938,13 @@ export class RoomClient {
 
   /** Forgets a member and closes its downstream; reports whether it was known. */
   private dropMember(id: string): boolean {
-    this.layerPrefs.delete(id)
-    this.layoutLayers.delete(id)
-    this.quality.delete(id)
-    this.inbound.delete(id)
+    for (const kind of LAYERED_KINDS) {
+      const key = streamKey(id, kind)
+      this.layerPrefs.delete(key)
+      this.layoutLayers.delete(key)
+      this.quality.delete(key)
+      this.inbound.delete(key)
+    }
     this.memberLangs.delete(id)
     const known = this.members.delete(id)
     this.downs.get(id)?.close()

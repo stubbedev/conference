@@ -1,4 +1,4 @@
-import type { Layer, MemberInfo } from '@/lib/sfu'
+import type { Layer } from './quality.ts'
 
 export const SCREEN_KIND = 'screen'
 export const CAMERA_KIND = 'camera'
@@ -13,7 +13,7 @@ export interface Tile {
   stream: MediaStream | null
 }
 
-export function tileLabel(tile: Tile, displayName: string, members: readonly MemberInfo[]): string {
+export function tileLabel(tile: Tile, displayName: string, members: readonly { id: string; name: string }[]): string {
   if (tile.sourceId === LOCAL_SOURCE) {
     return tile.kind === SCREEN_KIND ? 'Your screen' : `${displayName} (you)`
   }
@@ -21,8 +21,9 @@ export function tileLabel(tile: Tile, displayName: string, members: readonly Mem
   return tile.kind === SCREEN_KIND ? `${name}'s screen` : name
 }
 
-export function layoutLayer(key: string, pinnedKey: string | null, tileCount: number): Layer {
-  if (pinnedKey) return key === pinnedKey ? 'h' : 'l'
+export function layoutLayer(tile: Pick<Tile, 'key' | 'kind'>, pinnedKey: string | null, tileCount: number): Layer {
+  if (pinnedKey) return tile.key === pinnedKey ? 'h' : 'l'
+  if (tile.kind === SCREEN_KIND) return 'h'
   if (tileCount <= 2) return 'h'
   if (tileCount <= 6) return 'm'
   return 'l'

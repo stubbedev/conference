@@ -172,7 +172,9 @@ type Message struct {
 	TranslatingBy string `json:"translatingBy,omitempty"`
 	Token         string `json:"token,omitempty"`
 
-	// layer (Member names the source, Layer is a simulcast rid)
+	// layer (Member names the source, Kind its camera or screen, Layer
+	// is a simulcast rid)
+	Kind  string `json:"kind,omitempty"`
 	Layer string `json:"layer,omitempty"`
 
 	// layers: which encodings of the publisher's track (Mid) any viewer
@@ -373,7 +375,7 @@ func newMember(room *Room, short uint32, req JoinRequest, send func(Message)) *M
 		downs:  map[string]*DownPeer{},
 		state:  State{Mic: false, Cam: false, Sharing: false},
 
-		layerPrefs: map[string]int{},
+		layerPrefs: map[layeredStream]int{},
 	}
 }
 
@@ -766,9 +768,22 @@ type Member struct {
 	downs map[string]*DownPeer
 	state State
 
-	// layerPrefs maps source member IDs to the highest simulcast layer
+	// layerPrefs maps a source's simulcast streams to the highest layer
 	// this member's layout can use; guarded by mu.
-	layerPrefs map[string]int
+	layerPrefs map[layeredStream]int
+}
+
+// layeredStream names one simulcast stream of a source: its camera or
+// its shared screen, which a layout sizes independently.
+type layeredStream struct {
+	source string
+	kind   string
+}
+
+// isLayeredKind reports whether a track of kind is published as simulcast
+// layers a viewer can choose between.
+func isLayeredKind(kind string) bool {
+	return kind == KindCamera || kind == KindScreen
 }
 
 // State mirrors a member's UI toggles for remote indicators.
@@ -893,18 +908,18 @@ func (m *Member) apply(msg Message) { //nolint:cyclop // one flat case per signa
 }
 
 // handleLayer records the highest simulcast layer this member's layout
-// can use for one source (a filmstrip thumbnail needs far less than a
-// pinned tile) and retargets the source's tracks at once.
+// can use for one stream of a source (a filmstrip thumbnail needs far
+// less than a pinned tile) and retargets that stream at once.
 func (m *Member) handleLayer(msg Message) {
 	layer, ok := layerOf(msg.Layer)
-	if msg.Layer == "" || !ok || msg.Member == "" {
-		m.fail("bad-layer", ErrBadRequest)
+	if msg.Layer == "" || !ok || msg.Member == "" || !isLayeredKind(msg.Kind) {
+		m.fail("bad-layer", fmt.Errorf("%w: layer %q of %q for source %q", ErrBadRequest, msg.Layer, msg.Kind, msg.Member))
 
 		return
 	}
 
 	m.mu.Lock()
-	m.layerPrefs[msg.Member] = layer
+	m.layerPrefs[layeredStream{source: msg.Member, kind: msg.Kind}] = layer
 	m.mu.Unlock()
 
 	source := m.room.member(msg.Member)
@@ -918,7 +933,7 @@ func (m *Member) handleLayer(msg Message) {
 	}
 
 	for _, track := range up.trackSnapshot() {
-		if !track.simulcast {
+		if !track.simulcast || track.kind != msg.Kind {
 			continue
 		}
 
@@ -927,13 +942,13 @@ func (m *Member) handleLayer(msg Message) {
 	}
 }
 
-// layerPreference is the layout preference for one source, defaulting
-// to the highest layer.
-func (m *Member) layerPreference(sourceID string) int {
+// layerPreference is the layout preference for one stream of a source,
+// defaulting to the highest layer.
+func (m *Member) layerPreference(sourceID, kind string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if layer, ok := m.layerPrefs[sourceID]; ok {
+	if layer, ok := m.layerPrefs[layeredStream{source: sourceID, kind: kind}]; ok {
 		return layer
 	}
 
@@ -1224,7 +1239,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		}
 
 		down.sends[track.mid] = &downSend{local: local, kind: track.kind}
-		track.addViewer(m.ID, local, m.layerPreference(sourceID), publishCeilingBps(m.room.cfg.MaxPublishKbps))
+		track.addViewer(m.ID, local, m.layerPreference(sourceID, track.kind), publishCeilingBps(m.room.cfg.MaxPublishKbps))
 		down.watchFeedback(transceiver.Sender(), m, track)
 	})
 
@@ -1442,8 +1457,8 @@ type upViewer struct {
 // is low, multiplicative decrease on loss, clamped by whatever REMB the
 // viewer itself reports. It recovers in both directions: the walk back up
 // is paced by elapsed time, and a viewer's own REMB is taken as evidence
-// of recovered headroom, so a screen share that dropped during a blip
-// returns to full quality in seconds instead of creeping back.
+// of recovered headroom, so a single-layer stream that dropped during a
+// blip returns to full quality in seconds instead of creeping back.
 type viewerRate struct {
 	mu    sync.Mutex
 	start uint64 // bps before the first loss report, the room's ceiling
@@ -1453,8 +1468,7 @@ type viewerRate struct {
 }
 
 // newViewerRate starts a viewer at the publisher ceiling rather than at
-// a guess: a single-layer stream (a screen share) has no lower layer to
-// adapt to, so the only useful starting point is everything the uplink
+// a guess: a single-layer stream has no lower layer to adapt to, so the only useful starting point is everything the uplink
 // may use, and real loss walks it down from there.
 func newViewerRate(start uint64) viewerRate {
 	return viewerRate{mu: sync.Mutex{}, start: start, loss: 0, remb: 0, clean: false}

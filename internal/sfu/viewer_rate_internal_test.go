@@ -48,8 +48,8 @@ func TestViewerRateDropsOnLoss(t *testing.T) {
 
 // TestViewerRateRecoversOnItsOwn is the upward half of the controller: a
 // viewer that lost packets and then reports a clean link must climb back
-// to the ceiling, or a screen share stays blurred by an old blip for the
-// rest of the call.
+// to the ceiling, or a single-layer stream stays degraded by an old blip
+// for the rest of the call.
 func TestViewerRateRecoversOnItsOwn(t *testing.T) {
 	t.Parallel()
 

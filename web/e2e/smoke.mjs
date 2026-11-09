@@ -26,6 +26,7 @@ import {
   callJs,
   check,
   checkCall,
+  consoleOf,
   clickJoin,
   createRoom,
   evalJs,
@@ -547,6 +548,153 @@ async function checkSimulcast(failures, publisher, viewer) {
   check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, not a layer above ${filmstrip.value}px`)
 }
 
+const SHARE_WIDTH = 1600
+const SHARE_HEIGHT = 900
+
+// Headless Chrome has no screen to pick, so the share is a canvas of
+// changing text handed out where getDisplayMedia would hand out a screen;
+// everything after the picker is the call's own path.
+const fakeDisplay = `(() => {
+  navigator.mediaDevices.getDisplayMedia = async () => {
+    const canvas = document.createElement('canvas')
+    canvas.width = ${SHARE_WIDTH}
+    canvas.height = ${SHARE_HEIGHT}
+    const ctx = canvas.getContext('2d')
+    let frame = 0
+    const draw = () => {
+      ctx.fillStyle = '#fff'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.fillStyle = '#000'
+      ctx.font = '14px monospace'
+      for (let line = 0; line < 60; line++) ctx.fillText('line ' + line + ' frame ' + frame + ' the quick brown fox jumps over the lazy dog', 10, 14 * (line + 1))
+      frame++
+    }
+    draw()
+    setInterval(draw, 33)
+    return canvas.captureStream(30)
+  }
+  return true
+})()`
+
+const screenSent = `
+(async () => {
+  const pc = window.__pcs.find((pc) => pc.signalingState !== 'closed' && pc.getTransceivers().some((t) => t.sender.track?.contentHint === 'detail'))
+  if (!pc) return null
+  const mid = pc.getTransceivers().find((t) => t.sender.track?.contentHint === 'detail').mid
+  const layers = {}
+  let available = 0
+  for (const r of (await pc.getStats()).values()) {
+    if (r.type === 'outbound-rtp' && r.mid === mid && r.rid) layers[r.rid] = { bytes: r.bytesSent || 0, frames: r.framesEncoded || 0, width: r.frameWidth || 0, fps: r.framesPerSecond || 0, target: r.targetBitrate || 0, limit: r.qualityLimitationReason }
+    if (r.type === 'candidate-pair' && r.nominated && r.availableOutgoingBitrate) available = r.availableOutgoingBitrate
+  }
+  return { layers, available, twcc: /transport-cc/.test(pc.remoteDescription?.sdp ?? '') }
+})()
+`
+
+function tileByLabel(suffix) {
+  return [...document.querySelectorAll('.group')].find((g) => g.querySelector('.hud-label')?.textContent.trim().endsWith(suffix))
+}
+
+const remoteScreen = `
+(() => {
+  const tile = (${tileByLabel.toString()})('screen')
+  const video = tile?.querySelector('video')
+  return video ? { width: video.videoWidth, frames: video.getVideoPlaybackQuality().totalVideoFrames } : null
+})()
+`
+
+function clickTilePin(suffix, label) {
+  const tile = [...document.querySelectorAll('.group')].find((g) => g.querySelector('.hud-label')?.textContent.trim().endsWith(suffix))
+  const button = tile && [...tile.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label)
+  if (!button) return false
+  button.click()
+  return true
+}
+
+const SHARE_FPS_WINDOW_MS = 3000
+
+async function remoteScreenFps(viewer) {
+  const before = await evalJs(viewer, remoteScreen)
+  await sleep(SHARE_FPS_WINDOW_MS)
+  const after = await evalJs(viewer, remoteScreen)
+  if (!before || !after) return { width: 0, fps: 0 }
+  return { width: after.width, fps: ((after.frames - before.frames) * 1000) / SHARE_FPS_WINDOW_MS }
+}
+
+const SHARE_SETTLE_MS = 20000
+
+const screenReceived = `
+(async () => {
+  const tile = (${tileByLabel.toString()})('screen')
+  const trackId = tile?.querySelector('video')?.srcObject?.getVideoTracks()[0]?.id
+  for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
+    for (const r of (await pc.getStats()).values()) {
+      if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
+        return { fps: r.framesPerSecond || 0, lost: r.packetsLost || 0, plis: r.pliCount || 0, freezes: r.freezeCount || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0 }
+      }
+    }
+  }
+  return null
+})()
+`
+
+async function settledScreenFps(viewer, publisher, settled) {
+  const deadline = Date.now() + SHARE_SETTLE_MS
+  for (;;) {
+    const measured = await remoteScreenFps(viewer)
+    const sent = await evalJs(publisher, screenSent)
+    const encoded = Object.entries(sent?.layers ?? {}).map(([rid, layer]) => `${rid} ${layer.fps} fps (${layer.limit})`)
+    const received = await evalJs(viewer, screenReceived)
+    console.log(`  share ${measured.width}px at ${measured.fps.toFixed(1)} fps, received ${JSON.stringify(received)}; publisher encodes ${encoded.join(', ')} with ${sent?.available ?? 0} bps available`)
+    if (settled(measured) || Date.now() > deadline) return measured
+  }
+}
+
+const FLUID_SHARE_MIN_FPS = 15
+const SLOW_SHARE_MAX_FPS = 10
+
+// A share goes out as a fluid and a slow encoding, both at full size: a
+// pinned share plays the fluid one, a share shrunk into the strip under a
+// pinned camera gets the slow one, and the camera thumbnails the viewer
+// asks for do not drag the share's layer down with them.
+async function checkScreenShare(failures, publisher, viewer) {
+  const publisherConsole = await consoleOf(publisher)
+  await evalJs(publisher, fakeDisplay)
+  check(failures, 'screen share', await clickButtonByTitle(publisher, 'Share your screen'), 'no "Share your screen" button')
+
+  const sent = await waitFor(publisher, screenSent, (s) => s && ['l', 'h'].every((rid) => s.layers[rid]?.frames > 0), 20000)
+  console.log(`screen share sent: ${JSON.stringify(sent.value)}`)
+  check(failures, 'screen share', sent.ok, `the share is not sent as a slow and a fluid encoding: ${JSON.stringify(sent.value)}; console: ${publisherConsole.join(' | ')}`)
+  check(failures, 'screen share', sent.value?.twcc === true, 'the server did not negotiate transport-wide congestion control on the upload')
+  for (const rid of ['l', 'h']) {
+    const width = sent.value?.layers[rid]?.width
+    check(failures, 'screen share', width === SHARE_WIDTH, `the ${rid} encoding of the share is ${width}px wide, not the full ${SHARE_WIDTH}px`)
+  }
+
+  const pinned = await waitFor(viewer, remoteScreen, (v) => v?.width === SHARE_WIDTH, 20000)
+  check(failures, 'screen share', pinned.ok, `the pinned share arrives ${pinned.value?.width}px wide, not ${SHARE_WIDTH}px`)
+  const fluid = await remoteScreenFps(viewer)
+  console.log(`screen share pinned: ${fluid.width}px at ${fluid.fps.toFixed(1)} fps`)
+  check(failures, 'screen share', fluid.fps >= FLUID_SHARE_MIN_FPS, `the pinned share plays at ${fluid.fps.toFixed(1)} fps, not the fluid encoding`)
+
+  check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Pin to main view'), 'no "Pin to main view" button on the viewer\'s own tile')
+  await sleep(LAYER_PAUSE_MS)
+  const slow = await remoteScreenFps(viewer)
+  console.log(`screen share in the strip: ${slow.width}px at ${slow.fps.toFixed(1)} fps`)
+  check(failures, 'screen share', slow.width === SHARE_WIDTH, `the share in the strip arrives ${slow.width}px wide, not at full size`)
+  check(failures, 'screen share', slow.fps > 0 && slow.fps <= SLOW_SHARE_MAX_FPS, `the share in the strip plays at ${slow.fps.toFixed(1)} fps, not the slow encoding`)
+
+  check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
+  check(failures, 'screen share', await callJs(viewer, clickTilePin, 'screen', 'Pin to main view'), 'no "Pin to main view" button on the share')
+  const back = await settledScreenFps(viewer, publisher, (measured) => measured.fps >= FLUID_SHARE_MIN_FPS)
+  console.log(`screen share pinned again: ${back.width}px at ${back.fps.toFixed(1)} fps`)
+  check(failures, 'screen share', back.fps >= FLUID_SHARE_MIN_FPS, `the share pinned again plays at ${back.fps.toFixed(1)} fps, not the fluid encoding`)
+
+  check(failures, 'screen share', await clickButtonByTitle(publisher, 'Stop sharing'), 'no "Stop sharing" button')
+  const gone = await waitFor(viewer, remoteScreen, (v) => v === null, 20000)
+  check(failures, 'screen share', gone.ok, 'the share tile stayed after the share stopped')
+}
+
 async function checkPinRoundTrip(failures, label, browser) {
   check(failures, label, await callJs(browser, clickRemotePin, 'Pin to main view'), 'no pin button on the remote tile')
   await sleep(500)
@@ -602,6 +750,7 @@ async function main() {
     }
 
     await checkSimulcast(failures, browsers[0], browsers[1])
+    await checkScreenShare(failures, browsers[0], browsers[1])
 
     await checkNewMeeting(failures, dir, `http://127.0.0.1:${port}`)
     await checkBackgroundBlur(failures, dir, `http://127.0.0.1:${port}`)

@@ -1,16 +1,27 @@
 // Encoder configuration for everything a member publishes. A camera goes
 // out as three encodings so the SFU can give each viewer the layer its
-// layout and network can use; a screen share goes out as one full-quality
-// stream, because text has to stay legible.
+// layout and network can use. A screen share goes out as two encodings at
+// full resolution, because text has to stay legible: a fluid one, and a
+// slow one for viewers whose network cannot hold the fluid one, so they
+// never hold it back for everyone else.
 
 /** How many frames a second a shared screen is encoded at. */
 export const SCREEN_SHARE_FPS = 30
 
+export const SCREEN_SHARE_LOW_FPS = 5
+export const SCREEN_SHARE_LOW_MAX_BITRATE = 500_000
+
+export const SCREEN_CONTENT_HINT = 'detail'
+export const DEFAULT_PRIORITY: RTCPriorityType = 'low'
+export const SCREEN_SHARE_PRIORITY: RTCPriorityType = 'high'
+export const CAMERA_PRIORITY = DEFAULT_PRIORITY
+export const CAMERA_SHARING_PRIORITY: RTCPriorityType = 'very-low'
+
 /** The default publish ceiling of a server, in bits per second. */
 export const PUBLISH_CEILING_BPS = 4_000_000
 
-/** One share may use the whole ceiling: it is the only video it sends. */
-export const SCREEN_SHARE_MAX_BITRATE = PUBLISH_CEILING_BPS
+/** Both encodings of a share together may use the whole ceiling. */
+export const SCREEN_SHARE_MAX_BITRATE = PUBLISH_CEILING_BPS - SCREEN_SHARE_LOW_MAX_BITRATE
 
 export const LAYER_RIDS = ['l', 'm', 'h'] as const
 
@@ -63,16 +74,45 @@ export function sharingLayers(layers: readonly RTCRtpEncodingParameters[]): RTCR
   }))
 }
 
-export function screenSenderParameters(parameters: RTCRtpSendParameters): RTCRtpSendParameters {
+export function withSenderPriority(parameters: RTCRtpSendParameters, priority: RTCPriorityType): RTCRtpSendParameters {
   return {
     ...parameters,
-    degradationPreference: 'maintain-framerate',
-    encodings: parameters.encodings.map((encoding) => ({
-      ...encoding,
+    encodings: parameters.encodings.map((encoding, index) => {
+      const own = index === 0 ? priority : DEFAULT_PRIORITY
+      return { ...encoding, priority: own, networkPriority: own }
+    }),
+  }
+}
+
+export function cameraSenderParameters(
+  parameters: RTCRtpSendParameters,
+  layers: readonly RTCRtpEncodingParameters[],
+  sharing: boolean,
+): RTCRtpSendParameters {
+  return sharing
+    ? withSenderPriority(relayerParameters(parameters, sharingLayers(layers)), CAMERA_SHARING_PRIORITY)
+    : withSenderPriority(relayerParameters(parameters, layers), CAMERA_PRIORITY)
+}
+
+export function screenLayers(): RTCRtpEncodingParameters[] {
+  return [
+    {
+      rid: LAYER_RIDS[0],
+      scaleResolutionDownBy: 1,
+      maxBitrate: SCREEN_SHARE_LOW_MAX_BITRATE,
+      maxFramerate: SCREEN_SHARE_LOW_FPS,
+    },
+    {
+      rid: LAYER_RIDS[2],
+      scaleResolutionDownBy: 1,
       maxBitrate: SCREEN_SHARE_MAX_BITRATE,
       maxFramerate: SCREEN_SHARE_FPS,
-    })),
-  }
+    },
+  ]
+}
+
+export function screenSenderParameters(parameters: RTCRtpSendParameters): RTCRtpSendParameters {
+  return withSenderPriority({ ...parameters, degradationPreference: 'maintain-resolution' }, SCREEN_SHARE_PRIORITY)
 }
 
 /**

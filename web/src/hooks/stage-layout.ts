@@ -77,8 +77,8 @@ export function usePreferredLayers(
     const client = clientRef.current
     if (!live || !client) return
     for (const tile of allTiles) {
-      if (tile.sourceId === LOCAL_SOURCE || tile.kind !== CAMERA_KIND) continue
-      client.preferLayer(tile.sourceId, layoutLayer(tile.key, pinnedKey, allTiles.length))
+      if (tile.sourceId === LOCAL_SOURCE) continue
+      client.preferLayer(tile.sourceId, tile.kind, layoutLayer(tile, pinnedKey, allTiles.length))
     }
   }, [clientRef, live, clientGeneration, allTiles, pinnedKey])
 }

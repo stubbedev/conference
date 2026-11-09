@@ -1039,60 +1039,59 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 	waitRemb(t, rembs, "a viewer-capped REMB", func(bitrate float64) bool { return bitrate <= rembCap*1.01 })
 }
 
-// TestScreenShareRembStartsAtCeiling asserts that a single-layer video
-// stream — a screen share, which has no simulcast layer to step down to —
-// is offered the whole uplink ceiling instead of the controller's low
-// starting guess, and is throttled only once loss shows up: a screen share
-// without that bitrate drops frames until it is a slideshow.
-func TestScreenShareRembStartsAtCeiling(t *testing.T) {
+// TestSingleLayerVideoRembStartsAtCeiling asserts that a single-layer
+// video stream, which has no simulcast layer to step down to, is offered
+// the whole uplink ceiling instead of the controller's low starting
+// guess, and is throttled only once loss shows up.
+func TestSingleLayerVideoRembStartsAtCeiling(t *testing.T) {
 	t.Parallel()
 
-	call := newScreenShareCall(t)
+	call := newSingleLayerCall(t)
 
-	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its screen share", atCeiling)
+	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its single-layer stream", atCeiling)
 
 	call.report(t, 64)
 
 	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
 }
 
-// TestScreenShareRembRecoversAfterCongestion asserts the other half of
+// TestSingleLayerVideoRembRecoversAfterCongestion asserts the other half of
 // the controller: once the viewer reports a clean link and says its own
 // downlink is healthy again, the publisher's ceiling comes back on that
-// report. A screen share that only adapts downwards stays blurred by one
-// bad minute for the rest of the call.
-func TestScreenShareRembRecoversAfterCongestion(t *testing.T) {
+// report. A stream that only adapts downwards stays degraded by one bad
+// minute for the rest of the call.
+func TestSingleLayerVideoRembRecoversAfterCongestion(t *testing.T) {
 	t.Parallel()
 
-	call := newScreenShareCall(t)
+	call := newSingleLayerCall(t)
 
-	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its screen share", atCeiling)
+	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its single-layer stream", atCeiling)
 
 	call.report(t, 64)
 
 	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
 
 	call.report(t, 0)
-	call.setREMB(t, screenShareCeiling)
+	call.setREMB(t, singleLayerCeiling)
 
 	waitRemb(t, call.rembs, "the ceiling back once the viewer's link recovered", atCeiling)
 }
 
-// screenShareCall is one member sharing a screen to one viewer, with the
-// publisher's RTCP watched for the bitrate the hub feeds it. A screen
-// share has no simulcast layers to move between, so it is the only video
-// stream the hub throttles with REMB.
-type screenShareCall struct {
+// singleLayerCall is one member publishing single-layer video to one
+// viewer, with the publisher's RTCP watched for the bitrate the hub feeds
+// it. Without simulcast layers to move between, it is the only kind of
+// video stream the hub throttles with REMB.
+type singleLayerCall struct {
 	viewer *testPeer
 	ssrc   uint32
 	rembs  <-chan float64
 }
 
-// screenShareCeiling is the room's default publish ceiling in bits per
-// second, which a single screen share may use in full.
-const screenShareCeiling = 2_500_000.0
+// singleLayerCeiling is the room's default publish ceiling in bits per
+// second, which one single-layer stream may use in full.
+const singleLayerCeiling = 2_500_000.0
 
-func newScreenShareCall(t *testing.T) screenShareCall {
+func newSingleLayerCall(t *testing.T) singleLayerCall {
 	t.Helper()
 
 	engine, closeEngine, err := sfu.NewLoopbackEngine()
@@ -1105,15 +1104,15 @@ func newScreenShareCall(t *testing.T) screenShareCall {
 	hub := newTestHub(t, engine)
 
 	publisher := newTestPeer(t, hub, engine, "alice", false)
-	audio, screen := publisherOffer(t, publisher)
+	audio, video := publisherOffer(t, publisher)
 
 	go pumpMedia(audio)
-	go pumpMedia(screen)
+	go pumpMedia(video)
 
 	viewer := newTestPeer(t, hub, engine, "bob", false)
 	remote, _ := viewerSubscribe(t, viewer, engine)
 
-	return screenShareCall{
+	return singleLayerCall{
 		viewer: viewer,
 		ssrc:   uint32(remote.SSRC()),
 		rembs:  watchRembOnPublisher(publisherVideoSender(t, publisher)),
@@ -1121,7 +1120,7 @@ func newScreenShareCall(t *testing.T) screenShareCall {
 }
 
 // report sends one receiver report, the viewer's account of what it lost.
-func (c screenShareCall) report(t *testing.T, fractionLost uint8) {
+func (c singleLayerCall) report(t *testing.T, fractionLost uint8) {
 	t.Helper()
 
 	packet := &rtcp.ReceiverReport{
@@ -1136,7 +1135,7 @@ func (c screenShareCall) report(t *testing.T, fractionLost uint8) {
 }
 
 // setREMB sends the viewer's own estimate of its downlink.
-func (c screenShareCall) setREMB(t *testing.T, bitrate float64) {
+func (c singleLayerCall) setREMB(t *testing.T, bitrate float64) {
 	t.Helper()
 
 	packet := &rtcp.ReceiverEstimatedMaximumBitrate{
@@ -1151,7 +1150,7 @@ func (c screenShareCall) setREMB(t *testing.T, bitrate float64) {
 	}
 }
 
-func atCeiling(bitrate float64) bool { return bitrate >= screenShareCeiling*0.99 }
+func atCeiling(bitrate float64) bool { return bitrate >= singleLayerCeiling*0.99 }
 
 func belowCeiling(bitrate float64) bool { return !atCeiling(bitrate) }
 

@@ -2,12 +2,19 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  CAMERA_PRIORITY,
+  CAMERA_SHARING_PRIORITY,
   cameraLayers,
+  cameraSenderParameters,
+  DEFAULT_PRIORITY,
   demandParameters,
   PUBLISH_CEILING_BPS,
   relayerParameters,
+  SCREEN_CONTENT_HINT,
   SCREEN_SHARE_FPS,
   SCREEN_SHARE_MAX_BITRATE,
+  SCREEN_SHARE_PRIORITY,
+  screenLayers,
   screenSenderParameters,
   sharingLayers,
 } from './encodings.ts'
@@ -20,32 +27,83 @@ const total = (layers: RTCRtpEncodingParameters[]) => layers.reduce((sum, layer)
 const parameters = (encodings: RTCRtpEncodingParameters[]): RTCRtpSendParameters =>
   ({ transactionId: 'tx', rtcp: { cname: 'abc', reducedSize: false }, encodings }) as RTCRtpSendParameters
 
-test('a screen share keeps its frame rate when the bitrate shrinks', () => {
-  const sent = screenSenderParameters(parameters([{}]))
-  assert.equal(sent.degradationPreference, 'maintain-framerate')
-  assert.equal(sent.encodings[0]?.maxFramerate, SCREEN_SHARE_FPS)
+const senderPriority = (sent: RTCRtpSendParameters) => {
+  const first = sent.encodings[0]
+  assert.equal(first?.networkPriority, first?.priority)
+  return first?.priority
+}
+
+test('a screen share keeps its resolution when the bitrate shrinks, so text stays legible', () => {
+  assert.equal(screenSenderParameters(parameters(screenLayers())).degradationPreference, 'maintain-resolution')
 })
 
-test('a screen share gets a bitrate budget for a whole window', () => {
-  const sent = screenSenderParameters(parameters([{}]))
+test('a screen share is encoded as detailed content, not as motion', () => {
+  assert.equal(SCREEN_CONTENT_HINT, 'detail')
+})
+
+test('a screen share goes out fluid and slow, both at full resolution', () => {
+  const [low, high] = screenLayers()
+  assert.deepEqual(
+    screenLayers().map(({ rid, scaleResolutionDownBy }) => [rid, scaleResolutionDownBy]),
+    [['l', 1], ['h', 1]],
+  )
+  assert.equal(high?.maxFramerate, SCREEN_SHARE_FPS)
+  assert.ok((low?.maxFramerate ?? Infinity) < SCREEN_SHARE_FPS)
+  assert.ok((low?.maxBitrate ?? Infinity) < (high?.maxBitrate ?? 0))
+})
+
+test('both encodings of a share together stay within the publish ceiling, with a whole window for the fluid one', () => {
+  assert.equal(total(screenLayers()), PUBLISH_CEILING_BPS)
   assert.ok(SCREEN_SHARE_MAX_BITRATE >= 2_000_000)
-  assert.equal(sent.encodings[0]?.maxBitrate, SCREEN_SHARE_MAX_BITRATE)
-  assert.equal(SCREEN_SHARE_MAX_BITRATE, PUBLISH_CEILING_BPS)
 })
 
-test('the rest of the sender parameters survive', () => {
-  const sent = screenSenderParameters(parameters([{ active: true, maxBitrate: 900_000 }]))
+test('a screen share outranks the camera on the uplink, most of all while it is shared', () => {
+  const rank: Record<RTCPriorityType, number> = { 'very-low': 0, low: 1, medium: 2, high: 3 }
+  assert.deepEqual(senderPriority(screenSenderParameters(parameters(screenLayers()))), SCREEN_SHARE_PRIORITY)
+  assert.deepEqual(senderPriority(cameraSenderParameters(parameters(HD), HD, false)), CAMERA_PRIORITY)
+  assert.deepEqual(senderPriority(cameraSenderParameters(parameters(HD), HD, true)), CAMERA_SHARING_PRIORITY)
+  assert.ok(rank[SCREEN_SHARE_PRIORITY] > rank[CAMERA_PRIORITY])
+  assert.ok(rank[CAMERA_SHARING_PRIORITY] < rank[CAMERA_PRIORITY])
+})
+
+test('only the first encoding of a sender carries its priority, the way browsers accept it', () => {
+  for (const sent of [
+    screenSenderParameters(parameters(screenLayers())),
+    cameraSenderParameters(parameters(HD), HD, true),
+    cameraSenderParameters(parameters(HD), HD, false),
+  ]) {
+    for (const encoding of sent.encodings.slice(1)) {
+      assert.equal(encoding.priority, DEFAULT_PRIORITY)
+      assert.equal(encoding.networkPriority, DEFAULT_PRIORITY)
+    }
+  }
+})
+
+test('the encodings a share is created with carry no priority, which browsers refuse there', () => {
+  for (const layer of screenLayers()) {
+    assert.equal(layer.priority, undefined)
+    assert.equal(layer.networkPriority, undefined)
+  }
+})
+
+test('tuning a share leaves its encodings and the rest of the sender parameters alone', () => {
+  const read = parameters(screenLayers())
+  const sent = screenSenderParameters(read)
   assert.equal(sent.transactionId, 'tx')
   assert.equal(sent.rtcp.cname, 'abc')
-  assert.equal(sent.encodings.length, 1)
-  assert.equal(sent.encodings[0]?.active, true)
+  assert.deepEqual(
+    sent.encodings.map(({ priority: _priority, networkPriority: _networkPriority, ...rest }) => rest),
+    screenLayers(),
+  )
+  assert.equal(read.degradationPreference, undefined)
 })
 
-test('the value handed to setParameters is new, not the one read from the sender', () => {
-  const read = parameters([{ active: true, maxBitrate: 900_000 }])
-  screenSenderParameters(read)
-  assert.equal(read.encodings[0]?.maxBitrate, 900_000)
-  assert.equal(read.degradationPreference, undefined)
+test('a share is paused and resumed by layer like a camera', () => {
+  const sent = demandParameters(parameters(screenLayers()), [true, false, false])
+  assert.deepEqual(
+    sent.encodings.map((encoding) => [encoding.rid, encoding.active]),
+    [['l', true], ['h', false]],
+  )
 })
 
 test('the camera layers stay under the publish ceiling at every capture size', () => {
@@ -89,6 +147,14 @@ test('relayering caps the camera while a screen is shared', () => {
     shared.encodings.map((encoding) => encoding.maxBitrate),
     [150_000, 300_000, 300_000],
   )
+})
+
+test('the camera becomes a thumbnail while a screen is shared and gets its layers back afterwards', () => {
+  const shared = cameraSenderParameters(parameters(FULL_HD), FULL_HD, true)
+  assert.deepEqual(bitrates(shared.encodings), [300_000, 300_000, 300_000])
+  const restored = cameraSenderParameters(shared, FULL_HD, false)
+  assert.deepEqual(bitrates(restored.encodings), bitrates(FULL_HD))
+  assert.equal(senderPriority(restored), CAMERA_PRIORITY)
 })
 
 test('relayering gives the camera its layers back afterwards', () => {

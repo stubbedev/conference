@@ -8,9 +8,9 @@ import (
 )
 
 // Simulcast layers, lowest quality first. A camera is published as up
-// to three encodings named by their RTP stream IDs (the client's
-// sendEncodings use exactly these rids); audio and screen shares are a
-// single stream without a rid, which is layer 0.
+// to three encodings and a shared screen as its low and high ones, named
+// by their RTP stream IDs (the client's sendEncodings use exactly these
+// rids); audio is a single stream without a rid, which is layer 0.
 const (
 	layerLow = iota
 	layerMid
