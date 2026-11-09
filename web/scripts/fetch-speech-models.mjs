@@ -27,7 +27,7 @@
 //   --asr-fallback=owner/model|none --asr-fallback-dtype=q4
 //   --mt-kind=seq2seq|llm --mt=owner/model --mt-dtype=q4f16
 //   --mt-fallback=owner/model|none, what a language model falls back to
-//   --pairs --pair-dtype=q4f16
+//   --pair-languages=en,de,da or all --pair-dtype=q4f16
 //   --builtin
 
 import { createHash } from 'node:crypto'
@@ -94,12 +94,34 @@ const USAGE =
   'usage: node scripts/fetch-speech-models.mjs <target dir> [--languages=en,de,da] [--asr=owner/model] [--asr-dtype=q4f16] ' +
   '[--asr-fallback=owner/model|none] [--asr-fallback-dtype=q4] [--mt-kind=seq2seq|llm] [--mt=owner/model] [--mt-dtype=q4f16] ' +
   '[--mt-fallback=owner/model|none] ' +
-  '[--pairs] [--pair-dtype=q4f16] [--builtin]'
+  '[--pair-languages=en,de,da|all] [--pair-dtype=q4f16] [--builtin]'
 
-const VALUED = ['languages', 'asr', 'asr-dtype', 'asr-fallback', 'asr-fallback-dtype', 'mt-kind', 'mt', 'mt-dtype', 'mt-fallback', 'pair-dtype']
-const FLAGS = ['pairs', 'builtin']
+const VALUED = [
+  'languages',
+  'asr',
+  'asr-dtype',
+  'asr-fallback',
+  'asr-fallback-dtype',
+  'mt-kind',
+  'mt',
+  'mt-dtype',
+  'mt-fallback',
+  'pair-languages',
+  'pair-dtype',
+]
+const FLAGS = ['builtin']
 
-function parseArgs(argv) {
+const PAIR_OWNERS = ['Xenova', 'onnx-community']
+const PAIR_LICENSES = ['cc-by-4.0', 'apache-2.0']
+
+function codeList(option, value) {
+  const codes = [...new Set(String(value).split(',').map((code) => code.trim()).filter(Boolean))]
+  if (codes.length === 0) throw new Error(`--${option} names no language`)
+
+  return codes
+}
+
+export function parseArgs(argv) {
   const options = {
     languages: 'en',
     asr: 'onnx-community/whisper-large-v3-turbo',
@@ -108,7 +130,6 @@ function parseArgs(argv) {
     'asr-fallback-dtype': 'q4',
     'mt-kind': 'seq2seq',
     'pair-dtype': 'q4f16',
-    pairs: false,
     builtin: false,
   }
   const positional = []
@@ -138,8 +159,7 @@ function parseArgs(argv) {
 
   if (positional.length !== 1) throw new Error(`what to fill is missing; ${USAGE}`)
 
-  const languages = [...new Set(String(options.languages).split(',').map((code) => code.trim()).filter(Boolean))]
-  if (languages.length === 0) throw new Error('--languages names no language')
+  const languages = codeList('languages', options.languages)
 
   const kind = options['mt-kind']
   if (!MT_DEFAULTS[kind]) throw new Error(`--mt-kind is ${kind}, not ${Object.keys(MT_DEFAULTS).join(' or ')}`)
@@ -165,7 +185,10 @@ function parseArgs(argv) {
           ? { model: options['mt-fallback'] ?? MT_DEFAULTS.seq2seq.model, dtype: MT_DEFAULTS.seq2seq.dtype }
           : null,
     },
-    pairs: options.pairs ? options['pair-dtype'] : null,
+    pairs:
+      options['pair-languages'] === undefined
+        ? null
+        : { languages: codeList('pair-languages', options['pair-languages']), dtype: options['pair-dtype'] },
     builtin: options.builtin,
   }
 }
@@ -206,12 +229,12 @@ async function revisionOf(model) {
   return sha
 }
 
-async function modelExists(model) {
-  const response = await fetch(`${HUB}/api/models/${model}`, { method: 'HEAD' })
-  if (response.status === 404 || response.status === 401) return false
+async function modelInfo(model) {
+  const response = await fetch(`${HUB}/api/models/${model}`)
+  if (response.status === 404 || response.status === 401) return null
   if (!response.ok) throw new Error(`cannot look up ${model}: ${response.status} ${response.statusText}`)
 
-  return true
+  return response.json()
 }
 
 // modelFiles is what one transformers.js model needs in each of the
@@ -265,7 +288,7 @@ function moonshineCandidates(code) {
 
 async function moonshineFor(dir, code, dtypes) {
   for (const model of moonshineCandidates(code)) {
-    if (!(await modelExists(model))) continue
+    if ((await modelInfo(model)) === null) continue
 
     try {
       return { model, files: await modelFiles(dir, model, 'seq2seq', dtypes) }
@@ -278,23 +301,92 @@ async function moonshineFor(dir, code, dtypes) {
   return null
 }
 
-async function pairModels(languages) {
-  const pairs = {}
+function baseModelOf(model, info) {
+  const base = info.cardData?.base_model
+  const bases = Array.isArray(base) ? base : base === undefined ? [] : [base]
+  if (bases.length !== 1) {
+    throw new Error(`${model} names no license on its model card and ${bases.length === 0 ? 'no base model' : `the base models ${bases.join(', ')}`} to take one from`)
+  }
+
+  return bases[0]
+}
+
+async function pairLicense(model, info, lookup) {
+  let card = model
+  let license = info.cardData?.license
+
+  if (license === undefined) {
+    card = baseModelOf(model, info)
+    const base = await lookup(card)
+    if (base === null) throw new Error(`${model} names ${card} as its base model, which the hub does not have`)
+    license = base.cardData?.license
+  }
+
+  if (!PAIR_LICENSES.includes(license)) {
+    throw new Error(`${card}, the model card of ${model}, names the license ${JSON.stringify(license ?? null)}, not ${PAIR_LICENSES.join(' or ')}`)
+  }
+
+  return { license, card }
+}
+
+export async function planPairs(languages, lookup) {
+  const found = []
+  const skipped = []
 
   for (const source of languages) {
     for (const target of languages) {
       if (source === target) continue
 
-      const model = `Xenova/opus-mt-${source}-${target}`
-      if (await modelExists(model)) pairs[`${source}-${target}`] = model
+      const pair = `${source}-${target}`
+      const candidates = PAIR_OWNERS.map((owner) => `${owner}/opus-mt-${pair}`)
+      let match = null
+
+      for (const model of candidates) {
+        const info = await lookup(model)
+        if (info === null) continue
+
+        match = { model, info }
+        break
+      }
+
+      if (match === null) {
+        skipped.push({ pair, reason: `none of ${candidates.join(', ')} is on the hub` })
+        continue
+      }
+
+      found.push({ pair, model: match.model, ...(await pairLicense(match.model, match.info, lookup)) })
     }
   }
 
-  if (Object.keys(pairs).length > 0) {
-    process.stderr.write('the pair models are OPUS-MT, CC-BY-4.0: credit the Helsinki-NLP OPUS-MT project where you ship them\n')
+  return { found, skipped }
+}
+
+async function pairModels(dir, languages, dtype) {
+  const { found, skipped } = await planPairs(languages, modelInfo)
+  const pairs = []
+  const files = []
+
+  for (const entry of found) {
+    try {
+      files.push(...(await modelFiles(dir, entry.model, 'seq2seq', exportsFor(dtype, true))))
+      pairs.push(entry)
+    } catch (err) {
+      if (!(err instanceof MissingExport)) throw err
+      skipped.push({ pair: entry.pair, reason: err.message })
+    }
   }
 
-  return pairs
+  return { pairs, files, skipped }
+}
+
+function reportPairs(pairs, skipped, multilingual) {
+  for (const { pair, model, license, card } of pairs) process.stderr.write(`${pair}: ${model}, ${license} as ${card} names it\n`)
+  for (const { pair, reason } of skipped) console.warn(`warning: no OPUS-MT export for ${pair}, so ${multilingual} translates it: ${reason}`)
+
+  if (pairs.length > 0) {
+    const licenses = [...new Set(pairs.map((entry) => entry.license))].sort()
+    process.stderr.write(`the pair models are OPUS-MT, ${licenses.join(' and ')}: credit the Helsinki-NLP OPUS-MT project where you ship them\n`)
+  }
 }
 
 // cardURL is a voice's model card, which names the license of its data.
@@ -467,11 +559,17 @@ async function warnUntranslatable(dir, model, languages, pairs) {
 }
 
 async function main() {
-  const { dir, languages: asked, asr, fallback, mt, pairs: pairDtype, builtin } = parseArgs(process.argv.slice(2))
+  const { dir, languages: asked, asr, fallback, mt, pairs: pairOption, builtin } = parseArgs(process.argv.slice(2))
   const languages = await languageCodes(asked)
 
+  const pairLanguages = pairOption ? await languageCodes(pairOption.languages) : []
+  const outside = pairLanguages.filter((code) => !languages.includes(code))
+  if (outside.length > 0) throw new Error(`--pair-languages names ${outside.join(', ')}, which --languages does not: ${languages.join(', ')}`)
+  if (pairOption && pairLanguages.length < 2) throw new Error(`--pair-languages names ${pairLanguages.join(', ')}, which makes no pair`)
+
   const fallbackLanguages = {}
-  const pairs = pairDtype ? await pairModels(languages) : {}
+  const paired = pairOption ? await pairModels(dir, pairLanguages, pairOption.dtype) : { pairs: [], files: [], skipped: [] }
+  const pairs = Object.fromEntries(paired.pairs.map(({ pair, model }) => [pair, model]))
 
   const files = [
     ...(await modelFiles(dir, asr.model, 'seq2seq', exportsFor(asr.dtype, fallback === null))),
@@ -491,7 +589,7 @@ async function main() {
 
   if (mt.fallback) files.push(...(await modelFiles(dir, mt.fallback.model, 'seq2seq', exportsFor(mt.fallback.dtype, true))))
 
-  for (const model of Object.values(pairs)) files.push(...(await modelFiles(dir, model, 'seq2seq', exportsFor(pairDtype, true))))
+  files.push(...paired.files)
 
   const voices = await getJSON(`${HUB}/${PIPER_REPO}/resolve/${PIPER_REVISION}/voices.json`)
   const tts = {}
@@ -512,6 +610,7 @@ async function main() {
 
   const plain = mt.kind === 'seq2seq' ? mt.model : mt.fallback?.model
   if (plain) await warnUntranslatable(dir, plain, languages, pairs)
+  reportPairs(paired.pairs, paired.skipped, mt.model)
 
   const models = {
     asr: {
@@ -525,7 +624,7 @@ async function main() {
       dtype: mt.dtype,
       ...(mt.fallback ? { fallback: mt.fallback } : {}),
       ...(Object.keys(pairs).length > 0
-        ? { pairs: Object.fromEntries(Object.entries(pairs).map(([pair, model]) => [pair, { model, dtype: pairDtype }])) }
+        ? { pairs: Object.fromEntries(Object.entries(pairs).map(([pair, model]) => [pair, { model, dtype: pairOption.dtype }])) }
         : {}),
       ...(builtin ? { builtin: true } : {}),
     },
@@ -541,7 +640,9 @@ async function main() {
   process.stderr.write(`total ${(total / 1e6).toFixed(0)} MB in ${unique.length} files in ${dir}\n`)
 }
 
-main().catch((err) => {
-  process.stderr.write(`fetch-speech-models: ${err.message}\n`)
-  process.exitCode = 1
-})
+if (import.meta.main) {
+  main().catch((err) => {
+    process.stderr.write(`fetch-speech-models: ${err.message}\n`)
+    process.exitCode = 1
+  })
+}

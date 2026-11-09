@@ -30,9 +30,11 @@ speech-files:
 # Download the models and Piper voices the browser speech engines load
 # into DIR, with a models.json naming them (see
 # docs/live-translation.md); option: languages, as in
-# `just speech-models /srv/speech-models en,de,da`.
-speech-models dir languages="en":
-    node web/scripts/fetch-speech-models.mjs {{dir}} --languages={{languages}}
+# `just speech-models /srv/speech-models en,de,da`; a third argument adds
+# OPUS-MT pair models between those languages:
+# `just speech-models /srv/speech-models all en,de,da`.
+speech-models dir languages="en" pair_languages="":
+    node web/scripts/fetch-speech-models.mjs {{dir}} --languages={{languages}} {{ if pair_languages == "" { "" } else { "--pair-languages=" + pair_languages } }}
 
 # oxlint over the web UI; any warning fails.
 web-lint:

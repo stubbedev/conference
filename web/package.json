@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint --deny-warnings",
-    "test": "node --test \"src/**/*.test.ts\"",
+    "test": "node --test \"src/**/*.test.ts\" \"scripts/**/*.test.mjs\"",
     "preview": "vite preview",
     "prebuild": "node scripts/vendor-vision.mjs && node scripts/vendor-speech.mjs",
     "predev": "node scripts/vendor-vision.mjs && node scripts/vendor-speech.mjs"

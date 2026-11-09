@@ -190,8 +190,9 @@ both settings at it.
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da
 # every language the server speaks (LANGUAGES_FILE, or the built-in list)
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=all
-# every pair OPUS-MT has a model for, and Chrome's translator first
-node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da --pairs --builtin
+# every language, a pair model between each two of English, German and
+# Danish that OPUS-MT has one for, and Chrome's translator first
+node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=all --pair-languages=en,de,da --builtin
 # a language model, for the glossary and the form of address
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da --mt-kind=llm
 ```
@@ -200,9 +201,18 @@ node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da
 `--mt`, `--mt-dtype` and `--pair-dtype` choose other models and exports.
 The default models are pinned to a commit, so each run downloads the same
 bytes; a model the script does not pin, such as a pair, is fetched at the
-commit its repository is on, which the script names. The pairs are
-OPUS-MT, CC-BY-4.0, which asks for credit where they ship. A file already
+commit its repository is on, which the script names. A file already
 in place with the right size is left alone.
+
+`--pair-languages` (a subset of `--languages`, or `all`) asks for a pair
+model in both directions between each two of its languages, while
+transcription, the voices and the multilingual model still cover every
+language in `--languages`. A pair is the transformers.js export of
+Helsinki-NLP's OPUS-MT model, `Xenova/opus-mt-<source>-<target>` or
+else `onnx-community/opus-mt-<source>-<target>`. A pair with neither, or
+whose repository lacks the `--pair-dtype` or 8-bit export, is left out of
+`models.json` and named on stderr, and the multilingual model translates
+it, as it does every pair `models.json` does not list.
 
 Voices are chosen by quality first, medium before high, low and x_low,
 a voice with one speaker before one with several, and the first one
@@ -216,6 +226,22 @@ looking for one per language. A language with no such voice still gets its best
 one, with the license it carries named on stderr, so French ships a CC0
 low voice and Italian a medium one under a license to read before
 shipping it.
+
+A pair model carries the license its model card names, or the card of
+the Helsinki-NLP model it was exported from when its own names none. The
+script prints each pair's license, and stops if one is missing or other
+than CC-BY-4.0 or Apache-2.0, both of which ask for credit to the
+Helsinki-NLP OPUS-MT project where the model ships. Between English,
+German and Danish:
+
+| Pair | Model | License |
+|---|---|---|
+| en-de | `Xenova/opus-mt-en-de` | CC-BY-4.0 |
+| de-en | `Xenova/opus-mt-de-en` | Apache-2.0 |
+| en-da | `Xenova/opus-mt-en-da` | Apache-2.0 |
+| da-en | `Xenova/opus-mt-da-en` | Apache-2.0 |
+| da-de | `Xenova/opus-mt-da-de` | Apache-2.0 |
+| de-da | none, m2m100 translates it | |
 
 Every model and voice file is served from the server's own origin under
 `/speech/`, with immutable caching, so nothing comes from a model hub or
