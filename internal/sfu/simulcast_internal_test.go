@@ -74,10 +74,12 @@ type mungedPacket struct {
 	tl0     uint8
 }
 
-func forward(t *testing.T, mung *munger, seq uint16, timestamp uint32, payload []byte, switching bool, now time.Time) mungedPacket {
+func forward(
+	t *testing.T, parse descriptorParser, mung *munger, seq uint16, timestamp uint32, payload []byte, switching bool, now time.Time,
+) mungedPacket {
 	t.Helper()
 
-	desc, ok := parseVP8(payload)
+	desc, ok := parse(payload)
 	if !ok {
 		t.Fatalf("unparsable test payload %x", payload)
 	}
@@ -94,7 +96,7 @@ func forward(t *testing.T, mung *munger, seq uint16, timestamp uint32, payload [
 		t.Fatal("apply modified the shared payload")
 	}
 
-	outDesc, _ := parseVP8(rewritten)
+	outDesc, _ := parse(rewritten)
 
 	return mungedPacket{
 		seq: out.SequenceNumber, ts: out.Timestamp,
@@ -112,17 +114,17 @@ func TestMungerContinuesAcrossLayerSwitch(t *testing.T) {
 
 	now := time.Unix(1000, 0)
 
-	last := forward(t, &mung, 65534, 4_294_960_000, vp8Payload(true, 0x7ffe, 254, frameTag), false, now)
+	last := forward(t, parseVP8, &mung, 65534, 4_294_960_000, vp8Payload(true, 0x7ffe, 254, frameTag), false, now)
 	if last.seq != 65534 || last.picture != 0x7ffe || last.tl0 != 254 {
 		t.Fatalf("first layer was rewritten: %+v", last)
 	}
 
-	last = forward(t, &mung, 65535, 4_294_963_000, vp8Payload(true, 0x7fff, 255, deltaTag), false, now.Add(33*time.Millisecond))
+	last = forward(t, parseVP8, &mung, 65535, 4_294_963_000, vp8Payload(true, 0x7fff, 255, deltaTag), false, now.Add(33*time.Millisecond))
 
-	switched := forward(t, &mung, 4000, 123_456, vp8Payload(true, 0x0100, 9, frameTag), true, now.Add(66*time.Millisecond))
+	switched := forward(t, parseVP8, &mung, 4000, 123_456, vp8Payload(true, 0x0100, 9, frameTag), true, now.Add(66*time.Millisecond))
 	expectContinues(t, last, switched)
 
-	next := forward(t, &mung, 4001, 126_456, vp8Payload(true, 0x0101, 9, deltaTag), false, now.Add(99*time.Millisecond))
+	next := forward(t, parseVP8, &mung, 4001, 126_456, vp8Payload(true, 0x0101, 9, deltaTag), false, now.Add(99*time.Millisecond))
 	if next.seq != switched.seq+1 || next.ts-switched.ts != 3000 || next.picture != switched.picture+1 {
 		t.Fatalf("packet after the switch %+v, want steady offsets from %+v", next, switched)
 	}
@@ -330,7 +332,7 @@ func TestScreenShareKeepsItsFluidLayerWithNobodyWatchingIt(t *testing.T) {
 			preferred: layerLow, steps: newLadder(), mung: newMunger(), buf: nil,
 		}
 		track := &UpTrack{
-			mid: "1", kind: kind, pc: nil, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, vp8: true,
+			mid: "1", kind: kind, pc: nil, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP8,
 			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{}, viewers: map[string]*upViewer{"thumbnail": thumbnail},
 			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
 		}
@@ -342,6 +344,102 @@ func TestScreenShareKeepsItsFluidLayerWithNobodyWatchingIt(t *testing.T) {
 
 		if kind == KindCamera && wanted != [layerCount]bool{true, false, false} {
 			t.Fatalf("a camera watched only as a thumbnail wants %v, want only its lowest layer", wanted)
+		}
+	}
+}
+
+// vp9Payload builds a non-flexible VP9 payload with a 15-bit picture ID,
+// layer indices and TL0PICIDX, the descriptor Chrome sends for a simulcast
+// stream.
+func vp9Payload(start, inter bool, picture uint16, spatial, tl0 uint8) []byte {
+	first := byte(vp9HasPictureID | vp9HasLayers)
+	if start {
+		first |= vp9FrameStart
+	}
+
+	if inter {
+		first |= vp9InterPicture
+	}
+
+	payload := []byte{first}
+	payload = binary.BigEndian.AppendUint16(payload, longPictureIDFlag|picture)
+
+	return append(payload, spatial<<vp9SpatialShift, tl0, 0xaa, 0xbb)
+}
+
+func TestParseVP9(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		payload  []byte
+		ok       bool
+		keyframe bool
+		picture  uint16
+		tl0At    int
+	}{
+		{name: "keyframe start", payload: vp9Payload(true, false, 0x1234, 0, 7), ok: true, keyframe: true, picture: 0x1234, tl0At: 4},
+		{name: "inter picture", payload: vp9Payload(true, true, 9, 0, 7), ok: true, keyframe: false, picture: 9, tl0At: 4},
+		{name: "keyframe continuation", payload: vp9Payload(false, false, 9, 0, 7), ok: true, keyframe: false, picture: 9, tl0At: 4},
+		{name: "upper spatial layer", payload: vp9Payload(true, false, 9, 1, 7), ok: true, keyframe: false, picture: 9, tl0At: 4},
+		{
+			name: "flexible keyframe", payload: []byte{vp9HasPictureID | vp9HasLayers | vp9Flexible | vp9FrameStart, 0x05, 0x00, 0xaa},
+			ok: true, keyframe: true, picture: 5, tl0At: -1,
+		},
+		{name: "short picture id", payload: []byte{vp9HasPictureID | vp9FrameStart, 0x05, 0xaa}, ok: true, keyframe: true, picture: 5, tl0At: -1},
+		{name: "minimal descriptor", payload: []byte{vp9FrameStart, 0xaa}, ok: true, keyframe: true, picture: 0, tl0At: -1},
+		{name: "truncated picture id", payload: []byte{vp9HasPictureID, vp9LongPictureID}, ok: false, keyframe: false, picture: 0, tl0At: -1},
+		{name: "truncated layers", payload: []byte{vp9HasLayers | vp9FrameStart, 0x00}, ok: false, keyframe: false, picture: 0, tl0At: -1},
+		{name: "empty", payload: nil, ok: false, keyframe: false, picture: 0, tl0At: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			desc, ok := parseVP9(tc.payload)
+			if ok != tc.ok || desc.keyframe != tc.keyframe || desc.tl0PicIdxAt != tc.tl0At {
+				t.Fatalf("ok=%v keyframe=%v tl0At=%d, want %v %v %d", ok, desc.keyframe, desc.tl0PicIdxAt, tc.ok, tc.keyframe, tc.tl0At)
+			}
+
+			if ok && desc.pictureIDAt >= 0 && desc.pictureID(tc.payload) != tc.picture {
+				t.Fatalf("picture id %d, want %d", desc.pictureID(tc.payload), tc.picture)
+			}
+		})
+	}
+}
+
+func TestMungerContinuesAcrossVP9LayerSwitch(t *testing.T) {
+	t.Parallel()
+
+	mung := newMunger()
+
+	now := time.Unix(1000, 0)
+
+	last := forward(t, parseVP9, &mung, 100, 9000, vp9Payload(true, false, 0x7fff, 0, 255), false, now)
+	if last.picture != 0x7fff || last.tl0 != 255 {
+		t.Fatalf("first layer was rewritten: %+v", last)
+	}
+
+	switched := forward(t, parseVP9, &mung, 7000, 555_000, vp9Payload(true, false, 0x0042, 0, 3), true, now.Add(16*time.Millisecond))
+	expectContinues(t, last, switched)
+
+	next := forward(t, parseVP9, &mung, 7001, 556_500, vp9Payload(true, true, 0x0043, 0, 3), false, now.Add(33*time.Millisecond))
+	if next.seq != switched.seq+1 || next.picture != switched.picture+1 {
+		t.Fatalf("packet after the switch %+v, want steady offsets from %+v", next, switched)
+	}
+}
+
+func TestParserForKnowsTheCodecsTheLayerSwitchReads(t *testing.T) {
+	t.Parallel()
+
+	for _, mime := range []string{webrtc.MimeTypeVP8, webrtc.MimeTypeVP9, "VIDEO/vp9"} {
+		if parserFor(mime) == nil {
+			t.Errorf("no descriptor parser for %s", mime)
+		}
+	}
+
+	for _, mime := range []string{webrtc.MimeTypeH264, webrtc.MimeTypeAV1, webrtc.MimeTypeOpus} {
+		if parserFor(mime) != nil {
+			t.Errorf("a descriptor parser for %s, which the layer switch cannot read", mime)
 		}
 	}
 }

@@ -1415,8 +1415,8 @@ type UpTrack struct {
 	// packet (see trackCodec).
 	codec webrtc.RTPCodecCapability
 
-	simulcast bool // published as rid-named encodings
-	vp8       bool // the payload format the layer switch understands
+	simulcast bool             // published as rid-named encodings
+	parse     descriptorParser // reads the payload descriptor; nil when the layer switch cannot
 
 	// extURIs maps the publisher's negotiated RTP header-extension IDs
 	// to their URIs, so forwarded packets can be re-numbered per viewer.
@@ -1640,9 +1640,9 @@ func (ut *UpTrack) forwardLayer(index int, layer *upLayer) {
 			log.Printf("sfu: first packet mid=%s rid=%q kind=%s ssrc=%d pt=%d", ut.mid, layer.remote.RID(), ut.kind, packet.SSRC, packet.PayloadType)
 		}
 
-		desc := vp8Descriptor{keyframe: false, pictureIDAt: -1, pictureIDLen: 0, tl0PicIdxAt: -1}
-		if ut.vp8 {
-			desc, _ = parseVP8(packet.Payload)
+		desc := emptyDescriptor()
+		if ut.parse != nil {
+			desc, _ = ut.parse(packet.Payload)
 		}
 
 		ut.mu.RLock()
@@ -1662,7 +1662,7 @@ func (ut *UpTrack) forwardLayer(index int, layer *upLayer) {
 
 // forward relays one packet of one layer if it is the layer this
 // viewer receives, switching layers at a keyframe of the target.
-func (v *upViewer) forward(layer int, packet *rtp.Packet, desc vp8Descriptor, extURIs map[uint8]string, now time.Time) error {
+func (v *upViewer) forward(layer int, packet *rtp.Packet, desc payloadDescriptor, extURIs map[uint8]string, now time.Time) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -2031,7 +2031,7 @@ func (up *UpPeer) trackFor(mid string, receiver *webrtc.RTPReceiver, track *webr
 		first:     track,
 		codec:     codec,
 		simulcast: track.RID() != "",
-		vp8:       strings.EqualFold(codec.MimeType, webrtc.MimeTypeVP8),
+		parse:     parserFor(codec.MimeType),
 		extURIs:   extensionURIs(receiver),
 		mu:        sync.RWMutex{},
 		layers:    [layerCount]*upLayer{},

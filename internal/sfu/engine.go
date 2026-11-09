@@ -195,11 +195,17 @@ const (
 	opusPayloadType = 111
 	vp8PayloadType  = 96
 	rtxPayloadType  = 97
+	vp9PayloadType  = 98
+	vp9RTXType      = 99
+	vp9Fmtp         = "profile-id=0"
 )
 
-// registerCodecs offers exactly what end-to-end encryption can carry:
-// the encryption worker leaves the VP8 payload descriptor and the Opus TOC
-// byte in the clear, so any other codec would arrive undecodable.
+// registerCodecs offers exactly what end-to-end encryption can carry and
+// the layer switch can read. The encryption worker leaves the first bytes
+// of a VP8 frame and the Opus TOC byte in the clear; VP9's payload
+// descriptor is written by the packetizer from the encoder's metadata, so
+// it survives encryption whole. H.264 and AV1 packetizers parse the frame
+// itself and would choke on ciphertext.
 func registerCodecs(mediaEngine *webrtc.MediaEngine) error {
 	videoFeedback := []webrtc.RTCPFeedback{
 		{Type: "goog-remb", Parameter: ""},
@@ -214,6 +220,8 @@ func registerCodecs(mediaEngine *webrtc.MediaEngine) error {
 		{codec(webrtc.MimeTypeOpus, opusClockRate, opusChannels, opusFmtp, nil, opusPayloadType), webrtc.RTPCodecTypeAudio},
 		{codec(webrtc.MimeTypeVP8, videoClockRate, 0, "", videoFeedback, vp8PayloadType), webrtc.RTPCodecTypeVideo},
 		{codec(webrtc.MimeTypeRTX, videoClockRate, 0, fmt.Sprintf("apt=%d", vp8PayloadType), nil, rtxPayloadType), webrtc.RTPCodecTypeVideo},
+		{codec(webrtc.MimeTypeVP9, videoClockRate, 0, vp9Fmtp, videoFeedback, vp9PayloadType), webrtc.RTPCodecTypeVideo},
+		{codec(webrtc.MimeTypeRTX, videoClockRate, 0, fmt.Sprintf("apt=%d", vp9PayloadType), nil, vp9RTXType), webrtc.RTPCodecTypeVideo},
 	}
 
 	for _, each := range codecs {
