@@ -398,6 +398,9 @@ Galène-style SFU (selective forwarding unit):
 - One upstream connection per publisher and one downstream connection per
   viewer, trickle ICE, keyframe requests, NACK and receiver-report
   interceptors, and a REMB bandwidth ceiling, all on a single UDP port.
+- Transport-wide congestion control feedback on every upload, so the
+  publisher's browser measures its own uplink and probes back up after a
+  dip instead of creeping back from packet loss alone.
 - Simulcast cameras, with each viewer getting the layer that fits, and
   a loss-driven bitrate ceiling that climbs back as the network does: a
   layer or a screen share lost to one bad minute comes back, and the

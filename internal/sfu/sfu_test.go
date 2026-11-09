@@ -280,7 +280,7 @@ func negotiateUp(t *testing.T, publisher *testPeer, peerConn *webrtc.PeerConnect
 func publisherPC(t *testing.T, publisher *testPeer) *webrtc.PeerConnection {
 	t.Helper()
 
-	peerConn, err := publisher.engine.NewPeerConnection()
+	peerConn, err := publisher.engine.NewUpstreamPeerConnection()
 	if err != nil {
 		t.Fatalf("publisher pc: %v", err)
 	}
@@ -422,7 +422,7 @@ func viewerPC(
 		return existing
 	}
 
-	subscribed, err := engine.NewPeerConnection()
+	subscribed, err := engine.NewDownstreamPeerConnection()
 	if err != nil {
 		t.Fatalf("viewer pc: %v", err)
 	}

@@ -1051,7 +1051,7 @@ func (m *Member) ensureUpPeer() {
 		return
 	}
 
-	connection, err := m.room.cfg.Engine.NewPeerConnection()
+	connection, err := m.room.cfg.Engine.NewUpstreamPeerConnection()
 	if err != nil {
 		m.fail("pc-create", err)
 
@@ -1247,7 +1247,7 @@ func (m *Member) ensureDownConnection(sourceID string) *DownPeer {
 		return down
 	}
 
-	connection, err := m.room.cfg.Engine.NewPeerConnection()
+	connection, err := m.room.cfg.Engine.NewDownstreamPeerConnection()
 	if err != nil {
 		m.fail("pc-create", err)
 

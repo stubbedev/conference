@@ -25,9 +25,11 @@ import (
 	"github.com/stubbe/conference/internal/relay"
 )
 
-// Engine owns the pion API factory shared by all peer connections.
+// Engine owns the pion API factories: one for the connections members
+// publish on, one for the connections they watch others on.
 type Engine struct {
-	API *webrtc.API
+	upstream   *webrtc.API
+	downstream *webrtc.API
 
 	mediaAddrs []relay.MediaAddr
 }
@@ -55,6 +57,27 @@ func NewEngine(udpPort int, externalIPs []netip.Addr) (*Engine, func(), error) {
 // newEngine builds the engine on settingEngine with the SFU's codecs
 // and interceptors.
 func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr) (*Engine, error) {
+	upstream, err := newAPI(settingEngine, directionUpstream)
+	if err != nil {
+		return nil, err
+	}
+
+	downstream, err := newAPI(settingEngine, directionDownstream)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Engine{upstream: upstream, downstream: downstream, mediaAddrs: mediaAddrs}, nil
+}
+
+type direction int
+
+const (
+	directionUpstream direction = iota
+	directionDownstream
+)
+
+func newAPI(settingEngine webrtc.SettingEngine, dir direction) (*webrtc.API, error) {
 	mediaEngine, err := newMediaEngine()
 	if err != nil {
 		return nil, err
@@ -65,13 +88,18 @@ func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr)
 		return nil, err
 	}
 
-	api := webrtc.NewAPI(
+	if dir == directionUpstream {
+		err = webrtc.ConfigureTWCCSender(mediaEngine, registry)
+		if err != nil {
+			return nil, fmt.Errorf("sfu: transport-wide congestion control feedback: %w", err)
+		}
+	}
+
+	return webrtc.NewAPI(
 		webrtc.WithSettingEngine(settingEngine),
 		webrtc.WithMediaEngine(mediaEngine),
 		webrtc.WithInterceptorRegistry(registry),
-	)
-
-	return &Engine{API: api, mediaAddrs: mediaAddrs}, nil
+	), nil
 }
 
 // MediaAddrs lists the addresses the SFU announces on its UDP mux and
@@ -217,9 +245,7 @@ func codec(
 }
 
 // newMediaEngine registers the codecs and header extensions negotiated
-// on every peer connection. Transport-wide congestion control is
-// deliberately absent: bandwidth is controlled via REMB, which this
-// server sends to publishers and both browser generations still honor.
+// on every peer connection.
 func newMediaEngine() (*webrtc.MediaEngine, error) {
 	mediaEngine := &webrtc.MediaEngine{}
 
@@ -299,11 +325,21 @@ func newInterceptors() (*interceptor.Registry, error) {
 	return registry, nil
 }
 
-// NewPeerConnection creates a peer connection with the shared engine.
-func (e *Engine) NewPeerConnection() (*webrtc.PeerConnection, error) {
-	pc, err := e.API.NewPeerConnection(webrtc.Configuration{})
+// NewUpstreamPeerConnection creates a connection a member publishes on.
+func (e *Engine) NewUpstreamPeerConnection() (*webrtc.PeerConnection, error) {
+	pc, err := e.upstream.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
-		return nil, fmt.Errorf("sfu: new peer connection: %w", err)
+		return nil, fmt.Errorf("sfu: new upstream peer connection: %w", err)
+	}
+
+	return pc, nil
+}
+
+// NewDownstreamPeerConnection creates a connection a member watches one source on.
+func (e *Engine) NewDownstreamPeerConnection() (*webrtc.PeerConnection, error) {
+	pc, err := e.downstream.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		return nil, fmt.Errorf("sfu: new downstream peer connection: %w", err)
 	}
 
 	return pc, nil
