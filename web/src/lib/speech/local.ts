@@ -23,6 +23,7 @@ import { Recent } from '@/lib/speech/recent'
 import { message } from '@/lib/speech/runtime'
 import { Sentences, type Line } from '@/lib/speech/sentences'
 import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
+import { WarmUps } from '@/lib/speech/warm-ups'
 import { webgpuAvailable } from '@/lib/speech/webgpu'
 import { MicCapture } from '@/lib/translate/capture'
 import type { CaptionLine, LangPrefs, RoomMessage, TranslationLevel, TranslationLine, TranslatorStatus } from '@/lib/translate/types'
@@ -86,6 +87,7 @@ export class LocalTranslator implements Translator {
   private readonly spoken = new Set<string>()
   private readonly voiceless = new Set<string>()
   private readonly notes = new Set<string>()
+  private warmUps: WarmUps | null = null
   private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
   private selfPrefs: LangPrefs
   private stopped = false
@@ -111,7 +113,10 @@ export class LocalTranslator implements Translator {
     })
 
     this.unsubscribe = [
-      client.on('lang', () => this.setSameLanguage()),
+      client.on('lang', () => {
+        this.setSameLanguage()
+        this.warmUpMembers()
+      }),
       client.on('member-left', ({ id }) => {
         this.player?.forget(id)
         this.earlier.delete(id)
@@ -119,6 +124,7 @@ export class LocalTranslator implements Translator {
       }),
     ]
     this.setSameLanguage()
+    this.warmUpMembers()
   }
 
   start(localMic: MediaStreamTrack | null): void {
@@ -137,6 +143,7 @@ export class LocalTranslator implements Translator {
   setSelfPrefs(prefs: LangPrefs): void {
     this.selfPrefs = prefs
     this.setSameLanguage()
+    this.warmUpMembers()
   }
 
   receive(message: RoomMessage): void {
@@ -179,6 +186,7 @@ export class LocalTranslator implements Translator {
   }
 
   private async prepare(): Promise<void> {
+    this.warmUps = null
     this.canTranscribe = true
     if (this.engines.requiresWebGpu && !(await webgpuAvailable())) {
       this.canTranscribe = false
@@ -210,9 +218,14 @@ export class LocalTranslator implements Translator {
       onError: (error) => this.fail(error),
     })
 
-    for (const prefs of this.client?.memberLangPrefs.values() ?? []) {
-      if (prefs.lang !== this.selfPrefs.lang) void this.warmUp(prefs.lang, this.selfPrefs.lang)
-    }
+    this.warmUps = new WarmUps()
+    this.warmUpMembers()
+  }
+
+  private warmUpMembers(): void {
+    if (this.stopped || !this.warmUps || !this.client) return
+    const sources = [...this.client.memberLangPrefs.values()].map((prefs) => prefs.lang)
+    for (const { source, target } of this.warmUps.claim(sources, this.selfPrefs.lang)) void this.warmUp(source, target)
   }
 
   private async warmUp(source: string, target: string): Promise<void> {
