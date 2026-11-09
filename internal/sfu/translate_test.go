@@ -2,6 +2,7 @@ package sfu_test
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,4 +309,98 @@ func TestResumeKeepsTranslation(t *testing.T) {
 
 	guest.next(t, "member-left")
 	expectNo(t, guest, msgTranslating)
+}
+
+func keepToggling(switcher *sfu.Member) func() {
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+
+		for on := true; ; on = !on {
+			select {
+			case <-stop:
+				return
+			default:
+				switcher.Handle(sfu.Message{Type: translate, On: on})
+			}
+		}
+	}()
+
+	return func() {
+		close(stop)
+		<-stopped
+	}
+}
+
+func firstMessageOfJoin(t *testing.T, hub *sfu.Hub, req sfu.JoinRequest, left <-chan string) string {
+	t.Helper()
+
+	var (
+		mu    sync.Mutex
+		first string
+	)
+
+	joiner, err := hub.JoinRoom(req, func(msg sfu.Message) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if first == "" {
+			first = msg.Type
+		}
+	})
+	if err != nil {
+		t.Fatalf("join: %v", err)
+	}
+
+	joiner.Leave()
+
+	select {
+	case id := <-left:
+		if id != joiner.ID {
+			t.Fatalf("member %s left, want %s", id, joiner.ID)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("the joiner never left")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	return first
+}
+
+func TestWelcomeComesFirstWhileTranslationToggles(t *testing.T) {
+	t.Parallel()
+
+	const joins = 300
+
+	hub, _ := newTranslateHub(t)
+	request := func(name string) sfu.JoinRequest {
+		return sfu.JoinRequest{
+			Slug: testSlug, RoomName: testRoomName, MemberName: name,
+			MaxMembers: 8, Priv: false, Host: testHost, Resume: "",
+		}
+	}
+
+	left := make(chan string, joins)
+
+	switcher, err := hub.JoinRoom(request("switcher"), func(msg sfu.Message) {
+		if msg.Type == "member-left" {
+			left <- msg.ID
+		}
+	})
+	if err != nil {
+		t.Fatalf("switcher join: %v", err)
+	}
+
+	defer switcher.Leave()
+	defer keepToggling(switcher)()
+
+	for join := range joins {
+		if first := firstMessageOfJoin(t, hub, request("joiner"), left); first != "welcome" {
+			t.Fatalf("join %d: first message %q, want the welcome", join, first)
+		}
+	}
 }

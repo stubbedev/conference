@@ -337,13 +337,6 @@ type Room struct {
 	rembStop chan struct{}
 }
 
-func (r *Room) info() *RoomInfo {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	return &RoomInfo{Slug: r.slug, Name: r.name, Live: len(r.members), Limit: r.limit}
-}
-
 func (r *Room) snapshot() []*Member {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -402,7 +395,6 @@ type admission struct {
 	member        *Member
 	stale         *Member
 	others        []MemberInfo
-	recorder      string
 	translatingBy string
 	startedEmpty  bool
 }
@@ -443,9 +435,17 @@ func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 
 	r.members[member.ID] = member
 
+	self := member.Info()
+
+	member.send(Message{
+		Type: "welcome", Self: &self, Members: others, Recorder: r.recorder, TranslatingBy: r.translatingBy,
+		RoomInfo:   &RoomInfo{Slug: r.slug, Name: r.name, Live: len(r.members), Limit: r.limit},
+		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
+	})
+
 	return admission{
 		member: member, stale: stale, others: others,
-		recorder: r.recorder, translatingBy: r.translatingBy, startedEmpty: len(r.members) == 1,
+		translatingBy: r.translatingBy, startedEmpty: len(r.members) == 1,
 	}, nil
 }
 
@@ -464,12 +464,6 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 		replaces = adm.stale.ID
 	}
 
-	self := member.Info()
-
-	member.send(Message{
-		Type: "welcome", Self: &self, RoomInfo: r.info(), Members: adm.others, Recorder: adm.recorder, TranslatingBy: adm.translatingBy,
-		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
-	})
 	r.broadcastExcept(member.ID, Message{
 		Type: "member-joined", ID: member.ID, Short: member.Short, Name: member.Name, Replaces: replaces,
 	})
