@@ -21,6 +21,9 @@ export interface OwnVoiceControls {
   micTrack: MediaStreamTrack | null
   onSample: (sample: OwnVoiceSample | null) => void
   onRemember: (remember: boolean) => void
+  /** The speaker agreed that this meeting's server may make their voice from the recording. */
+  serverConsent: boolean
+  onServerConsent: (consent: boolean) => void
 }
 
 interface OwnVoiceRecorderProps extends OwnVoiceControls {
@@ -29,7 +32,16 @@ interface OwnVoiceRecorderProps extends OwnVoiceControls {
 
 // Recording the speaker's own voice, before or during the call; their
 // translated voice is cloned from it.
-export function OwnVoiceRecorder({ lang, sample, remember, micTrack, onSample, onRemember }: OwnVoiceRecorderProps) {
+export function OwnVoiceRecorder({
+  lang,
+  sample,
+  remember,
+  micTrack,
+  onSample,
+  onRemember,
+  serverConsent,
+  onServerConsent,
+}: OwnVoiceRecorderProps) {
   const [recording, setRecording] = useState<SampleRecorder | null>(null)
   const [seconds, setSeconds] = useState(0)
   const [tooShort, setTooShort] = useState(false)
@@ -62,6 +74,16 @@ export function OwnVoiceRecorder({ lang, sample, remember, micTrack, onSample, o
 
   return (
     <div className="flex flex-col gap-2 rounded-md border p-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <Label htmlFor="server-voice" className="text-xs">
+          Make my voice on this meeting's server
+        </Label>
+        <Switch id="server-voice" checked={serverConsent} onCheckedChange={onServerConsent} />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Your recording is sent to this meeting's server, which makes your voice from it so everyone can hear it. Unlike
+        the call itself, it is not end-to-end encrypted. The server keeps it only while you're in the call.
+      </p>
       {recording ? (
         <>
           <p className="text-xs text-muted-foreground">{READING_TIPS}</p>
@@ -77,7 +99,7 @@ export function OwnVoiceRecorder({ lang, sample, remember, micTrack, onSample, o
             Your voice is recorded ({Math.round(sample.pcm.length / SAMPLE_RATE)} s) and used from your first sentence.
           </p>
           <div className="flex shrink-0 gap-1">
-            <Button size="sm" variant="ghost" onClick={record} disabled={!micTrack} aria-label="Record again">
+            <Button size="sm" variant="ghost" onClick={record} disabled={!micTrack || !serverConsent} aria-label="Record again">
               <Mic />
             </Button>
             <Button size="sm" variant="ghost" onClick={() => onSample(null)} aria-label="Delete my voice">
@@ -91,9 +113,12 @@ export function OwnVoiceRecorder({ lang, sample, remember, micTrack, onSample, o
             Record yourself reading a few sentences ({SAMPLE_SECONDS} s), and others hear your voice from your first
             sentence. Without a recording, they hear the female voice.
           </p>
-          <Button size="sm" variant="secondary" onClick={record} disabled={!micTrack}>
+          <Button size="sm" variant="secondary" onClick={record} disabled={!micTrack || !serverConsent}>
             <Mic /> Record my voice
           </Button>
+          {!serverConsent && (
+            <p className="text-xs text-muted-foreground">Allow the server above first to use your own voice.</p>
+          )}
           {tooShort && (
             <p className="text-xs text-muted-foreground">
               That was under {MIN_SAMPLE_SECONDS} s; please read a little longer.
@@ -109,7 +134,7 @@ export function OwnVoiceRecorder({ lang, sample, remember, micTrack, onSample, o
       </div>
       {remember && (
         <p className="text-xs text-muted-foreground">
-          Kept only in this browser on this device, never on the server, until you delete it.
+          This copy stays in this browser on this device until you delete it.
         </p>
       )}
     </div>

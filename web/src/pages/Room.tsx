@@ -187,7 +187,8 @@ function translationWarnings(status: TranslatorStatus, selfLang: string, languag
 }
 
 // Where this member's own voice stands, while they have chosen it.
-function ownVoiceLabel(status: TranslatorStatus, recorded: boolean): string {
+function ownVoiceLabel(status: TranslatorStatus, recorded: boolean, serverConsent: boolean): string {
+  if (!serverConsent) return 'Allow your voice on the server in the settings (female voice for now)'
   if (status.ownVoice === 'ready') return 'Your own voice is in use'
   if (status.ownVoice === 'rejected') return 'Your recording was too short: record again (female voice for now)'
   if (!recorded) return 'Record your voice in the settings (female voice for now)'
@@ -310,6 +311,14 @@ export default function Room() {
   const [rememberOwn, setRememberOwn] = usePersistentState('conference:own-voice-remember', false, (stored) =>
     stored === true,
   )
+  // The speaker's consent that this meeting's server makes their voice;
+  // without it the recording never leaves this browser.
+  const [serverVoiceConsent, setServerVoiceConsent] = usePersistentState(
+    'conference:own-voice-server',
+    false,
+    (stored) => stored === true,
+  )
+  const serverVoiceConsentRef = useLatest(serverVoiceConsent)
   const rememberOwnRef = useLatest(rememberOwn)
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
@@ -698,8 +707,8 @@ export default function Room() {
   }, [rememberOwn])
 
   useEffect(() => {
-    translatorRef.current?.setOwnVoiceSample(ownSample)
-  }, [ownSample])
+    translatorRef.current?.setOwnVoiceSample(serverVoiceConsent ? ownSample : null)
+  }, [ownSample, serverVoiceConsent])
 
   const changeOwnSample = useCallback(
     (sample: OwnVoiceSample | null) => {
@@ -794,11 +803,11 @@ export default function Room() {
         onStatus: setTranslatorStatus,
       })
       translatorRef.current = translator
-      translator.setOwnVoiceSample(ownSampleRef.current)
+      translator.setOwnVoiceSample(serverVoiceConsentRef.current ? ownSampleRef.current : null)
       translator.attach(client)
       translator.start(localMicTrack(localStreamRef.current))
     },
-    [langPrefsRef, ownSampleRef, handleRoomCaption, stopTranslation],
+    [langPrefsRef, ownSampleRef, serverVoiceConsentRef, handleRoomCaption, stopTranslation],
   )
 
   // The host's switch for the whole room; each browser's bridge follows
@@ -1398,6 +1407,8 @@ export default function Room() {
               micTrack: localMicTrack(localStream),
               onSample: changeOwnSample,
               onRemember: changeRememberOwn,
+              serverConsent: serverVoiceConsent,
+              onServerConsent: setServerVoiceConsent,
             }}
           />
         }
@@ -1409,6 +1420,8 @@ export default function Room() {
       changeLangPrefs,
       ownSample,
       rememberOwn,
+      serverVoiceConsent,
+      setServerVoiceConsent,
       localStream,
       changeOwnSample,
       changeRememberOwn,
@@ -1761,6 +1774,8 @@ export default function Room() {
                   micTrack: localMicTrack(localStream),
                   onSample: changeOwnSample,
                   onRemember: changeRememberOwn,
+                  serverConsent: serverVoiceConsent,
+                  onServerConsent: setServerVoiceConsent,
                 }}
               />
             ) : undefined
@@ -1836,7 +1851,7 @@ export default function Room() {
             <Hint label="Others hear your translations in a voice cloned from your recording." side="bottom">
               <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
                 <AudioLines className="size-3 shrink-0" />
-                <span className="truncate">{ownVoiceLabel(translatorStatus, ownSample !== null)}</span>
+                <span className="truncate">{ownVoiceLabel(translatorStatus, ownSample !== null, serverVoiceConsent)}</span>
               </span>
             </Hint>
           )}

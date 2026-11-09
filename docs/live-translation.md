@@ -117,6 +117,15 @@ they are heard in the female voice and asked to record. The voice is
 never cloned from what they say in the call, only from a recording they
 made on purpose; it is the speaker's own action that turns it on.
 
+**The speaker allows the server.** Making the voice happens on this
+meeting's server, so the recording leaves the end-to-end encryption the
+call itself has. Recording therefore stays off until the speaker switches
+on **Make my voice on this meeting's server**, which says exactly that.
+The choice is the speaker's, per device; the host can't make it for
+them, and listeners are never asked to record. Switching it off later
+stops the recording being sent (and makes the service forget it), and
+the speaker is heard in the female voice again.
+
 **Where the voice is, and when it's gone.** It comes only from the
 speaker's own microphone.
 

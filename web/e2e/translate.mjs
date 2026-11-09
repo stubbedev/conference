@@ -127,6 +127,11 @@ async function main() {
     const section = `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Language and subtitles')`
     await waitFor(browser, `Boolean(${section})`, Boolean, 15_000)
     await evalJs(browser, `${section}?.click()`)
+    // Without the speaker's consent to the server making their voice, recording stays off.
+    const recordState = `[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Record my voice'))?.disabled`
+    const blocked = await waitFor(browser, recordState, (disabled) => disabled === true, 15_000)
+    check('server consent', blocked.ok, `recording was possible without consenting to the server: ${JSON.stringify(blocked.value)}`)
+    await evalJs(browser, `document.getElementById('server-voice')?.click()`)
     const recordButton = `[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Record my voice') && !b.disabled)`
     await waitFor(browser, `Boolean(${recordButton})`, Boolean, 15_000)
     await evalJs(browser, `${recordButton}?.click()`)
