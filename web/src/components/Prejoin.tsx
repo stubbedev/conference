@@ -16,6 +16,8 @@ interface PrejoinProps {
   stream: MediaStream | null
   mediaError: string
   mediaBusy: boolean
+  micAvailable: boolean
+  camAvailable: boolean
   name: string
   mic: boolean
   cam: boolean
@@ -42,6 +44,8 @@ export function Prejoin({
   stream,
   mediaError,
   mediaBusy,
+  micAvailable,
+  camAvailable,
   name,
   mic,
   cam,
@@ -56,9 +60,7 @@ export function Prejoin({
   translation,
 }: PrejoinProps) {
   const [ratio, setRatio] = useState(FALLBACK_ASPECT_RATIO)
-  const hasMic = Boolean(stream?.getAudioTracks().length)
-  const hasCam = Boolean(stream?.getVideoTracks().length)
-  const joinLabel = mediaBusy || hasMic || hasCam ? 'Join call' : 'Join without camera and microphone'
+  const joinLabel = micAvailable || camAvailable ? 'Join call' : 'Join without camera and microphone'
 
   return (
     <div className="relative grid h-dvh place-items-center overflow-y-auto bg-muted/40 p-4">
@@ -101,14 +103,14 @@ export function Prejoin({
                 <DeviceToggle
                   kind="mic"
                   on={mic}
-                  available={hasMic || mediaBusy}
+                  available={micAvailable}
                   onToggle={onToggleMic}
                   className="size-12 rounded-full [&_svg]:size-5"
                 />
                 <DeviceToggle
                   kind="cam"
                   on={cam}
-                  available={hasCam || mediaBusy}
+                  available={camAvailable}
                   onToggle={onToggleCam}
                   className="size-12 rounded-full [&_svg]:size-5"
                 />

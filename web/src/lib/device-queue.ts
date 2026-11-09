@@ -8,7 +8,13 @@ export interface ToggleOutcome {
 export class DeviceQueue<K extends string> {
   private readonly serial = new Serial()
   private readonly counts = new Map<K, number>()
+  private readonly listeners = new Set<() => void>()
   private closed = false
+
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
 
   run(kinds: readonly K[], task: () => Promise<void>): Promise<void> {
     if (this.closed) return Promise.resolve()
@@ -25,8 +31,12 @@ export class DeviceQueue<K extends string> {
     return (this.counts.get(kind) ?? 0) > 0
   }
 
+  available(kind: K, hasTrack: boolean): boolean {
+    return hasTrack || this.pending(kind)
+  }
+
   toggle(kind: K, on: boolean, hasTrack: boolean): ToggleOutcome {
-    if (hasTrack || this.pending(kind)) return { on: !on, open: false }
+    if (this.available(kind, hasTrack)) return { on: !on, open: false }
     return { on: true, open: true }
   }
 
@@ -37,6 +47,8 @@ export class DeviceQueue<K extends string> {
   }
 
   private count(kinds: readonly K[], delta: 1 | -1): void {
+    if (kinds.length === 0) return
     for (const kind of kinds) this.counts.set(kind, (this.counts.get(kind) ?? 0) + delta)
+    for (const listener of this.listeners) listener()
   }
 }

@@ -205,6 +205,8 @@ export default function Room() {
           stream={media.localStream}
           mediaError={media.mediaError}
           mediaBusy={media.mediaBusy}
+          micAvailable={media.micAvailable}
+          camAvailable={media.camAvailable}
           name={displayName}
           mic={controls.mic}
           cam={controls.cam}
@@ -286,8 +288,8 @@ export default function Room() {
         onTogglePeople={panel.togglePeople}
         mic={controls.mic}
         cam={controls.cam}
-        micAvailable={media.hasMic}
-        camAvailable={media.hasCam}
+        micAvailable={media.micAvailable}
+        camAvailable={media.camAvailable}
         sharing={controls.sharing}
         blur={devicePrefs.blur}
         canBlur={canBlur}

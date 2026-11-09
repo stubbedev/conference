@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
 import { toast } from 'sonner'
 
 import { useDevicePrefs } from '@/hooks/device-prefs'
@@ -58,6 +58,15 @@ function tracksOf(stream: MediaStream | null, kind: TrackKind): MediaStreamTrack
   return kind === 'mic' ? stream.getAudioTracks() : stream.getVideoTracks()
 }
 
+function isOpen(stream: MediaStream | null, kind: TrackKind): boolean {
+  return tracksOf(stream, kind).length > 0
+}
+
+function useDeviceAvailable(queue: DeviceQueue<TrackKind>, stream: MediaStream | null, kind: TrackKind): boolean {
+  const open = isOpen(stream, kind)
+  return useSyncExternalStore(queue.subscribe, () => queue.available(kind, open))
+}
+
 function migrateAvPrefs(stored: AvPrefs): AvPrefs {
   return {
     mic: typeof stored.mic === 'boolean' ? stored.mic : true,
@@ -77,6 +86,8 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
   const [mediaError, setMediaError] = useState('')
   const [mediaBusy, setMediaBusy] = useState(false)
   const [queue] = useState(() => new DeviceQueue<TrackKind>())
+  const micAvailable = useDeviceAvailable(queue, localStream, 'mic')
+  const camAvailable = useDeviceAvailable(queue, localStream, 'cam')
   const acquiresRef = useRef(0)
 
   const localStreamRef = useRef<MediaStream | null>(null)
@@ -339,7 +350,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
   const switchDeviceNow = useCallback(
     async (kind: TrackKind, deviceId: string, resolution: CameraResolution | undefined, opts: SwitchOptions) => {
       const mode = opts.mode ?? 'switch'
-      if (mode !== 'switch' && tracksOf(localStreamRef.current, kind).length > 0) return
+      if (mode !== 'switch' && isOpen(localStreamRef.current, kind)) return
       if (mode === 'enable' && !controlsRef.current[kind]) return
       const failed = (error: unknown) => {
         const message = trackFailure(kind, error)
@@ -484,8 +495,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
 
   const toggleTrack = useCallback(
     (kind: TrackKind) => {
-      const hasTrack = tracksOf(localStreamRef.current, kind).length > 0
-      const { on, open } = queue.toggle(kind, controlsRef.current[kind], hasTrack)
+      const { on, open } = queue.toggle(kind, controlsRef.current[kind], isOpen(localStreamRef.current, kind))
       setTrackOn(kind, on)
       if (open) void switchDevice(kind, prefsRef.current[kind], undefined, { mode: 'enable' })
     },
@@ -542,8 +552,9 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     localStreamRef,
     mediaError,
     mediaBusy,
-    hasMic: Boolean(localStream?.getAudioTracks().length),
-    hasCam: Boolean(localStream?.getVideoTracks().length),
+    hasMic: isOpen(localStream, 'mic'),
+    micAvailable,
+    camAvailable,
     acquireMedia,
     switchDevice,
     turnOff,

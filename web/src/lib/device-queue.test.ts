@@ -129,6 +129,54 @@ test('turning a device back off before its queued opening has started opens noth
   assert.equal(media.live.has('cam'), false)
 })
 
+test('a device is available exactly when a click on it would only flip mute', async () => {
+  const queue = new DeviceQueue<Kind>()
+  const busy = deferred()
+  const opening = queue.run(['cam'], () => busy.promise)
+
+  for (const kind of ['mic', 'cam'] as const) {
+    for (const hasTrack of [false, true]) {
+      assert.equal(queue.available(kind, hasTrack), !queue.toggle(kind, false, hasTrack).open)
+    }
+  }
+  assert.equal(queue.available('mic', false), false)
+  assert.equal(queue.available('mic', true), true)
+  assert.equal(queue.available('cam', false), true)
+
+  busy.resolve()
+  await opening
+  assert.equal(queue.available('cam', false), false)
+})
+
+test('subscribers can see a device become pending and stop being pending, also when opening it fails', async () => {
+  const queue = new DeviceQueue<Kind>()
+  const seen: boolean[] = []
+  const unsubscribe = queue.subscribe(() => seen.push(queue.pending('cam')))
+  const busy = deferred()
+
+  const opened = queue.run(['cam'], () => busy.promise)
+  busy.resolve()
+  await opened
+  await assert.rejects(queue.run(['cam'], () => Promise.reject(new Error('opening the camera: NotAllowedError'))))
+  assert.deepEqual(seen, [true, false, true, false])
+
+  unsubscribe()
+  await queue.run(['cam'], async () => {})
+  assert.equal(seen.length, 4)
+})
+
+test('work that claims no device does not notify subscribers', async () => {
+  const queue = new DeviceQueue<Kind>()
+  let notified = 0
+  queue.subscribe(() => {
+    notified += 1
+  })
+
+  await queue.run([], async () => {})
+
+  assert.equal(notified, 0)
+})
+
 test('operations never overlap, so a second capture cannot replace the first one half-way', async () => {
   const queue = new DeviceQueue<Kind>()
   let running = 0
