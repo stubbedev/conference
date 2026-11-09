@@ -624,6 +624,60 @@ async function remoteScreenFps(viewer) {
 
 const SHARE_SETTLE_MS = 20000
 
+const shareReceiveCounters = `
+(async () => {
+  const tile = (${tileByLabel.toString()})('screen')
+  const trackId = tile?.querySelector('video')?.srcObject?.getVideoTracks()[0]?.id
+  for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
+    for (const r of (await pc.getStats()).values()) {
+      if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
+        return { decoded: r.framesDecoded || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
+      }
+    }
+  }
+  return null
+})()
+`
+
+const shareSendCounters = `
+(async () => {
+  const pc = window.__pcs.find((pc) => pc.signalingState !== 'closed' && pc.getTransceivers().some((t) => t.sender.track?.contentHint === 'detail'))
+  if (!pc) return null
+  const mid = pc.getTransceivers().find((t) => t.sender.track?.contentHint === 'detail').mid
+  const layers = {}
+  for (const r of (await pc.getStats()).values()) {
+    if (r.type === 'outbound-rtp' && r.mid === mid && r.rid) layers[r.rid] = { encoded: r.framesEncoded || 0, keyframes: r.keyFramesEncoded || 0, plis: r.pliCount || 0, firs: r.firCount || 0, limit: r.qualityLimitationReason, bytes: r.bytesSent || 0 }
+  }
+  return layers
+})()
+`
+
+const TIMELINE_SECONDS = 20
+
+async function shareTimeline(publisher, viewer) {
+  const samples = []
+  let previous = null
+  for (let second = 0; second <= TIMELINE_SECONDS; second++) {
+    const [recv, send] = await Promise.all([evalJs(viewer, shareReceiveCounters), evalJs(publisher, shareSendCounters)])
+    const sample = { recv, send }
+    if (previous?.recv && recv) {
+      const h = send?.h ?? {}
+      const ph = previous.send?.h ?? {}
+      const l = send?.l ?? {}
+      const pl = previous.send?.l ?? {}
+      console.log(
+        `  t=${second}s viewer: ${recv.decoded - previous.recv.decoded} fps, +${recv.keyframes - previous.recv.keyframes} key, +${recv.freezes - previous.recv.freezes} freeze (${recv.frozenMs - previous.recv.frozenMs} ms), +${recv.plis - previous.recv.plis} pli, +${recv.lost - previous.recv.lost} lost, ${recv.width}px` +
+          ` | presenter h: ${(h.encoded ?? 0) - (ph.encoded ?? 0)} fps, +${(h.keyframes ?? 0) - (ph.keyframes ?? 0)} key, +${(h.plis ?? 0) - (ph.plis ?? 0)} pli, ${(((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8 / 1e6).toFixed(1)} Mbps, ${h.limit}` +
+          ` l: +${(l.keyframes ?? 0) - (pl.keyframes ?? 0)} key, +${(l.plis ?? 0) - (pl.plis ?? 0)} pli`,
+      )
+    }
+    samples.push(sample)
+    previous = sample
+    await sleep(1000)
+  }
+  return samples
+}
+
 const screenReceived = `
 (async () => {
   const tile = (${tileByLabel.toString()})('screen')
@@ -674,13 +728,14 @@ async function checkScreenShare(failures, publisher, viewer) {
 
   const pinned = await waitFor(viewer, remoteScreen, (v) => v?.width === SHARE_WIDTH, 20000)
   check(failures, 'screen share', pinned.ok, `the pinned share arrives ${pinned.value?.width}px wide, not ${SHARE_WIDTH}px`)
+  console.log('screen share timeline while pinned:')
+  await shareTimeline(publisher, viewer)
   const fluid = await remoteScreenFps(viewer)
   console.log(`screen share pinned: ${fluid.width}px at ${fluid.fps.toFixed(1)} fps`)
   check(failures, 'screen share', fluid.fps >= FLUID_SHARE_MIN_FPS, `the pinned share plays at ${fluid.fps.toFixed(1)} fps, not the fluid encoding`)
 
   check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Pin to main view'), 'no "Pin to main view" button on the viewer\'s own tile')
-  await sleep(LAYER_PAUSE_MS)
-  const slow = await remoteScreenFps(viewer)
+  const slow = await settledScreenFps(viewer, publisher, (measured) => measured.fps > 0 && measured.fps <= SLOW_SHARE_MAX_FPS)
   console.log(`screen share in the strip: ${slow.width}px at ${slow.fps.toFixed(1)} fps`)
   check(failures, 'screen share', slow.width === SHARE_WIDTH, `the share in the strip arrives ${slow.width}px wide, not at full size`)
   check(failures, 'screen share', slow.fps > 0 && slow.fps <= SLOW_SHARE_MAX_FPS, `the share in the strip plays at ${slow.fps.toFixed(1)} fps, not the slow encoding`)
