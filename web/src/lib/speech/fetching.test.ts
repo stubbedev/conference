@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { errorVerdict, FETCH_ATTEMPTS, resilientFetch, retryDelay, statusVerdict, type FetchDeps, type Retrying } from './fetching.ts'
+import { errorVerdict, FETCH_ATTEMPTS, headFirst, headFirstFetch, resilientFetch, retryDelay, statusVerdict, type FetchDeps, type Retrying } from './fetching.ts'
 
 const URL_ = '/speech/model.onnx'
 const BYTES = Uint8Array.from({ length: 10 }, (_, i) => i)
 
 interface Call {
   url: string
+  method: string
   range: string | null
   ifRange: string | null
 }
@@ -36,7 +37,7 @@ function harness(answers: Answer[]): { deps: FetchDeps; calls: Call[]; retries: 
   const deps: FetchDeps = {
     fetch: async (url, init) => {
       const headers = new Headers(init.headers)
-      calls.push({ url, range: headers.get('Range'), ifRange: headers.get('If-Range') })
+      calls.push({ url, method: init.method ?? 'GET', range: headers.get('Range'), ifRange: headers.get('If-Range') })
       const answer = answers.shift()
       if (!answer) throw new Error(`no answer left for call ${calls.length}`)
       if (answer instanceof Error) throw answer
@@ -123,7 +124,7 @@ test('a download that breaks off resumes where it stopped, asking for the same v
   const response = await resilientFetch(URL_, {}, deps)
 
   assert.deepEqual(await bytesOf(response), [...BYTES])
-  assert.deepEqual(calls[1], { url: URL_, range: 'bytes=4-', ifRange: '"v1"' })
+  assert.deepEqual(calls[1], { url: URL_, method: 'GET', range: 'bytes=4-', ifRange: '"v1"' })
   assert.equal(retries.length, 1)
 })
 
@@ -180,4 +181,71 @@ test('a response without a validator is not resumed, since another version could
 
   await assert.rejects(response.arrayBuffer(), /broke off after 2 bytes: network error, and it cannot be resumed/)
   assert.equal(calls.length, 1)
+})
+
+test('only a plain whole-file GET is asked for with a HEAD first', () => {
+  assert.equal(headFirst({}), true)
+  assert.equal(headFirst({ method: 'get', headers: new Headers() }), true)
+  assert.equal(headFirst({ method: 'HEAD' }), false)
+  assert.equal(headFirst({ method: 'POST' }), false)
+  assert.equal(headFirst({ headers: { Range: 'bytes=0-0' } }), false)
+  assert.equal(headFirst({ headers: new Headers({ range: 'bytes=4-' }) }), false)
+})
+
+test('a size probe that never reads the body sends only a HEAD and still learns the size', async () => {
+  const { deps, calls } = harness([new Response(null, { status: 200, headers: { 'Content-Length': '10', ETag: '"v1"' } })])
+
+  const response = await headFirstFetch(URL_, {}, deps)
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('Content-Length'), '10')
+  assert.deepEqual(calls.map((call) => call.method), ['HEAD'])
+})
+
+test('reading the body downloads it with a GET after the HEAD', async () => {
+  const { deps, calls } = harness([
+    new Response(null, { status: 200, headers: { 'Content-Length': '10', ETag: '"v1"' } }),
+    new Response(BYTES, { status: 200, headers: { 'Content-Length': '10', ETag: '"v1"' } }),
+  ])
+
+  const response = await headFirstFetch(URL_, {}, deps)
+
+  assert.deepEqual(await bytesOf(response), [...BYTES])
+  assert.deepEqual(calls.map((call) => call.method), ['HEAD', 'GET'])
+})
+
+test('a file the HEAD finds missing is handed back without a GET', async () => {
+  const { deps, calls } = harness([new Response(null, { status: 404 })])
+
+  const response = await headFirstFetch(URL_, {}, deps)
+
+  assert.equal(response.status, 404)
+  assert.deepEqual(calls.map((call) => call.method), ['HEAD'])
+})
+
+test('a file that changed between its HEAD and its download is refused', async () => {
+  const { deps } = harness([
+    new Response(null, { status: 200, headers: { 'Content-Length': '10', ETag: '"v1"' } }),
+    new Response(BYTES, { status: 200, headers: { ETag: '"v2"' } }),
+  ])
+
+  const response = await headFirstFetch(URL_, {}, deps)
+
+  await assert.rejects(response.arrayBuffer(), /changed on the server between its HEAD and its download/)
+})
+
+test('a download whose GET fails after the HEAD names the file and the status', async () => {
+  const { deps } = harness([new Response(null, { status: 200 }), new Response('', { status: 403, statusText: 'Forbidden' })])
+
+  const response = await headFirstFetch(URL_, {}, deps)
+
+  await assert.rejects(response.arrayBuffer(), /fetching \/speech\/model\.onnx after its HEAD answered failed: 403 Forbidden/)
+})
+
+test('a ranged request goes out as it is, without a HEAD', async () => {
+  const { deps, calls } = harness([new Response(BYTES.subarray(0, 1), { status: 206, headers: { 'Content-Range': 'bytes 0-0/10' } })])
+
+  await headFirstFetch(URL_, { headers: { Range: 'bytes=0-0' } }, deps)
+
+  assert.deepEqual(calls, [{ url: URL_, method: 'GET', range: 'bytes=0-0', ifRange: null }])
 })

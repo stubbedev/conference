@@ -1,4 +1,4 @@
-import { browserFetchDeps, resilientFetch } from './fetching'
+import { browserFetchDeps, headFirstFetch, resilientFetch } from './fetching'
 import { notify } from './serve'
 
 interface ProgressInfo {
@@ -22,4 +22,8 @@ export function reportLoading(info: ProgressInfo): void {
 
 export function fetchRetrying(url: string, init: RequestInit = {}): Promise<Response> {
   return resilientFetch(url, init, deps)
+}
+
+export function fetchHeadFirst(url: string, init: RequestInit = {}): Promise<Response> {
+  return headFirstFetch(url, init, deps)
 }

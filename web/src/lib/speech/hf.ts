@@ -1,6 +1,6 @@
 import { env } from '@huggingface/transformers'
 
-import { fetchRetrying } from './loading'
+import { fetchHeadFirst } from './loading'
 import { message } from './runtime'
 import { configureOnnx, type Runtime } from './wasm'
 
@@ -13,7 +13,7 @@ let configured = false
 async function fetchModelFile(input: string | URL, init?: RequestInit): Promise<Response> {
   const url = String(input)
   try {
-    const response = await fetchRetrying(url, init)
+    const response = await fetchHeadFirst(url, init)
     if (!response.ok && response.status !== NOT_FOUND) {
       await response.body?.cancel()
       throw new Error(`fetching ${url} failed: ${response.status} ${response.statusText}`)

@@ -6,6 +6,8 @@ const FIRST_DELAY_MS = 1000
 
 const MAX_DELAY_MS = 16_000
 
+const OK = 200
+
 const TRANSIENT_STATUSES = new Set([408, 425, 429])
 
 const NETWORK_ERRORS = new Set(['NetworkError', 'TimeoutError'])
@@ -57,6 +59,43 @@ export function browserFetchDeps(onRetry: (retrying: Retrying) => void): FetchDe
 
 export function resilientFetch(url: string, init: RequestInit, deps: FetchDeps): Promise<Response> {
   return new Download(url, init, deps).start()
+}
+
+export function headFirst(init: RequestInit): boolean {
+  return (init.method ?? 'GET').toUpperCase() === 'GET' && !new Headers(init.headers).has('Range')
+}
+
+export async function headFirstFetch(url: string, init: RequestInit, deps: FetchDeps): Promise<Response> {
+  if (!headFirst(init)) return resilientFetch(url, init, deps)
+
+  const head = await resilientFetch(url, { ...init, method: 'HEAD' }, deps)
+  if (head.status !== OK) return head
+
+  const validator = head.headers.get('ETag') ?? head.headers.get('Last-Modified')
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  const body = new ReadableStream<Uint8Array>({
+    pull: async (controller) => {
+      reader ??= await openBody(url, init, deps, validator)
+      const chunk = await reader.read()
+      if (chunk.done) controller.close()
+      else controller.enqueue(chunk.value)
+    },
+    cancel: (reason) => reader?.cancel(reason),
+  }, { highWaterMark: 0 })
+  return new Response(body, { status: head.status, statusText: head.statusText, headers: head.headers })
+}
+
+async function openBody(url: string, init: RequestInit, deps: FetchDeps, validator: string | null): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+  const response = await resilientFetch(url, init, deps)
+  if (response.status !== OK || !response.body) {
+    await response.body?.cancel()
+    throw new Error(`fetching ${url} after its HEAD answered failed: ${response.status} ${response.statusText}`)
+  }
+  if (validator !== null && !carries(response, validator)) {
+    await response.body.cancel()
+    throw new Error(`${url} changed on the server between its HEAD and its download`)
+  }
+  return response.body.getReader()
 }
 
 export async function readBody(response: Response, onProgress: (loaded: number, total: number) => void): Promise<Uint8Array<ArrayBuffer>> {
