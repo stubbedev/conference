@@ -173,10 +173,17 @@ export const hook = (relayTransport) => `
     }
   };
   window.__sockets = [];
+  window.__welcomes = 0;
   const OrigWS = window.WebSocket;
   window.WebSocket = function (...a) {
     const ws = new OrigWS(...a);
     window.__sockets.push(ws);
+    ws.addEventListener('message', (ev) => {
+      if (typeof ev.data !== 'string') return;
+      try {
+        if (JSON.parse(ev.data).type === 'welcome') window.__welcomes++;
+      } catch {}
+    });
     return ws;
   };
   window.WebSocket.prototype = OrigWS.prototype;
@@ -247,8 +254,20 @@ const previewLive = `[...document.querySelectorAll('video')].some((v) => v.srcOb
 
 export const clickJoin = (label) => `(() => { const b = ${joinButton(label)}; if (b) { b.click(); return true } return false })()`
 
+const JOINED_TIMEOUT_MS = 20_000
+
+const joinState = `({ welcomes: window.__welcomes ?? 0, joinScreen: Boolean(${joinButton('Join call')}) })`
+
+async function waitJoined(browser) {
+  const joined = await waitFor(browser, joinState, (state) => state.welcomes > 0 && !state.joinScreen, JOINED_TIMEOUT_MS)
+  if (joined.ok) return
+  const stage = joined.value?.welcomes > 0 ? 'the server welcomed the member but the join screen stayed' : "the server's welcome never arrived"
+  throw new Error(`joining did not finish within ${JOINED_TIMEOUT_MS} ms after "Join call" was clicked: ${stage}`)
+}
+
 // beforeJoin, if given, runs on the join screen before "Join call" is clicked.
-// Joining waits for the camera preview, so the call starts with media.
+// Joining waits for the camera preview, so the call starts with media, and
+// returns once the server has welcomed the member into the call.
 export async function joinRoom(browser, url, relayTransport = null, beforeJoin = null) {
   const s = browser.sessionId
   await browser.cdp.send('Page.enable', {}, s)
@@ -269,7 +288,10 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
       },
       s,
     )
-    if (r.result.value === true) return
+    if (r.result.value === true) {
+      await waitJoined(browser)
+      return
+    }
     await sleep(250)
   }
   throw new Error('Join call button never became clickable')
