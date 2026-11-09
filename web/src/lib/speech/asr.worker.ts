@@ -1,13 +1,14 @@
 import { pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
-import { configureTransformers } from './hf'
+import { configureTransformers, loadingModel } from './hf'
 import { expectLoading, reportLoading } from './loading'
 import { asrExport, exportKey, type AsrChoice, type AsrTier, type Export } from './models'
 import { toFloat32 } from './pcm'
 import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
 import { serve } from './serve'
 import { RATE } from './vad'
+import { parseRuntime } from './wasm'
 import { webgpuAvailable, webgpuHalves } from './webgpu'
 
 const TOKENS_PER_SECOND = 10
@@ -74,11 +75,13 @@ async function load(lang: string): Promise<Loaded> {
   const wanted = exportFor(lang)
   expectLoading(exportKey(wanted))
   try {
-    const transcriber = await pipeline('automatic-speech-recognition', wanted.model, {
-      device,
-      dtype: wanted.dtype as DataType,
-      progress_callback: reportLoading,
-    })
+    const transcriber = await loadingModel(() =>
+      pipeline('automatic-speech-recognition', wanted.model, {
+        device,
+        dtype: wanted.dtype as DataType,
+        progress_callback: reportLoading,
+      }),
+    )
     return { key: `${wanted.model}:${wanted.dtype}`, transcriber: transcriber as unknown as Transcriber }
   } catch (err) {
     if (device === 'webgpu' && fallbackToWasm(err)) {
@@ -96,7 +99,7 @@ serve(async (request) => {
 
   switch (request.type) {
     case 'init': {
-      configureTransformers(String(request.base))
+      configureTransformers(String(request.base), parseRuntime(request.runtime))
       choice = request.asr as AsrChoice
       await chooseDevice(choice)
       await transcriberFor(lang)

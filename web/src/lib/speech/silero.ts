@@ -18,7 +18,7 @@
 // the wild differ: the current one carries a single recurrent state, older
 // ones an LSTM's h and c, and either may declare a sample rate.
 
-import { configureOrt, ort } from './ort'
+import { ort } from './ort'
 import { toFloat32, withContext } from './pcm'
 import { fixed, known, size } from './tensor'
 import { FRAME, RATE } from './vad'
@@ -59,13 +59,11 @@ export class Silero {
     this.context = new Float32Array(Math.max((this.faces.get('input')?.[1] ?? CONTEXT + FRAME) - FRAME, 0))
   }
 
-  /** Loads the model at url, which the server serves itself. */
-  static async load(url: string): Promise<Silero> {
-    configureOrt('detector')
-
+  /** Starts model, fetched from url, which the server serves itself. */
+  static async load(url: string, model: Uint8Array): Promise<Silero> {
     let session: ort.InferenceSession
     try {
-      session = await ort.InferenceSession.create(url, { executionProviders: ['wasm'] })
+      session = await ort.InferenceSession.create(model, { executionProviders: ['wasm'] })
     } catch (err) {
       throw new Error(`the voice detection model ${url} could not start`, { cause: err })
     }

@@ -1,7 +1,10 @@
+import { fetchRetrying } from './loading'
+import { configureOrt } from './ort'
 import { notify, serve } from './serve'
 import { Silero } from './silero'
 import { modelURL } from './urls'
 import { FRAME, Segmentation, type Segment } from './vad'
+import { parseRuntime } from './wasm'
 
 const MODEL = 'silero_vad.onnx'
 
@@ -13,6 +16,12 @@ function loaded(): Silero {
   return silero
 }
 
+async function loadSilero(url: string): Promise<Silero> {
+  const response = await fetchRetrying(url)
+  if (!response.ok) throw new Error(`the voice detection model ${url} could not be fetched: ${response.status} ${response.statusText}`)
+  return Silero.load(url, new Uint8Array(await response.arrayBuffer()))
+}
+
 function report(segments: readonly (Segment | null)[]): void {
   for (const segment of segments) {
     if (segment) notify('segment', { kind: segment.kind, audio: segment.audio }, [segment.audio.buffer])
@@ -22,7 +31,8 @@ function report(segments: readonly (Segment | null)[]): void {
 serve(async (request) => {
   switch (request.type) {
     case 'init': {
-      silero ??= await Silero.load(modelURL(String(request.base), MODEL))
+      configureOrt('detector', parseRuntime(request.runtime))
+      silero ??= await loadSilero(modelURL(String(request.base), MODEL))
       return
     }
 

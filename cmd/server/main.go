@@ -5,8 +5,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -36,6 +39,8 @@ const (
 	// The blur model and its runtime never change under the same path, and
 	// they are megabytes: a browser that has them should keep them.
 	visionDir     = "vision/"
+	etagBytes     = 16
+	revalidate    = "no-cache"
 	apiPrefix     = "/api/"
 	signalingPath = "/ws"
 	speechPath    = "/ws/speech"
@@ -292,12 +297,14 @@ func reapOnce(database *store.Store, hub *sfu.Hub, ttl time.Duration) {
 
 // webUI serves the embedded frontend: the app page for client-side
 // routes, with preview URLs on the request's origin, and the built
-// files with immutable caching for hashed assets.
+// files with immutable caching for hashed assets and content tags for
+// the rest.
 type webUI struct {
 	cfg   *config.Config
 	dist  fs.FS
 	files http.Handler
 	pages map[string][]byte
+	etags map[string]string
 }
 
 func newWebUI(cfg *config.Config, dist fs.FS) (*webUI, error) {
@@ -315,7 +322,62 @@ func newWebUI(cfg *config.Config, dist fs.FS) (*webUI, error) {
 		}
 	}
 
-	return &webUI{cfg: cfg, dist: dist, files: http.FileServerFS(dist), pages: pages}, nil
+	etags, err := contentETags(dist)
+	if err != nil {
+		return nil, err
+	}
+
+	return &webUI{cfg: cfg, dist: dist, files: http.FileServerFS(dist), pages: pages, etags: etags}, nil
+}
+
+func fingerprinted(path string) bool {
+	return strings.HasPrefix(path, assetsDir) || strings.HasPrefix(path, visionDir)
+}
+
+func contentETags(dist fs.FS) (map[string]string, error) {
+	etags := map[string]string{}
+
+	err := fs.WalkDir(dist, ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if entry.IsDir() || fingerprinted(path) {
+			return nil
+		}
+
+		etag, err := contentETag(dist, path)
+		if err != nil {
+			return err
+		}
+
+		etags[path] = etag
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tag the built files: %w", err)
+	}
+
+	return etags, nil
+}
+
+func contentETag(dist fs.FS, path string) (string, error) {
+	file, err := dist.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", path, err)
+	}
+
+	defer func() { _ = file.Close() }()
+
+	digest := sha256.New()
+
+	_, err = io.Copy(digest, file)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+
+	return `"` + hex.EncodeToString(digest.Sum(nil)[:etagBytes]) + `"`, nil
 }
 
 func (ui *webUI) routes(mux *http.ServeMux) {
@@ -325,7 +387,7 @@ func (ui *webUI) routes(mux *http.ServeMux) {
 }
 
 func (ui *webUI) serveApp(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", revalidate)
 	http.ServeContent(w, r, indexPage, time.Time{}, bytes.NewReader(ui.pages[ui.cfg.OriginFor(r.Host)]))
 }
 
@@ -346,8 +408,11 @@ func (ui *webUI) serveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(path, assetsDir) || strings.HasPrefix(path, visionDir) {
+	if fingerprinted(path) {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", revalidate)
+		w.Header().Set("ETag", ui.etags[path])
 	}
 
 	ui.files.ServeHTTP(w, r)

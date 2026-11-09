@@ -1,4 +1,4 @@
-import type { Loading, TranslationLevel, VoiceChoice } from '../translate/types.ts'
+import type { PartLoading, TranslationLevel, VoiceChoice } from '../translate/types.ts'
 import type { Segment } from './vad.ts'
 
 export interface Voiced {
@@ -46,7 +46,7 @@ export interface Prepared {
 
 export interface Engines {
   readonly requiresWebGpu: boolean
-  prepare(lang: string, onLoading: (loading: Loading | null) => void): Promise<Prepared>
+  prepare(lang: string, onLoading: (parts: readonly PartLoading[] | null) => void): Promise<Prepared>
   segmenter(events: SegmenterEvents): Promise<Segmenter>
   asr(lang: string): Promise<AsrEngine>
   stepDown(lang: string): Promise<string | null>

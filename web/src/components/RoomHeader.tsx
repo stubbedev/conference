@@ -1,6 +1,7 @@
 import { Circle, Languages, Link2, TriangleAlert } from 'lucide-react'
 
 import { Hint } from '@/components/Hint'
+import { SpeechLoading } from '@/components/SpeechLoading'
 import type { TranslationConfig } from '@/lib/api'
 import type { MemberInfo } from '@/lib/sfu'
 import { languageName, type Language } from '@/lib/translate/languages'
@@ -21,12 +22,8 @@ function translationLabel(config: TranslationConfig): string {
 
 function translationWarnings(status: TranslatorStatus, selfLang: string, languages: readonly Language[]): string[] {
   const warnings: string[] = []
-  if ((status.state === 'failed' || status.state === 'live') && status.detail) {
+  if ((status.state === 'failed' || status.state === 'live') && status.detail && status.loading?.state !== 'failed') {
     warnings.push(status.detail)
-  }
-  if (status.loading) {
-    const mb = (bytes: number) => Math.round(bytes / 1e6)
-    warnings.push(`Loading the speech models: ${mb(status.loading.loaded)} of ${mb(status.loading.total)} MB`)
   }
   if (status.sameLanguage) {
     warnings.push(`Everyone here speaks ${languageName(languages, selfLang)}: nothing to translate`)
@@ -113,6 +110,7 @@ export function RoomHeader({
             </button>
           </Hint>
         )}
+        {translatorStatus?.loading && <SpeechLoading loading={translatorStatus.loading} />}
         {translatorStatus && translationWarnings(translatorStatus, lang, translation.languages).map((warning) => (
           <span
             key={warning}

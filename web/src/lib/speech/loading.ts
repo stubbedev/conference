@@ -1,3 +1,4 @@
+import { browserFetchDeps, resilientFetch } from './fetching'
 import { notify } from './serve'
 
 interface ProgressInfo {
@@ -8,6 +9,8 @@ interface ProgressInfo {
   total?: number
 }
 
+const deps = browserFetchDeps((retrying) => notify('retrying', { ...retrying }))
+
 export function expectLoading(key: string): void {
   notify('expect', { key })
 }
@@ -15,4 +18,8 @@ export function expectLoading(key: string): void {
 export function reportLoading(info: ProgressInfo): void {
   if (info.status !== 'progress' || !info.file || info.total === undefined || info.loaded === undefined) return
   notify('loading', { file: `${info.name ?? ''}/${info.file}`, loaded: info.loaded, total: info.total })
+}
+
+export function fetchRetrying(url: string, init: RequestInit = {}): Promise<Response> {
+  return resilientFetch(url, init, deps)
 }

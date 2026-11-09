@@ -63,10 +63,26 @@ export interface LangAnnouncement extends LangPrefs {
   translates: TranslationLevel
 }
 
-export interface Loading {
+export const LOADING_PARTS = ['runtime', 'transcription', 'translation', 'voice'] as const
+
+export type LoadingPart = (typeof LOADING_PARTS)[number]
+
+export interface LoadingRetry {
+  attempt: number
+  attempts: number
+  reason: string
+}
+
+export interface PartLoading {
+  part: LoadingPart
   loaded: number
   total: number
+  retry: LoadingRetry | null
 }
+
+export type Loading =
+  | { state: 'loading'; parts: readonly PartLoading[] }
+  | { state: 'failed'; reason: string; retry: () => void }
 
 /** What a member sees about its own bridge, for spotting problems. */
 export interface TranslatorStatus {

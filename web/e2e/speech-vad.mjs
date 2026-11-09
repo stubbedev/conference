@@ -34,7 +34,7 @@ const probe = workerProbe(
   { vad: builtWorker('vad') },
   `
   const { ask } = workers.vad
-  await ask({ type: 'init', base: '/vad/' })
+  await ask({ type: 'init', base: '/vad/', runtime: await fetchRuntime() })
   const samples = await readWav('/fixtures/english.wav')
   let speech = 0
   for (let i = 0; i < 400 * ${FRAME}; i += ${FRAME}) {

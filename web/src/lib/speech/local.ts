@@ -176,12 +176,15 @@ export class LocalTranslator implements Translator {
   }
 
   private async prepare(): Promise<void> {
+    this.canTranscribe = true
     if (this.engines.requiresWebGpu && !(await webgpuAvailable())) {
       this.canTranscribe = false
       this.setStatus({ state: 'failed', detail: NO_WEBGPU })
     }
 
-    const prepared = await this.engines.prepare(this.selfPrefs.lang, (loading) => this.setStatus({ loading }))
+    const prepared = await this.engines.prepare(this.selfPrefs.lang, (parts) =>
+      this.setStatus({ loading: parts ? { state: 'loading', parts } : null }),
+    )
     if (this.stopped) return
 
     this.canTranscribe &&= prepared.transcribes
@@ -190,12 +193,13 @@ export class LocalTranslator implements Translator {
 
     if (prepared.problems.length > 0) {
       const detail = prepared.problems.join(' ')
-      this.setStatus(this.canTranscribe ? { detail } : { state: 'failed', detail })
+      const loading = { state: 'failed', reason: detail, retry: () => this.retryPreparing() } as const
+      this.setStatus(this.canTranscribe ? { detail, loading } : { state: 'failed', detail, loading })
       console.warn('live translation:', detail)
     }
 
     if (!this.canTranscribe) return
-    this.segmenter = await this.engines.segmenter({
+    this.segmenter ??= await this.engines.segmenter({
       onSegment: (segment) => this.segmented(segment),
       onError: (error) => this.fail(error),
     })
@@ -203,6 +207,12 @@ export class LocalTranslator implements Translator {
     for (const prefs of this.client?.memberLangPrefs.values() ?? []) {
       if (prefs.lang !== this.selfPrefs.lang) void this.engines.mt(prefs.lang, this.selfPrefs.lang).catch(() => {})
     }
+  }
+
+  private retryPreparing(): void {
+    if (this.stopped) return
+    this.setStatus({ state: 'live', detail: '', loading: null })
+    void this.prepare().catch((error: unknown) => this.fail(error))
   }
 
   private setSameLanguage(): void {

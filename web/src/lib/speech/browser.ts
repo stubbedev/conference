@@ -1,12 +1,23 @@
 import type { AsrEngine, Engines, MtEngine, Prepared, Segmenter, SegmenterEvents, Sentence, TtsEngine } from '@/lib/speech/engines'
 import { BuiltinTranslators } from '@/lib/speech/builtin'
-import { asrExport, bytesFor, renderPrompt, type SpeechModels } from '@/lib/speech/models'
+import { browserFetchDeps } from '@/lib/speech/fetching'
+import { asrExport, bytesFor, exportKey, renderPrompt, voiceKey, type SpeechModels } from '@/lib/speech/models'
+import { Progress } from '@/lib/speech/progress'
 import { Serial } from '@/lib/speech/serial'
+import { fetchRuntime, type Runtime } from '@/lib/speech/wasm'
 import { WorkerRpc, type WorkerEvent, type WorkerReply } from '@/lib/speech/worker'
+import { Workers } from '@/lib/speech/workers'
 import { languageName, type Language } from '@/lib/translate/languages'
-import type { Loading, TranslationLevel, VoiceChoice } from '@/lib/translate/types'
+import type { LoadingPart, PartLoading, TranslationLevel, VoiceChoice } from '@/lib/translate/types'
 
 type Purpose = 'vad' | 'asr' | 'mt' | 'tts'
+
+const PARTS: Record<Purpose, LoadingPart> = {
+  vad: 'transcription',
+  asr: 'transcription',
+  mt: 'translation',
+  tts: 'voice',
+}
 
 const VAD_BASE = '/vad/'
 const MODEL_CACHE = 'transformers-cache'
@@ -84,14 +95,12 @@ class BrowserEngines implements Engines {
 
   private readonly models: SpeechModels
   private readonly languages: readonly Language[]
-  private readonly channels = new Map<Purpose, Channel>()
-  private readonly loading = new Map<Purpose, Promise<WorkerReply>>()
-  private readonly files = new Map<string, Loading>()
-  private readonly expected = new Set<string>()
+  private readonly workers = new Workers<Purpose, Channel>((purpose) => new Channel(start(purpose), (event) => this.event(purpose, event)))
+  private readonly progress = new Progress()
+  private runtime: Promise<Runtime> | null = null
   private loadingReport: ReturnType<typeof setTimeout> | null = null
-  private preparing = false
   private readonly builtin = new BuiltinTranslators()
-  private onLoading: (loading: Loading | null) => void = () => {}
+  private onLoading: (parts: readonly PartLoading[] | null) => void = () => {}
   private segments: SegmenterEvents | null = null
 
   constructor(models: SpeechModels, languages: readonly Language[]) {
@@ -100,39 +109,30 @@ class BrowserEngines implements Engines {
     this.requiresWebGpu = !models.asr.fallback
   }
 
-  async prepare(lang: string, onLoading: (loading: Loading | null) => void): Promise<Prepared> {
+  async prepare(lang: string, onLoading: (parts: readonly PartLoading[] | null) => void): Promise<Prepared> {
     this.onLoading = onLoading
-    this.preparing = true
-    const room = await this.storageProblem(lang).catch((err: unknown) => {
-      this.preparing = false
-      throw err
-    })
-    if (room) {
-      this.preparing = false
-      return { transcribes: false, translates: 'none', problems: [room] }
-    }
+    const room = await this.storageProblem(lang)
+    if (room) return { transcribes: false, translates: 'none', problems: [room] }
 
     const [vad, asr, mt, tts] = await Promise.all([
-      settle(this.load('vad', { base: VAD_BASE })),
-      settle(this.load('asr', { base: this.models.base, asr: this.models.asr, lang })),
-      settle(this.load('mt', { base: this.models.base, mt: this.models.mt })),
-      settle(this.models.voices[lang] ? this.load('tts', { base: this.models.base, voices: this.models.voices, lang }) : Promise.resolve(null)),
+      settle(this.loadVad()),
+      settle(this.loadAsr(lang)),
+      settle(this.loadMt()),
+      settle(this.models.voices[lang] ? this.loadTts(lang) : Promise.resolve(null)),
     ])
-    this.preparing = false
-    this.publishLoading()
 
-    const problems = [vad, asr, mt, tts].flatMap((result) => (result.status === 'rejected' ? [reason(result.reason)] : []))
+    const problems = new Set([vad, asr, mt, tts].flatMap((result) => (result.status === 'rejected' ? [reason(result.reason)] : [])))
     return {
       transcribes: vad.status === 'fulfilled' && asr.status === 'fulfilled',
       translates: mt.status === 'fulfilled' ? (mt.value as LevelReply).level : 'none',
-      problems,
+      problems: [...problems],
     }
   }
 
   async segmenter(events: SegmenterEvents): Promise<Segmenter> {
     this.segments = events
-    await this.load('vad', { base: VAD_BASE })
-    const channel = this.channel('vad')
+    await this.loadVad()
+    const channel = this.workers.port('vad')
 
     return {
       push: (pcm) => channel.post({ type: 'audio', pcm }, [pcm.buffer]),
@@ -140,16 +140,16 @@ class BrowserEngines implements Engines {
       reset: () => channel.post({ type: 'reset' }),
       close: () => {
         this.segments = null
-        this.closeChannel('vad')
+        this.workers.close('vad')
       },
     }
   }
 
   async asr(lang: string): Promise<AsrEngine> {
-    await this.load('asr', { base: this.models.base, asr: this.models.asr, lang })
+    await this.loadAsr(lang)
     return {
       transcribe: async (audio, transcribeIn) => {
-        const reply = await this.channel('asr').call<TextReply>({ type: 'transcribe', audio, lang: transcribeIn }, [audio.buffer])
+        const reply = await this.workers.port('asr').call<TextReply>({ type: 'transcribe', audio, lang: transcribeIn }, [audio.buffer])
         return reply.text
       },
     }
@@ -157,7 +157,7 @@ class BrowserEngines implements Engines {
 
   async stepDown(lang: string): Promise<string | null> {
     if (!asrExport(this.models.asr, 'fallback', lang)) return null
-    const reply = await this.channel('asr').call<SteppedReply>({ type: 'step-down', lang })
+    const reply = await this.workers.port('asr').call<SteppedReply>({ type: 'step-down', lang })
     return reply.model
   }
 
@@ -165,21 +165,21 @@ class BrowserEngines implements Engines {
     const builtin = this.models.mt.builtin ? await this.builtin.for(source, target) : null
     if (builtin) return { translate: (sentence) => builtin.translate(sentence.text) }
 
-    await this.load('mt', { base: this.models.base, mt: this.models.mt })
+    await this.loadMt()
     return { translate: (sentence) => this.translate(sentence) }
   }
 
   async tts(lang: string): Promise<TtsEngine> {
-    await this.load('tts', { base: this.models.base, voices: this.models.voices, lang })
+    await this.loadTts(lang)
     return { speak: (text, speakIn, voice) => this.speak(text, speakIn, voice) }
   }
 
   close(): void {
-    for (const purpose of [...this.channels.keys()]) this.closeChannel(purpose)
+    this.workers.closeAll()
   }
 
   private async translate(sentence: Sentence): Promise<string> {
-    const reply = await this.channel('mt').call<TextReply>({
+    const reply = await this.workers.port('mt').call<TextReply>({
       type: 'translate',
       text: sentence.text,
       source: sentence.source,
@@ -197,7 +197,7 @@ class BrowserEngines implements Engines {
   }
 
   private async speak(text: string, lang: string, voice: VoiceChoice) {
-    const reply = await this.channel('tts').call<SpokenReply>({ type: 'speak', text, lang, voice })
+    const reply = await this.workers.port('tts').call<SpokenReply>({ type: 'speak', text, lang, voice })
     return { pcm: reply.pcm, rate: reply.rate }
   }
 
@@ -222,15 +222,18 @@ class BrowserEngines implements Engines {
     return Boolean(await cache.match(new URL(`${this.models.base}${asr.model}/config.json`, location.href).href))
   }
 
-  private event(event: WorkerEvent): void {
+  private event(purpose: Purpose, event: WorkerEvent): void {
     switch (event.event) {
       case 'expect':
-        this.expected.add(String(event.key))
+        this.progress.expect(PARTS[purpose], this.models.sizes[String(event.key)] ?? 0)
         this.reportLoading()
         return
       case 'loading':
-        this.files.set(String(event.file), { loaded: Number(event.loaded), total: Number(event.total) })
+        this.progress.file(PARTS[purpose], String(event.file), Number(event.loaded), Number(event.total))
         this.reportLoading()
+        return
+      case 'retrying':
+        this.retrying(PARTS[purpose], event)
         return
       case 'segment':
         this.segments?.onSegment({ kind: event.kind === 'partial' ? 'partial' : 'utterance', audio: event.audio as Int16Array })
@@ -241,6 +244,11 @@ class BrowserEngines implements Engines {
     }
   }
 
+  private retrying(part: LoadingPart, retry: Record<string, unknown>): void {
+    this.progress.retrying(part, { attempt: Number(retry.attempt), attempts: Number(retry.attempts), reason: String(retry.reason) })
+    this.reportLoading()
+  }
+
   private reportLoading(): void {
     this.loadingReport ??= setTimeout(() => {
       this.loadingReport = null
@@ -249,63 +257,74 @@ class BrowserEngines implements Engines {
   }
 
   private publishLoading(): void {
-    const downloading = [...this.files.values()].some((file) => file.loaded < file.total)
-    if (this.preparing || downloading) {
-      this.onLoading(this.total())
+    const parts = this.progress.snapshot()
+    if (parts) {
+      this.onLoading(parts)
       return
     }
 
     if (this.loadingReport) clearTimeout(this.loadingReport)
     this.loadingReport = null
-    this.files.clear()
-    this.expected.clear()
+    this.progress.clear()
     this.onLoading(null)
   }
 
-  private total(): Loading {
-    let loaded = 0
-    let started = 0
-    for (const file of this.files.values()) {
-      loaded += file.loaded
-      started += file.total
+  private fetchRuntime(): Promise<Runtime> {
+    this.runtime ??= this.tracked('runtime', () =>
+      fetchRuntime(
+        browserFetchDeps((retry) => this.retrying('runtime', { ...retry })),
+        (file, loaded, total) => {
+          this.progress.file('runtime', file, loaded, total)
+          this.reportLoading()
+        },
+      ),
+    ).catch((err: unknown) => {
+      this.runtime = null
+      throw err
+    })
+    return this.runtime
+  }
+
+  private async tracked<T>(part: LoadingPart, work: () => Promise<T>): Promise<T> {
+    this.progress.begin(part)
+    this.reportLoading()
+    let succeeded = false
+    try {
+      const done = await work()
+      succeeded = true
+      return done
+    } finally {
+      this.progress.end(part, succeeded)
+      this.publishLoading()
     }
-    let expected = 0
-    for (const key of this.expected) expected += this.models.sizes[key] ?? 0
-    return { loaded, total: Math.max(started, expected) }
   }
 
-  private channel(purpose: Purpose): Channel {
-    const known = this.channels.get(purpose)
-    if (known) return known
-
-    const channel = new Channel(start(purpose), (event) => this.event(event))
-    this.channels.set(purpose, channel)
-    return channel
+  private loadVad(): Promise<WorkerReply> {
+    return this.load('vad', { base: VAD_BASE }, null)
   }
 
-  private load(purpose: Purpose, settings: Record<string, unknown>): Promise<WorkerReply> {
-    const known = this.loading.get(purpose)
-    if (known) return known
+  private loadAsr(lang: string): Promise<WorkerReply> {
+    const primary = asrExport(this.models.asr, 'primary', lang)
+    return this.load('asr', { base: this.models.base, asr: this.models.asr, lang }, primary ? exportKey(primary) : null)
+  }
 
-    const pending = this.channel(purpose)
-      .call<WorkerReply>({ ...settings, type: 'init' })
-      .catch((err: unknown) => {
-        this.loading.delete(purpose)
-        throw err
+  private loadMt(): Promise<WorkerReply> {
+    return this.load('mt', { base: this.models.base, mt: this.models.mt }, exportKey(this.models.mt))
+  }
+
+  private loadTts(lang: string): Promise<WorkerReply> {
+    const voice = this.models.voices[lang]
+    return this.load('tts', { base: this.models.base, voices: this.models.voices, lang }, voice === undefined ? null : voiceKey(voice))
+  }
+
+  private load(purpose: Purpose, settings: Record<string, unknown>, expected: string | null): Promise<WorkerReply> {
+    return this.workers.load(purpose, (channel) => {
+      if (expected !== null) this.progress.expect(PARTS[purpose], this.models.sizes[expected] ?? 0)
+      return this.tracked(PARTS[purpose], async () => {
+        const runtime = await this.fetchRuntime()
+        return channel.call<WorkerReply>({ ...settings, runtime, type: 'init' })
       })
-
-    this.loading.set(purpose, pending)
-    return pending
-  }
-
-  private closeChannel(purpose: Purpose): void {
-    this.loading.delete(purpose)
-
-    const channel = this.channels.get(purpose)
-    if (!channel) return
-
-    this.channels.delete(purpose)
-    channel.close()
+    })
   }
 }
 

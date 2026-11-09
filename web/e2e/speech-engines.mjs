@@ -32,7 +32,8 @@ const ttsProbe = workerProbe(
   { tts: builtWorker('tts') },
   `
   const { ask } = workers.tts
-  await ask({ type: 'init', base: '/speech/', voices: ${JSON.stringify(chosen.tts)} })
+  const runtime = await fetchRuntime()
+  await ask({ type: 'init', base: '/speech/', runtime, voices: ${JSON.stringify(chosen.tts)} })
   const spoken = {}
   for (const lang of ${JSON.stringify(Object.keys(chosen.tts))}) {
     const times = []
@@ -69,7 +70,7 @@ const asrProbe = workerProbe(
   const heard = {}
   for (const [lang, url] of Object.entries(${JSON.stringify(RECORDINGS)})) {
     const audio = (await readWav(url)).slice(0, ${SECONDS} * 16000)
-    if (Object.keys(heard).length === 0) await ask({ type: 'init', base: '/speech/', asr: ${JSON.stringify(chosen.asr)}, lang })
+    if (Object.keys(heard).length === 0) await ask({ type: 'init', base: '/speech/', runtime: await fetchRuntime(), asr: ${JSON.stringify(chosen.asr)}, lang })
     const started = performance.now()
     const { text } = await ask({ type: 'transcribe', audio, lang })
     heard[lang] = { text, ms: Math.round(performance.now() - started) }
@@ -91,7 +92,7 @@ const mtProbe = workerProbe(
   { mt: builtWorker('mt') },
   `
   const { ask } = workers.mt
-  const { level } = await ask({ type: 'init', base: '/speech/', mt: ${JSON.stringify(chosen.mt)} })
+  const { level } = await ask({ type: 'init', base: '/speech/', runtime: await fetchRuntime(), mt: ${JSON.stringify(chosen.mt)} })
   const translated = {}
   for (const pair of ${JSON.stringify([...pairs.slice(0, 1), multilingual])}) {
     const [source, target] = pair.split('-')

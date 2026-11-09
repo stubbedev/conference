@@ -15,8 +15,9 @@
 // the same reason: a sentence should be spoken as soon as it is
 // translated.
 
-import { reportLoading } from './loading'
-import { configureOrt, ort } from './ort'
+import { readBody } from './fetching'
+import { fetchRetrying, reportLoading } from './loading'
+import { ort } from './ort'
 import { phonemeIds, phonemes, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
 import { fallbackToWasm, message } from './runtime'
 import { modelURL } from './urls'
@@ -112,7 +113,7 @@ export class Piper {
 /** Reads a voice's JSON and starts its session, keeping neither until it has both. */
 async function load(base: string, name: string): Promise<Voice> {
   const settings = modelURL(base, 'piper', `${name}.onnx.json`)
-  const response = await fetch(settings)
+  const response = await fetchRetrying(settings)
   if (!response.ok) throw new Error(`the voice ${name} has no settings: ${response.status} ${response.statusText}`)
 
   const config = readVoiceConfig(await response.json())
@@ -125,24 +126,10 @@ const VOICE_CACHE = 'conference-voices'
 async function download(url: string): Promise<Uint8Array> {
   const cache = await caches.open(VOICE_CACHE)
   const cached = await cache.match(url)
-  const response = cached ?? (await fetch(url))
-  if (!response.ok || !response.body) throw new Error(`the voice model ${url} could not be fetched: ${response.status} ${response.statusText}`)
+  const response = cached ?? (await fetchRetrying(url))
+  if (!response.ok) throw new Error(`the voice model ${url} could not be fetched: ${response.status} ${response.statusText}`)
 
-  const total = Number(response.headers.get('Content-Length') ?? 0)
-  const chunks: Uint8Array[] = []
-  let loaded = 0
-  for await (const chunk of response.body) {
-    chunks.push(chunk)
-    loaded += chunk.length
-    reportLoading({ status: 'progress', name: 'piper', file: url, loaded, total: Math.max(total, loaded) })
-  }
-
-  const bytes = new Uint8Array(loaded)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.length
-  }
+  const bytes = await readBody(response, (loaded, total) => reportLoading({ status: 'progress', name: 'piper', file: url, loaded, total }))
 
   if (!cached) {
     await cache.put(url, new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } })).catch((err: unknown) => {
@@ -154,8 +141,6 @@ async function download(url: string): Promise<Uint8Array> {
 
 /** Starts url on the GPU, or on the CPU when this browser's GPU refuses it. */
 async function session(url: string, model: Uint8Array): Promise<ort.InferenceSession> {
-  configureOrt('model')
-
   let refusal: string
   try {
     return await ort.InferenceSession.create(model, { executionProviders: ['webgpu', 'wasm'] })
@@ -232,7 +217,7 @@ async function loadPhonemizer(): Promise<PhonemizerAssets> {
 }
 
 async function fetchOk(url: string): Promise<Response> {
-  const response = await fetch(url)
+  const response = await fetchRetrying(url)
   if (!response.ok) throw new Error(`the phonemizer has no ${url}: ${response.status} ${response.statusText}`)
   return response
 }

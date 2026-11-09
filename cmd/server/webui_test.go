@@ -53,6 +53,7 @@ func newTestUI(t *testing.T) http.Handler {
 		"logo.svg":                         file("<svg/>"),
 		"vision/selfie_segmenter.tflite":   file("model"),
 		"vision/wasm/vision_wasm_internal": file("runtime"),
+		"ort/ort-wasm.wasm":                file("0123456789"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +86,7 @@ func TestWebUIServesAppOnClientRoutes(t *testing.T) {
 			t.Fatalf("%s: status %d body %s", target, rec.Code, rec.Body.String())
 		}
 
-		if rec.Header().Get("Cache-Control") != "no-cache" {
+		if rec.Header().Get("Cache-Control") != revalidate {
 			t.Fatalf("%s: Cache-Control %q", target, rec.Header().Get("Cache-Control"))
 		}
 	}
@@ -119,8 +120,8 @@ func TestWebUIServesFiles(t *testing.T) {
 	}
 
 	rec = get(handler, http.MethodHead, "/logo.svg", "meet.example.com")
-	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "" {
-		t.Fatalf("logo: status %d Cache-Control %q", rec.Code, rec.Header().Get("Cache-Control"))
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != revalidate || rec.Header().Get("ETag") == "" {
+		t.Fatalf("logo: status %d Cache-Control %q ETag %q", rec.Code, rec.Header().Get("Cache-Control"), rec.Header().Get("ETag"))
 	}
 
 	for _, target := range []string{"/vision/selfie_segmenter.tflite", "/vision/wasm/vision_wasm_internal"} {
@@ -128,6 +129,44 @@ func TestWebUIServesFiles(t *testing.T) {
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
 			t.Fatalf("%s: status %d Cache-Control %q", target, rec.Code, rec.Header().Get("Cache-Control"))
 		}
+	}
+}
+
+func TestWebUIRevalidatesUnversionedFiles(t *testing.T) {
+	t.Parallel()
+
+	handler := newTestUI(t)
+
+	first := get(handler, http.MethodGet, "/ort/ort-wasm.wasm", "meet.example.com")
+
+	etag := first.Header().Get("ETag")
+	if first.Code != http.StatusOK || first.Header().Get("Cache-Control") != revalidate || !strings.HasPrefix(etag, `"`) {
+		t.Fatalf("runtime: status %d Cache-Control %q ETag %q", first.Code, first.Header().Get("Cache-Control"), etag)
+	}
+
+	if logo := get(handler, http.MethodGet, "/logo.svg", "meet.example.com").Header().Get("ETag"); logo == etag {
+		t.Fatalf("two files share the ETag %q", etag)
+	}
+
+	again := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ort/ort-wasm.wasm", nil)
+	again.Header.Set("If-None-Match", etag)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, again)
+
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("revalidation: status %d, want %d", rec.Code, http.StatusNotModified)
+	}
+
+	resume := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ort/ort-wasm.wasm", nil)
+	resume.Header.Set("Range", "bytes=4-")
+	resume.Header.Set("If-Range", etag)
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, resume)
+
+	if rec.Code != http.StatusPartialContent || rec.Body.String() != "456789" {
+		t.Fatalf("resume: status %d body %q", rec.Code, rec.Body.String())
 	}
 }
 

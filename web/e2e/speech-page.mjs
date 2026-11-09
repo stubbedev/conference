@@ -80,6 +80,11 @@ const readWav = `async (url) => {
   throw new Error('no data chunk in ' + url)
 }`
 
+const RUNTIME_PATHS = {
+  mjs: '/ort/ort-wasm-simd-threaded.asyncify.mjs',
+  wasm: '/ort/ort-wasm-simd-threaded.asyncify.wasm',
+}
+
 export function workerProbe(workers, body) {
   return `(async () => {
   const started = []
@@ -109,6 +114,18 @@ export function workerProbe(workers, body) {
   }
   const workers = Object.fromEntries(Object.entries(${JSON.stringify(workers)}).map(([key, url]) => [key, open(url)]))
   const readWav = ${readWav}
+  const fetchRuntime = async () => {
+    const fetched = async (url) => {
+      const response = await fetch(url)
+      if (!response.ok) throw new Error('the speech runtime ' + url + ' could not be fetched: ' + response.status)
+      return response
+    }
+    const [wasm, factory] = await Promise.all([
+      fetched('${RUNTIME_PATHS.wasm}').then((response) => response.arrayBuffer()),
+      fetched('${RUNTIME_PATHS.mjs}').then((response) => response.text()),
+    ])
+    return { wasm, factory }
+  }
   try {
     return await (async () => { ${body} })()
   } catch (err) {

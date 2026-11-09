@@ -5,8 +5,10 @@
 
 import { expectLoading } from './loading'
 import { voiceKey } from './models'
+import { configureOrt } from './ort'
 import { Piper } from './piper'
 import { serve } from './serve'
+import { parseRuntime } from './wasm'
 import { isVoiceChoice, type VoiceChoice } from '../translate/types'
 
 let piper: Piper | null = null
@@ -15,6 +17,7 @@ let voices: Record<string, string> = {}
 serve(async (request) => {
   switch (request.type) {
     case 'init': {
+      configureOrt('model', parseRuntime(request.runtime))
       voices = (request.voices ?? {}) as Record<string, string>
       piper ??= new Piper(String(request.base))
       const voice = voices[String(request.lang)]
