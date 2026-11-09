@@ -1,5 +1,5 @@
 // ServerTranslator: one member's bridge to the speech service on the
-// conference server. While a host has live translation switched on,
+// conference server. While a member has live translation switched on,
 // every member's browser runs one, because only that browser holds its
 // speaker's microphone before encryption:
 //

@@ -87,7 +87,7 @@ export function RoomHeader({
         {translationBy && (
           <Hint
             label={[
-              `Started by ${translationBy === selfId ? 'you' : (members.find((m) => m.id === translationBy)?.name ?? 'a host')}.`,
+              `Started by ${translationBy === selfId ? 'you' : (members.find((m) => m.id === translationBy)?.name ?? 'someone')}.`,
               translatorStatus?.detail ?? '',
             ].join(' ')}
             side="bottom"

@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Live translation: while a host has it switched on, every member's
+// Live translation: while any member has it switched on, every member's
 // browser streams its own speech to the server's speech service and feeds
 // its own subtitles and translated voice back into the room. As with
 // recording, the SFU never sees plaintext — language choices and
@@ -73,17 +73,11 @@ func (m *Member) handleCaption(msg Message) {
 }
 
 // handleTranslate switches the room's live translation on or off. It is
-// a room mode, host-gated, replayed to late joiners and kept when the
-// host who started it leaves. While it is on every member, joiners
-// included, gets its own token for the speech service, when the server
-// runs one.
+// a room mode any member may switch, replayed to late joiners and kept
+// when the member who started it leaves. While it is on every member,
+// joiners included, gets its own token for the speech service, when the
+// server runs one.
 func (m *Member) handleTranslate(msg Message) {
-	if !m.priv {
-		m.fail("not-allowed", ErrForbidden)
-
-		return
-	}
-
 	if msg.On && !m.room.cfg.Translate {
 		m.fail("translate-unavailable", ErrTranslationUnavailable)
 

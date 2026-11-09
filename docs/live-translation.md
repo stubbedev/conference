@@ -3,7 +3,7 @@
 Live translation runs on one of two runtimes. By default it runs inside
 the conference server, at `/ws/speech` on the server's own address and
 TLS: each speaking member's browser streams its own microphone there
-while a host has live translation switched on, and for every finished
+while live translation is switched on, and for every finished
 sentence it sends back subtitles in the speaker's language and every
 listener's language, and a translated voice per listener language.
 

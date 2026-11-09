@@ -196,8 +196,8 @@ whether they want subtitles, a translated voice, and which voice others
 hear them in. They hear and read everyone else in that same
 language. A host can also set a participant's language from the
 participants list, e.g. for a guest who joined in the wrong one; the guest
-is told and can change it back. A host then turns on **Live translation**
-in the call:
+is told and can change it back. Anyone in the call then turns on
+**Live translation**:
 
 - Subtitles appear on each speaker's tile in your language.
 - Someone speaking another language is heard through their translated
@@ -207,7 +207,7 @@ in the call:
 - Everyone sees **Live translation** while it runs, with the state of
   their own translation and anything that keeps their speech from being
   translated, such as nobody else in the call speaking another language.
-- It keeps running when the host who started it leaves, until a host
+- It keeps running when whoever started it leaves, until someone
   switches it off.
 
 The conference server runs the speech service itself, at `/ws/speech`
@@ -259,7 +259,7 @@ an external service".
   send to a server.
 - Joining is authorized separately from the media key, through a session
   issued by `/auth`.
-- **Live translation**, while a host has it on, sends each speaker's
+- **Live translation**, while it is on, sends each speaker's
   audio from their own browser to the conference server's speech
   service, which hears it in the clear, and on to the engines: so the
   server, unlike for the call itself, can hear what is translated. Run

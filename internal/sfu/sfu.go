@@ -167,7 +167,7 @@ type Message struct {
 	Recorder string `json:"recorder,omitempty"`
 
 	// live translation: TranslatingBy in welcome replays the room mode (the
-	// host who switched it on; empty when off); translate-token carries
+	// member who switched it on; empty when off); translate-token carries
 	// this member's token for the speech stream
 	TranslatingBy string `json:"translatingBy,omitempty"`
 	Token         string `json:"token,omitempty"`

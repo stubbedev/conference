@@ -135,9 +135,9 @@ func TestTranslationWithoutSpeechStreams(t *testing.T) {
 	expectNo(t, joiner, msgToken)
 }
 
-// TestTranslationMode checks the room mode: host-gated, announced to
-// everyone, a token for every member, replayed to joiners with a token
-// of their own, and a second switch-on changing nothing.
+// TestTranslationMode checks the room mode: open to every member,
+// announced to everyone, a token for every member, replayed to joiners
+// with a token of their own, and a second switch-on changing nothing.
 func TestTranslationMode(t *testing.T) {
 	t.Parallel()
 
@@ -147,30 +147,25 @@ func TestTranslationMode(t *testing.T) {
 	guest := newTestPeer(t, hub, engine, "guest", false)
 
 	guest.member.Handle(sfu.Message{Type: translate, On: true})
+	expectTranslating(t, guest, guest.member.ID, true)
+	expectTranslating(t, host, guest.member.ID, true)
+	expectToken(t, guest)
+	expectToken(t, host)
 
-	if msg := guest.next(t, "error"); msg.Code != codeNotAllowed {
-		t.Fatalf("guest expected not-allowed, got %q", msg.Code)
+	joiner := newTestPeer(t, hub, engine, "joiner", false)
+	if msg := joiner.next(t, "welcome"); msg.TranslatingBy != guest.member.ID {
+		t.Fatalf("joiner expected translation started by %q, got %q", guest.member.ID, msg.TranslatingBy)
 	}
+
+	expectToken(t, joiner)
 
 	host.member.Handle(sfu.Message{Type: translate, On: true})
-	expectTranslating(t, host, host.member.ID, true)
-	expectTranslating(t, guest, host.member.ID, true)
-	expectToken(t, host)
-	expectToken(t, guest)
-
-	host2 := newTestPeer(t, hub, engine, "host2", true)
-	if msg := host2.next(t, "welcome"); msg.TranslatingBy != host.member.ID {
-		t.Fatalf("joiner expected translation started by %q, got %q", host.member.ID, msg.TranslatingBy)
-	}
-
-	expectToken(t, host2)
-
-	host2.member.Handle(sfu.Message{Type: translate, On: true})
 	expectNo(t, guest, msgTranslating)
 }
 
 // TestTranslationOutlivesItsStarter checks that translation keeps going
-// when the host who switched it on leaves, until a host switches it off.
+// when the member who switched it on leaves, until any member switches
+// it off.
 func TestTranslationOutlivesItsStarter(t *testing.T) {
 	t.Parallel()
 
@@ -178,7 +173,6 @@ func TestTranslationOutlivesItsStarter(t *testing.T) {
 
 	host := newTestPeer(t, hub, engine, "host", true)
 	guest := newTestPeer(t, hub, engine, "guest", false)
-	host2 := newTestPeer(t, hub, engine, "host2", true)
 
 	host.member.Handle(sfu.Message{Type: translate, On: true})
 	expectTranslating(t, guest, host.member.ID, true)
@@ -194,8 +188,8 @@ func TestTranslationOutlivesItsStarter(t *testing.T) {
 
 	expectToken(t, late)
 
-	host2.member.Handle(sfu.Message{Type: translate, On: false})
-	expectTranslating(t, guest, host2.member.ID, false)
+	late.member.Handle(sfu.Message{Type: translate, On: false})
+	expectTranslating(t, guest, late.member.ID, false)
 
 	late.member.Handle(sfu.Message{Type: msgTokenAsk})
 	expectNo(t, late, msgToken)

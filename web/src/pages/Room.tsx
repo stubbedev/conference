@@ -156,14 +156,13 @@ export default function Room() {
         onVolumeChange={media.handleVolumeChange}
         onMicGainChange={media.handleMicGainChange}
         translation={
-          privileged && translationAvailable ? (
+          translationAvailable ? (
             <TranslationSettings config={translationConfig} prefs={langPrefs} onChange={changeLangPrefs} />
           ) : undefined
         }
       />
     ),
     [
-      privileged,
       translationAvailable,
       translationConfig,
       langPrefs,
@@ -303,7 +302,7 @@ export default function Room() {
         onCam={toggleCam}
         onShare={toggleScreen}
         onRecord={recording.toggleRecording}
-        canTranslate={privileged && translationAvailable}
+        canTranslate={translationAvailable}
         translating={translation.translationBy !== null}
         onTranslate={translation.toggleTranslation}
         onLeave={leave}

@@ -618,7 +618,7 @@ async function main() {
     await checkStillInRoom(failures, 'server restart', browsers)
 
     // No speech engines are configured for this server, so live
-    // translation is not offered at all: a host sees no button to press
+    // translation is not offered at all: nobody sees a button to press
     // and no setting that names the variables the operator has to set.
     const translationSurfaced = `(() => {
       const header = document.querySelector('header')
