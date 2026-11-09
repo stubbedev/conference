@@ -20,7 +20,7 @@ import {
   sharingLayers,
 } from './encodings.ts'
 
-const CEILING = 15_000_000
+const CEILING = 50_000_000
 
 const HD = cameraLayers({ width: 1280, height: 720 })
 const FULL_HD = cameraLayers({ width: 1920, height: 1080 })

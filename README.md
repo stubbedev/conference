@@ -107,7 +107,7 @@ All settings are environment variables.
 | `EXTERNAL_IPS`      | —               | Comma-separated public IPs to advertise when behind NAT                                   |
 | `TURN_PORT`         | `3478`          | UDP and TCP port of the built-in relay                                                    |
 | `TURN_TLS_HOST`     | —               | Hostname whose port 443 forwards to the relay over TLS                                    |
-| `MAX_PUBLISH_KBPS`  | `15000`         | Upload bandwidth cap per participant                                                      |
+| `MAX_PUBLISH_KBPS`  | `50000`         | Upload bandwidth cap per participant                                                      |
 | `MAX_ROOM_MEMBERS`  | `16`            | Default maximum people per room                                                           |
 | `TRUSTED_PROXIES`   | —               | Comma-separated IPs or CIDRs of reverse proxies whose `X-Forwarded-For` names the real client, so rate limits apply per visitor instead of per proxy |
 | `ALLOWED_ORIGINS`   | same origin     | Extra origins allowed to connect to the signaling WebSocket                               |
