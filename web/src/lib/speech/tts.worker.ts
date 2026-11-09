@@ -19,7 +19,7 @@ serve(async (request) => {
     case 'init': {
       configureOrt('model', parseRuntime(request.runtime))
       voices = (request.voices ?? {}) as Record<string, string>
-      piper ??= new Piper(String(request.base))
+      piper ??= new Piper(String(request.base), Boolean(request.gpu))
       const voice = voices[String(request.lang)]
       if (voice) {
         expectLoading(voiceKey(voice))

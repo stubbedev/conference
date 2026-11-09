@@ -16,7 +16,9 @@
 // export as well: the transcription fallback, or the transcription model
 // itself when there is none, and every encoder-decoder translation model,
 // which is also what a language model falls back to (m2m100 unless
-// --mt-fallback says otherwise) on a browser that cannot run it.
+// --mt-fallback says otherwise) on a browser that cannot run it. Every
+// model also comes with whichever exports of the GPU ladder its repository
+// has, so a browser whose GPU refuses one can try the next.
 //
 // Usage: node scripts/fetch-speech-models.mjs <target dir> [options]
 //   --languages=en,de,da or all, the server's own list
@@ -30,6 +32,8 @@
 import { createHash } from 'node:crypto'
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+
+import { CPU_DTYPE, GPU_LADDER } from '../src/lib/speech/runtime.ts'
 
 const HUB = 'https://huggingface.co'
 
@@ -65,7 +69,7 @@ const ONNX_STEMS = {
   llm: ['onnx/model'],
 }
 
-const DTYPE_SUFFIXES = {
+export const DTYPE_SUFFIXES = {
   fp32: '',
   fp16: '_fp16',
   q8: '_quantized',
@@ -79,8 +83,6 @@ const DTYPE_SUFFIXES = {
   q1: '_q1',
   q1f16: '_q1f16',
 }
-
-const CPU_DTYPE = 'q8'
 
 const MAX_BROWSER_FILE = 2 ** 31 - 1
 
@@ -226,6 +228,27 @@ async function modelExists(model) {
   return true
 }
 
+function exportNames(tree, model, kind, dtype, revision, treeURL) {
+  const names = []
+
+  for (const stem of ONNX_STEMS[kind]) {
+    const name = `${stem}${DTYPE_SUFFIXES[dtype]}.onnx`
+    if (!tree.has(name)) throw new MissingExport(`${model} has no ${name} at ${revision}, so it has no ${dtype} export; ${treeURL}`)
+
+    names.push(name)
+    if (tree.has(`${name}_data`)) names.push(`${name}_data`)
+  }
+
+  for (const name of names) {
+    const { size } = tree.get(name)
+    if (size > MAX_BROWSER_FILE) {
+      throw new MissingExport(`${model} has ${name} of ${(size / 1e6).toFixed(0)} MB at ${revision}, larger than a browser can load as one file; choose another export or model`)
+    }
+  }
+
+  return names
+}
+
 // modelFiles is what one transformers.js model needs in each of the
 // given exports, named as its repository holds it, and where each file
 // goes in the model directory.
@@ -238,23 +261,12 @@ async function modelFiles(dir, model, kind, dtypes) {
   if (!tree.has('config.json')) throw new Error(`${model} has no config.json at ${revision}: ${treeURL}`)
   const names = MODEL_FILES.filter((name) => tree.has(name))
 
-  for (const dtype of new Set(dtypes)) {
-    for (const stem of ONNX_STEMS[kind]) {
-      const name = `${stem}${DTYPE_SUFFIXES[dtype]}.onnx`
-      if (!tree.has(name)) {
-        throw new MissingExport(`${model} has no ${name} at ${revision}, so it has no ${dtype} export; ${treeURL}`)
-      }
-
-      names.push(name)
-
-      if (tree.has(`${name}_data`)) names.push(`${name}_data`)
-    }
-  }
-
-  for (const name of names) {
-    const { size } = tree.get(name)
-    if (size > MAX_BROWSER_FILE) {
-      throw new Error(`${model} has ${name} of ${(size / 1e6).toFixed(0)} MB at ${revision}, larger than a browser can load as one file; choose another export or model`)
+  const required = new Set(dtypes)
+  for (const dtype of new Set([...required, ...GPU_LADDER])) {
+    try {
+      names.push(...exportNames(tree, model, kind, dtype, revision, treeURL))
+    } catch (err) {
+      if (required.has(dtype) || !(err instanceof MissingExport)) throw err
     }
   }
 

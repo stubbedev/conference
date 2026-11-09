@@ -16,7 +16,7 @@
 // translated.
 
 import { readBody } from './fetching'
-import { fetchRetrying, reportLoading, reportWarning } from './loading'
+import { attemptingGpu, fetchRetrying, reportLoading, reportWarning } from './loading'
 import { ort } from './ort'
 import { phonemeIds, phonemes, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
 import { fallbackToWasm, message } from './runtime'
@@ -69,10 +69,12 @@ export interface Spoken {
 
 export class Piper {
   private readonly base: string
+  private readonly gpu: boolean
   private readonly voices = new Map<string, Promise<Voice>>()
 
-  constructor(base: string) {
+  constructor(base: string, gpu: boolean) {
     this.base = base
+    this.gpu = gpu
   }
 
   async prepare(voice: string): Promise<void> {
@@ -100,7 +102,7 @@ export class Piper {
     const known = this.voices.get(name)
     if (known) return known
 
-    const pending = load(this.base, name).catch((err: unknown) => {
+    const pending = load(this.base, name, this.gpu).catch((err: unknown) => {
       this.voices.delete(name)
       throw err
     })
@@ -111,14 +113,14 @@ export class Piper {
 }
 
 /** Reads a voice's JSON and starts its session, keeping neither until it has both. */
-async function load(base: string, name: string): Promise<Voice> {
+async function load(base: string, name: string, gpu: boolean): Promise<Voice> {
   const settings = modelURL(base, 'piper', `${name}.onnx.json`)
   const response = await fetchRetrying(settings)
   if (!response.ok) throw new Error(`the voice ${name} has no settings: ${response.status} ${response.statusText}`)
 
   const config = readVoiceConfig(await response.json())
   const url = modelURL(base, 'piper', `${name}.onnx`)
-  return { config, session: await session(url, await download(url)) }
+  return { config, session: await session(url, await download(url), gpu) }
 }
 
 const VOICE_CACHE = 'conference-voices'
@@ -139,11 +141,13 @@ async function download(url: string): Promise<Uint8Array> {
   return bytes
 }
 
-/** Starts url on the GPU, or on the CPU when this browser's GPU refuses it. */
-async function session(url: string, model: Uint8Array): Promise<ort.InferenceSession> {
+/** Starts url on the GPU, or on the CPU when this browser's GPU refuses it or is not to be used. */
+async function session(url: string, model: Uint8Array, gpu: boolean): Promise<ort.InferenceSession> {
+  if (!gpu) return ort.InferenceSession.create(model, { executionProviders: ['wasm'] })
+
   let refusal: string
   try {
-    return await ort.InferenceSession.create(model, { executionProviders: ['webgpu', 'wasm'] })
+    return await attemptingGpu(() => ort.InferenceSession.create(model, { executionProviders: ['webgpu', 'wasm'] }))
   } catch (err) {
     if (!fallbackToWasm(err)) throw new Error(`the voice model ${url} could not start: ${message(err)}`)
     refusal = message(err)

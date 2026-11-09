@@ -353,6 +353,26 @@ func TestBrowserRuntimeNeedsTheExportItRunsOnTheCPU(t *testing.T) {
 	}
 }
 
+func TestBrowserRuntimeReportsEveryExportOnDiskAndNoOther(t *testing.T) {
+	t.Parallel()
+
+	dir := modelDir(t, asrModel, danish, mtModel)
+	writeModel(t, dir, mtModel, kindSeq2Seq, "fp32")
+
+	status := browserStatus(t, dir, browserChoices())
+	if !status.Available {
+		t.Fatalf("unavailable: %s", status.Reason)
+	}
+
+	if _, ok := status.Models.Sizes[exportKey(mtModel, "fp32")]; !ok {
+		t.Errorf("sizes %v lack the fp32 export on disk, which the GPU ladder may need", status.Models.Sizes)
+	}
+
+	if _, ok := status.Models.Sizes[exportKey(mtModel, "fp16")]; ok {
+		t.Errorf("sizes %v list an fp16 export that is not on disk", status.Models.Sizes)
+	}
+}
+
 func TestBrowserRuntimeReportsWhatEachModelWeighs(t *testing.T) {
 	t.Parallel()
 

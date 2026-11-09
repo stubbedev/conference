@@ -1,7 +1,7 @@
 import { env } from '@huggingface/transformers'
 
 import { fetchHeadFirst } from './loading'
-import { message } from './runtime'
+import { DownloadFailed, message } from './runtime'
 import { configureOnnx, type Runtime } from './wasm'
 
 const NOT_FOUND = 404
@@ -51,9 +51,10 @@ export async function loadingModel<T>(load: () => Promise<T>): Promise<T> {
   try {
     loaded = await load()
   } catch (err) {
-    throw firstUnfetched() ?? err
+    const failure = firstUnfetched()
+    throw failure ? new DownloadFailed(failure) : err
   }
   const failure = firstUnfetched()
-  if (failure) throw failure
+  if (failure) throw new DownloadFailed(failure)
   return loaded
 }

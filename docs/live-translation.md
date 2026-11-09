@@ -150,11 +150,12 @@ exports and the voice for each language:
   and the sentences before the one it translates. `mt.pairs` gives a
   language pair, source-target, a smaller model of its own (OPUS-MT), and
   `mt.builtin` lets a browser with a built-in translator (Chrome's
-  `Translator`) translate first. The pairs and the built-in translator
-  follow no prompt, so a room that needs the glossary or the form of
-  address leaves both out. `mt.fallback` names the encoder-decoder model
-  a browser translates with when it cannot run the language model (no
-  WebGPU, or a GPU without 16-bit floats), so every member translates as
+  `Translator`) translate first. With pairs, an encoder-decoder `mt.model`
+  is only downloaded by a member who needs a pair OPUS-MT does not have.
+  The pairs and the built-in translator follow no prompt, so a room that
+  needs the glossary or the form of address leaves both out. `mt.fallback`
+  names the encoder-decoder model a browser translates with when it cannot
+  run the language model on any GPU export, so every member translates as
   well as their machine allows; the fetch script gives a language model
   m2m100 unless `--mt-fallback` says otherwise.
 - **The voice** (`tts`) is a Piper voice per language: the one voice that
@@ -169,10 +170,23 @@ with `<model dir>/piper/<voice>.onnx.json` beside it. A model a browser
 without a usable GPU runs also needs its 8-bit export (`q8`, the
 `_quantized` files): every encoder-decoder translation model, the
 transcription fallback, and the transcription model itself when there is
-no fallback. A GPU without `shader-f16` runs an export that needs 16-bit
-floats on the CPU instead. No single file may be larger than a browser can
-load, 2 GiB. The server checks every file at start, names the one that
-is missing or too large, and tells the browsers what each model weighs.
+no fallback. No single file may be larger than a browser can load, 2 GiB.
+The server checks every file at start, names the one that is missing or
+too large, and tells the browsers what each export on disk weighs.
+
+A browser uses the GPU whenever it can. It tries each model on the GPU in
+the export `models.json` names, then in every other export of the ladder
+in `web/src/lib/speech/runtime.ts` that is on disk, skipping those that
+need 16-bit floats on a GPU without `shader-f16`. An export counts as
+working only once it has run a real inference, and each one that fails is
+shown to the member. Transcription walks the ladder for its larger model
+and then its smaller one, still on the GPU. The CPU is the last rung, and
+a failed download never moves down the ladder, because another export
+would fail the same way. A GPU can also hang without failing, as forced
+WebGPU does in Firefox on Linux, and a hung worker cannot rescue itself.
+So the page watches each GPU attempt: after five minutes without
+activity it terminates that worker and starts a new one on the CPU for
+the rest of the visit.
 
 The models are large: whisper-large-v3-turbo at q4f16 is about 570 MB,
 m2m100_418M at q4f16 about 740 MB, Qwen2.5-1.5B-Instruct at q4f16 about 1.2 GB, a
@@ -207,7 +221,9 @@ in place with the right size is left alone.
 `--pair-languages` (a subset of `--languages`, or `all`) asks for a pair
 model in both directions between each two of its languages, while
 transcription, the voices and the multilingual model still cover every
-language in `--languages`. A pair is the transformers.js export of
+language in `--languages`. Every model also comes with whichever exports
+of the GPU ladder its repository has, which is most of the disk space. A
+pair is the transformers.js export of
 Helsinki-NLP's OPUS-MT model, `Xenova/opus-mt-<source>-<target>` or
 else `onnx-community/opus-mt-<source>-<target>`. A pair with neither, or
 whose repository lacks the `--pair-dtype` or 8-bit export, is left out of

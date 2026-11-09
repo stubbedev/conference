@@ -3,6 +3,8 @@ import { createServer } from 'node:http'
 import { dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { DTYPE_SUFFIXES } from '../scripts/fetch-speech-models.mjs'
+
 const web = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const appRoot = resolve(web, 'dist', 'app')
 const fixtures = resolve(web, '..', 'fixtures')
@@ -58,6 +60,24 @@ export function serveSpeechPage({ models } = {}) {
       resolveServer({ origin: `http://127.0.0.1:${server.address().port}`, close: () => server.close() }),
     )
   })
+}
+
+export function hostedSizes(models) {
+  const sizes = {}
+  const directories = (dir) => readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+
+  for (const owner of directories(models)) {
+    for (const name of directories(join(models, owner))) {
+      for (const [dtype, suffix] of Object.entries(DTYPE_SUFFIXES)) {
+        for (const stem of ['encoder_model', 'model']) {
+          const size = statSync(join(models, owner, name, 'onnx', `${stem}${suffix}.onnx`), { throwIfNoEntry: false })?.size
+          if (size !== undefined) sizes[`${owner}/${name}:${dtype}`] = size
+        }
+      }
+    }
+  }
+
+  return sizes
 }
 
 export function builtWorker(name) {

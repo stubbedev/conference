@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { evalJs, findChrome, launchChrome, sleep, stopProcess } from './browser.mjs'
-import { builtWorker, serveSpeechPage, workerProbe } from './speech-page.mjs'
+import { builtWorker, hostedSizes, serveSpeechPage, workerProbe } from './speech-page.mjs'
 
 const models = process.env.SPEECH_MODEL_DIR
 if (!models) {
@@ -17,6 +17,7 @@ if (!models) {
 }
 
 const chosen = JSON.parse(readFileSync(join(models, 'models.json'), 'utf8'))
+const sizes = hostedSizes(models)
 const chrome = process.env.CHROME ?? findChrome()
 const TIMEOUT_MS = 600_000
 const dir = mkdtempSync(join(tmpdir(), 'speech-engines-'))
@@ -33,7 +34,7 @@ const ttsProbe = workerProbe(
   `
   const { ask } = workers.tts
   const runtime = await fetchRuntime()
-  await ask({ type: 'init', base: '/speech/', runtime, voices: ${JSON.stringify(chosen.tts)} })
+  await ask({ type: 'init', gpu: true, base: '/speech/', runtime, voices:${JSON.stringify(chosen.tts)} })
   const spoken = {}
   for (const lang of ${JSON.stringify(Object.keys(chosen.tts))}) {
     const times = []
@@ -70,7 +71,7 @@ const asrProbe = workerProbe(
   const heard = {}
   for (const [lang, url] of Object.entries(${JSON.stringify(RECORDINGS)})) {
     const audio = (await readWav(url)).slice(0, ${SECONDS} * 16000)
-    if (Object.keys(heard).length === 0) await ask({ type: 'init', base: '/speech/', runtime: await fetchRuntime(), asr: ${JSON.stringify(chosen.asr)}, lang })
+    if (Object.keys(heard).length === 0) await ask({ type: 'init', gpu: true, base: '/speech/', runtime: await fetchRuntime(), asr:${JSON.stringify(chosen.asr)}, sizes: ${JSON.stringify(sizes)}, lang })
     const started = performance.now()
     const { text } = await ask({ type: 'transcribe', audio, lang })
     heard[lang] = { text, ms: Math.round(performance.now() - started) }
@@ -92,7 +93,7 @@ const mtProbe = workerProbe(
   { mt: builtWorker('mt') },
   `
   const { ask } = workers.mt
-  const { level } = await ask({ type: 'init', base: '/speech/', runtime: await fetchRuntime(), mt: ${JSON.stringify(chosen.mt)} })
+  const { level } = await ask({ type: 'init', gpu: true, base: '/speech/', runtime: await fetchRuntime(), mt:${JSON.stringify(chosen.mt)}, sizes: ${JSON.stringify(sizes)} })
   const translated = {}
   for (const pair of ${JSON.stringify([...pairs.slice(0, 1), multilingual])}) {
     const [source, target] = pair.split('-')

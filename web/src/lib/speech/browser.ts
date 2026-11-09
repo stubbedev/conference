@@ -1,7 +1,8 @@
 import type { AsrEngine, Engines, MtEngine, Prepared, PrepareEvents, Segmenter, SegmenterEvents, Sentence, TtsEngine } from '@/lib/speech/engines'
 import { BuiltinTranslators } from '@/lib/speech/builtin'
 import { browserFetchDeps } from '@/lib/speech/fetching'
-import { asrExport, bytesFor, exportKey, renderPrompt, voiceKey, type SpeechModels } from '@/lib/speech/models'
+import { asrExport, bytesFor, exportKey, loadsUpFront, renderPrompt, voiceKey, type SpeechModels } from '@/lib/speech/models'
+import { GPU_STALL_MS, GpuWatch } from '@/lib/speech/gpu-watch'
 import { Progress } from '@/lib/speech/progress'
 import { message } from '@/lib/speech/runtime'
 import { Serial } from '@/lib/speech/serial'
@@ -94,6 +95,8 @@ class BrowserEngines implements Engines {
   private readonly languages: readonly Language[]
   private readonly workers = new Workers<Purpose, Channel>((purpose) => new Channel(start(purpose), (event) => this.event(purpose, event)))
   private readonly progress = new Progress()
+  private readonly noGpu = new Set<Purpose>()
+  private readonly watches = new Map<Purpose, GpuWatch>()
   private runtime: Promise<Runtime> | null = null
   private loadingReport: ReturnType<typeof setTimeout> | null = null
   private readonly builtin = new BuiltinTranslators((warning) => this.warn(warning))
@@ -148,6 +151,7 @@ class BrowserEngines implements Engines {
     await this.loadAsr(lang)
     return {
       transcribe: async (audio, transcribeIn) => {
+        await this.loadAsr(lang)
         const reply = await this.workers.port('asr').call<TextReply>({ type: 'transcribe', audio, lang: transcribeIn }, [audio.buffer])
         return reply.text
       },
@@ -156,7 +160,11 @@ class BrowserEngines implements Engines {
 
   async stepDown(lang: string): Promise<string | null> {
     if (!asrExport(this.models.asr, 'fallback', lang)) return null
-    const reply = await this.workers.port('asr').call<SteppedReply>({ type: 'step-down', lang })
+    const reply = await this.onWorker(
+      'asr',
+      () => this.loadAsr(lang),
+      () => this.workers.port('asr').call<SteppedReply>({ type: 'step-down', lang }),
+    )
     return reply.model
   }
 
@@ -164,7 +172,11 @@ class BrowserEngines implements Engines {
     const builtin = this.models.mt.builtin ? await this.builtin.for(source, target) : null
     if (builtin) return { translate: (sentence) => builtin.translate(sentence.text) }
 
-    await this.loadMt()
+    await this.onWorker(
+      'mt',
+      () => this.loadMt(),
+      () => this.workers.port('mt').call<WorkerReply>({ type: 'warm-up', source, target }),
+    )
     return { translate: (sentence) => this.translate(sentence) }
   }
 
@@ -174,17 +186,50 @@ class BrowserEngines implements Engines {
   }
 
   close(): void {
+    for (const watch of this.watches.values()) watch.settled()
     this.workers.closeAll()
   }
 
+  private async onWorker<T>(purpose: Purpose, load: () => Promise<WorkerReply>, call: () => Promise<T>): Promise<T> {
+    const hadGpu = !this.noGpu.has(purpose)
+    try {
+      await load()
+      return await call()
+    } catch (err) {
+      if (!hadGpu || !this.noGpu.has(purpose)) throw err
+      await load()
+      return call()
+    }
+  }
+
+  private watch(purpose: Purpose): GpuWatch {
+    const known = this.watches.get(purpose)
+    if (known) return known
+
+    const watch = new GpuWatch(GPU_STALL_MS, () => this.gpuStalled(purpose))
+    this.watches.set(purpose, watch)
+    return watch
+  }
+
+  private gpuStalled(purpose: Purpose): void {
+    this.noGpu.add(purpose)
+    this.warn(`The GPU stopped responding while loading the ${PARTS[purpose]} models, so they run on the CPU for the rest of this visit.`)
+    this.workers.close(purpose)
+  }
+
   private async translate(sentence: Sentence): Promise<string> {
-    const reply = await this.workers.port('mt').call<TextReply>({
-      type: 'translate',
-      text: sentence.text,
-      source: sentence.source,
-      target: sentence.target,
-      system: this.system(sentence),
-    })
+    const reply = await this.onWorker(
+      'mt',
+      () => this.loadMt(),
+      () =>
+        this.workers.port('mt').call<TextReply>({
+          type: 'translate',
+          text: sentence.text,
+          source: sentence.source,
+          target: sentence.target,
+          system: this.system(sentence),
+        }),
+    )
     return reply.text
   }
 
@@ -196,7 +241,11 @@ class BrowserEngines implements Engines {
   }
 
   private async speak(text: string, lang: string, voice: VoiceChoice) {
-    const reply = await this.workers.port('tts').call<SpokenReply>({ type: 'speak', text, lang, voice })
+    const reply = await this.onWorker(
+      'tts',
+      () => this.loadTts(lang),
+      () => this.workers.port('tts').call<SpokenReply>({ type: 'speak', text, lang, voice }),
+    )
     return { pcm: reply.pcm, rate: reply.rate }
   }
 
@@ -235,7 +284,14 @@ class BrowserEngines implements Engines {
   }
 
   private event(purpose: Purpose, event: WorkerEvent): void {
+    this.watch(purpose).active()
     switch (event.event) {
+      case 'gpu-started':
+        this.watch(purpose).started()
+        return
+      case 'gpu-settled':
+        this.watch(purpose).settled()
+        return
       case 'expect':
         this.progress.expect(PARTS[purpose], this.models.sizes[String(event.key)] ?? 0)
         this.reportLoading()
@@ -320,11 +376,11 @@ class BrowserEngines implements Engines {
 
   private loadAsr(lang: string): Promise<WorkerReply> {
     const primary = asrExport(this.models.asr, 'primary', lang)
-    return this.load('asr', { base: this.models.base, asr: this.models.asr, lang }, primary ? exportKey(primary) : null)
+    return this.load('asr', { base: this.models.base, asr: this.models.asr, sizes: this.models.sizes, lang }, primary ? exportKey(primary) : null)
   }
 
   private loadMt(): Promise<WorkerReply> {
-    return this.load('mt', { base: this.models.base, mt: this.models.mt }, exportKey(this.models.mt))
+    return this.load('mt', { base: this.models.base, mt: this.models.mt, sizes: this.models.sizes }, loadsUpFront(this.models.mt) ? exportKey(this.models.mt) : null)
   }
 
   private loadTts(lang: string): Promise<WorkerReply> {
@@ -333,11 +389,19 @@ class BrowserEngines implements Engines {
   }
 
   private load(purpose: Purpose, settings: Record<string, unknown>, expected: string | null): Promise<WorkerReply> {
+    const hadGpu = !this.noGpu.has(purpose)
+    return this.init(purpose, settings, expected).catch((err: unknown) => {
+      if (!hadGpu || !this.noGpu.has(purpose)) throw err
+      return this.init(purpose, settings, expected)
+    })
+  }
+
+  private init(purpose: Purpose, settings: Record<string, unknown>, expected: string | null): Promise<WorkerReply> {
     return this.workers.load(purpose, (channel) => {
       if (expected !== null) this.progress.expect(PARTS[purpose], this.models.sizes[expected] ?? 0)
       return this.tracked(PARTS[purpose], async () => {
         const runtime = await this.fetchRuntime()
-        return channel.call<WorkerReply>({ ...settings, runtime, type: 'init' })
+        return channel.call<WorkerReply>({ ...settings, gpu: !this.noGpu.has(purpose), runtime, type: 'init' })
       })
     })
   }

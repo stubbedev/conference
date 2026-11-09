@@ -1,4 +1,5 @@
 import type { Language } from '../translate/languages.ts'
+import { rungsFor, type Capabilities, type Rung } from './runtime.ts'
 
 export interface Export {
   model: string
@@ -47,6 +48,30 @@ export function asrExport(asr: AsrChoice, tier: AsrTier, lang: string): Export |
   return { model: choice.languages?.[lang] ?? choice.model, dtype: choice.dtype }
 }
 
+export type Sizes = Record<string, number>
+
+export interface AsrRung extends Rung {
+  model: string
+  tier: AsrTier
+}
+
+export function hostedIn(sizes: Sizes, model: string): (dtype: string) => boolean {
+  return (dtype) => Object.hasOwn(sizes, exportKey({ model, dtype }))
+}
+
+export function asrRungs(asr: AsrChoice, lang: string, capabilities: Capabilities, sizes: Sizes, floor: AsrTier): AsrRung[] {
+  const tierRungs = (tier: AsrTier, cpu: boolean): AsrRung[] => {
+    const wanted = asrExport(asr, tier, lang)
+    if (!wanted) return []
+    return rungsFor(wanted.dtype, capabilities, hostedIn(sizes, wanted.model), cpu).map((rung) => ({ ...rung, model: wanted.model, tier }))
+  }
+  return [...(floor === 'primary' ? tierRungs('primary', !asr.fallback) : []), ...tierRungs('fallback', true)]
+}
+
+export function loadsUpFront(mt: MtChoice): boolean {
+  return mt.kind === 'llm' || Object.keys(mt.pairs ?? {}).length === 0
+}
+
 export function pairFor(mt: MtChoice, source: string, target: string): Export | null {
   return mt.pairs?.[`${source}-${target}`] ?? null
 }
@@ -62,7 +87,7 @@ export function voiceKey(voice: string): string {
 export function bytesFor(models: SpeechModels, lang: string): number {
   const asr = asrExport(models.asr, 'primary', lang)
   const voice = models.voices[lang]
-  const keys = [asr ? exportKey(asr) : undefined, exportKey(models.mt), voice === undefined ? undefined : voiceKey(voice)]
+  const keys = [asr ? exportKey(asr) : undefined, loadsUpFront(models.mt) ? exportKey(models.mt) : undefined, voice === undefined ? undefined : voiceKey(voice)]
   return keys.reduce((total, key) => total + (key === undefined ? 0 : (models.sizes[key] ?? 0)), 0)
 }
 

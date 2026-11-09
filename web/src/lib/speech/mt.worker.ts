@@ -2,20 +2,21 @@ import { pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers, loadingModel } from './hf'
-import { expectLoading, reportLoading, webgpuFailed } from './loading'
-import { exportKey, pairFor, type Export, type MtChoice } from './models'
-import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
+import { attempting, expectLoading, gpuCapabilities, reportLoading, reportRefused } from './loading'
+import { exportKey, hostedIn, loadsUpFront, pairFor, type Export, type MtChoice, type MtKind, type Sizes } from './models'
+import { firstThatRuns, message, rungsFor, type Capabilities, type Rung } from './runtime'
 import { serve } from './serve'
 import type { TranslationLevel } from '../translate/types'
 import { parseRuntime } from './wasm'
-import { webgpuAvailable, webgpuHalves } from './webgpu'
 
 const MAX_NEW_TOKENS = 384
 const THINKING = /<think>[\s\S]*?<\/think>/g
+const WARM_UP = { text: 'Hello.', source: 'en', target: 'de' }
 
 interface Seq2Seq {
   (text: string, options?: { src_lang: string; tgt_lang: string }): Promise<{ translation_text: string }[]>
   model: { config: { model_type: string } }
+  dispose(): Promise<void>
 }
 
 interface ChatMessage {
@@ -28,13 +29,14 @@ interface Generator {
     messages: ChatMessage[],
     options: { max_new_tokens: number; do_sample: false; tokenizer_encode_kwargs: { enable_thinking: false } },
   ): Promise<{ generated_text: ChatMessage[] }[]>
+  dispose(): Promise<void>
 }
 
 type Model = { kind: 'seq2seq'; run: Seq2Seq } | { kind: 'llm'; run: Generator }
 
 let choice: MtChoice | null = null
-let gpu = true
-let halves = true
+let capabilities: Capabilities = { gpu: false, halves: false }
+let sizes: Sizes = {}
 let primary: Model | null = null
 let fallback: Model | null = null
 const models = new Map<string, Promise<Model>>()
@@ -44,7 +46,7 @@ function chosen(): MtChoice {
   return choice
 }
 
-function modelFor(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
+function modelFor(wanted: Export, kind: MtKind): Promise<Model> {
   const known = models.get(wanted.model)
   if (known) return known
 
@@ -56,38 +58,38 @@ function modelFor(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
   return pending
 }
 
-function deviceFor(dtype: string): Device {
-  return gpu && (halves || !needsHalves(dtype)) ? 'webgpu' : 'wasm'
+async function load(wanted: Export, kind: MtKind): Promise<Model> {
+  const rungs = rungsFor(wanted.dtype, capabilities, hostedIn(sizes, wanted.model), kind === 'seq2seq')
+  try {
+    return await firstThatRuns(
+      rungs,
+      (rung) => attempting(rung, () => start(wanted.model, kind, rung)),
+      (rung, err) => reportRefused('translation', wanted.model, rung, err),
+    )
+  } catch (err) {
+    throw new Error(`the translation model ${wanted.model} could not start: ${message(err)}`, { cause: err })
+  }
 }
 
-async function load(wanted: Export, kind: 'seq2seq' | 'llm'): Promise<Model> {
-  const device = deviceFor(wanted.dtype)
-  if (kind === 'llm' && device !== 'webgpu') {
-    const lacking = gpu ? 'a GPU with 16-bit floats' : 'WebGPU'
-    throw new Error(`the translation model ${wanted.model} is a language model, which needs ${lacking}`)
-  }
+async function start(name: string, kind: MtKind, rung: Rung): Promise<Model> {
+  expectLoading(exportKey({ model: name, dtype: rung.dtype }))
+  const options = { device: rung.device, dtype: rung.dtype as DataType, progress_callback: reportLoading }
+  const model: Model =
+    kind === 'llm'
+      ? { kind, run: (await loadingModel(() => pipeline('text-generation', name, options))) as unknown as Generator }
+      : { kind, run: (await loadingModel(() => pipeline('translation', name, options))) as unknown as Seq2Seq }
 
-  const dtype = dtypeFor(device, wanted.dtype) as DataType
-  expectLoading(exportKey({ model: wanted.model, dtype }))
   try {
-    if (kind === 'llm') {
-      const run = await loadingModel(() => pipeline('text-generation', wanted.model, { device, dtype, progress_callback: reportLoading }))
-      return { kind, run: run as unknown as Generator }
-    }
-    const run = await loadingModel(() => pipeline('translation', wanted.model, { device, dtype, progress_callback: reportLoading }))
-    return { kind, run: run as unknown as Seq2Seq }
+    await translateWith(model, WARM_UP.text, WARM_UP.source, WARM_UP.target, '')
   } catch (err) {
-    if (device === 'webgpu' && kind === 'seq2seq' && fallbackToWasm(err)) {
-      console.warn(`mt: ${wanted.model} cannot run on this browser's WebGPU (${message(err)}); translating on the CPU instead`)
-      gpu = false
-      return load(wanted, kind)
-    }
-    const on = device === 'webgpu' ? 'WebGPU' : 'the CPU'
-    throw new Error(`the translation model ${wanted.model} could not start on ${on}: ${message(err)}`)
+    await model.run.dispose()
+    throw err
   }
+  return model
 }
 
 async function prepare(mt: MtChoice): Promise<TranslationLevel> {
+  if (!loadsUpFront(mt)) return 'plain'
   try {
     primary = await modelFor(mt, mt.kind)
     return mt.kind === 'llm' ? 'prompted' : 'plain'
@@ -97,6 +99,21 @@ async function prepare(mt: MtChoice): Promise<TranslationLevel> {
     fallback = await modelFor(mt.fallback, 'seq2seq')
     return 'plain'
   }
+}
+
+async function sharedModel(): Promise<Model> {
+  const ready = primary ?? fallback
+  if (ready) return ready
+
+  const mt = chosen()
+  if (mt.kind !== 'seq2seq') throw new Error('translation has no model it can run')
+  primary = await modelFor(mt, 'seq2seq')
+  return primary
+}
+
+function modelForPair(source: string, target: string): Promise<Model> {
+  const pair = pairFor(chosen(), source, target)
+  return pair ? modelFor(pair, 'seq2seq') : sharedModel()
 }
 
 async function translateWith(model: Model, text: string, source: string, target: string, system: string): Promise<string> {
@@ -129,17 +146,20 @@ serve(async (request) => {
     case 'init': {
       configureTransformers(String(request.base), parseRuntime(request.runtime))
       choice = request.mt as MtChoice
-      gpu = await webgpuAvailable().catch((err: unknown) => webgpuFailed(err, 'translation runs on the CPU'))
-      halves = gpu && (await webgpuHalves().catch((err: unknown) => webgpuFailed(err, 'translation runs without 16-bit floats')))
+      sizes = request.sizes as Sizes
+      if (request.gpu) capabilities = await gpuCapabilities('translation')
       return [{ level: await prepare(choice) }]
+    }
+
+    case 'warm-up': {
+      await modelForPair(String(request.source), String(request.target))
+      return
     }
 
     case 'translate': {
       const source = String(request.source)
       const target = String(request.target)
-      const pair = pairFor(chosen(), source, target)
-      const model = pair ? await modelFor(pair, 'seq2seq') : (primary ?? fallback)
-      if (!model) throw new Error('translation has no model it can run')
+      const model = await modelForPair(source, target)
       return [{ text: await translateWith(model, String(request.text), source, target, String(request.system ?? '')) }]
     }
 

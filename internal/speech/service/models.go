@@ -325,16 +325,25 @@ func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes 
 
 	sizes[exportKey(export.Model, export.Dtype)] = metadata + onnx
 
-	if !cpu || export.Dtype == cpuDtype {
-		return nil
+	if cpu && export.Dtype != cpuDtype {
+		_, err = exportBytes(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
+		if err != nil {
+			return err
+		}
 	}
 
-	onnx, err = exportBytes(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
-	if err != nil {
-		return err
-	}
+	for _, dtype := range slices.Sorted(maps.Keys(suffixes)) {
+		onnx, err = exportBytes(root, exportFiles(kind, suffixes[dtype]), what)
+		if errors.Is(err, errModelsMissing) || errors.Is(err, errModelsTooLarge) {
+			continue
+		}
 
-	sizes[exportKey(export.Model, cpuDtype)] = metadata + onnx
+		if err != nil {
+			return err
+		}
+
+		sizes[exportKey(export.Model, dtype)] = metadata + onnx
+	}
 
 	return nil
 }
