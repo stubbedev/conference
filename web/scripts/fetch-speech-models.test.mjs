@@ -20,13 +20,43 @@ test('pair languages are their own list beside every language', () => {
   assert.deepEqual(options.pairs, { languages: ['en', 'de', 'da'], dtype: 'q4' })
 })
 
-test('no pairs unless pair languages are named', () => {
-  assert.equal(parseArgs(['/srv/models', '--languages=en,de']).pairs, null)
+test('pairs cover every language by default', () => {
+  assert.deepEqual(parseArgs(['/srv/models', '--languages=en,de']).pairs, { languages: ['en', 'de'], dtype: 'q4f16' })
+  assert.deepEqual(parseArgs(['/srv/models', '--languages=all']).pairs, { languages: ['all'], dtype: 'q4f16' })
+})
+
+test('one language has no pairs, and none turns them off', () => {
+  assert.equal(parseArgs(['/srv/models', '--languages=en']).pairs, null)
+  assert.equal(parseArgs(['/srv/models', '--languages=en,de', '--pair-languages=none']).pairs, null)
 })
 
 test('the old pairs flag and an empty pair list are refused', () => {
   assert.throws(() => parseArgs(['/srv/models', '--pairs']), /pairs is not an option/)
   assert.throws(() => parseArgs(['/srv/models', '--pair-languages=,']), /--pair-languages names no language/)
+})
+
+test('Portuguese into English uses the Romance model when it has no pair of its own', async () => {
+  const { exists } = hub(['Xenova/opus-mt-ROMANCE-en'])
+
+  const { found } = await planPairs(['pt', 'en'], exists)
+
+  assert.deepEqual(found, [{ pair: 'pt-en', model: 'Xenova/opus-mt-ROMANCE-en' }])
+})
+
+test('a pair of its own wins over the Romance model', async () => {
+  const { exists } = hub(['Xenova/opus-mt-pt-en', 'Xenova/opus-mt-ROMANCE-en'])
+
+  const { found } = await planPairs(['pt', 'en'], exists)
+
+  assert.deepEqual(found, [{ pair: 'pt-en', model: 'Xenova/opus-mt-pt-en' }])
+})
+
+test('the Romance model only translates into English', async () => {
+  const { exists } = hub(['Xenova/opus-mt-ROMANCE-en'])
+
+  const { found } = await planPairs(['pt', 'de'], exists)
+
+  assert.deepEqual(found, [])
 })
 
 test('a pair takes the first owner with an export', async () => {

@@ -204,8 +204,8 @@ both settings at it.
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da
 # every language the server speaks (LANGUAGES_FILE, or the built-in list)
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=all
-# every language, a pair model between each two of English, German and
-# Danish that OPUS-MT has one for, and Chrome's translator first
+# every language, pair models only between English, German and Danish,
+# and Chrome's translator first
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=all --pair-languages=en,de,da --builtin
 # a language model, for the glossary and the form of address
 node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da --mt-kind=llm
@@ -218,12 +218,12 @@ bytes; a model the script does not pin, such as a pair, is fetched at the
 commit its repository is on, which the script names. A file already
 in place with the right size is left alone.
 
-`--pair-languages` (a subset of `--languages`, or `all`) asks for a pair
-model in both directions between each two of its languages, while
-transcription, the voices and the multilingual model still cover every
-language in `--languages`. Every model also comes with whichever exports
-of the GPU ladder its repository has, which is most of the disk space. A
-pair is the transformers.js export of
+OPUS-MT pairs are the default: a pair model in both directions between
+each two of `--languages`. `--pair-languages` narrows them to a subset, or
+`none` turns them off, while transcription, the voices and the
+multilingual model still cover every language in `--languages`. Every
+model also comes with whichever exports of the GPU ladder its repository
+has, which is most of the disk space. A pair is the transformers.js export of
 Helsinki-NLP's OPUS-MT model, `Xenova/opus-mt-<source>-<target>` or
 else `onnx-community/opus-mt-<source>-<target>`. A pair with neither, or
 whose repository lacks the `--pair-dtype` or 8-bit export, is left out of
@@ -238,6 +238,12 @@ Serbian's do. Piper has no voice for Belarusian, Bosnian, Croatian,
 Macedonian or Maltese, so those get subtitles only; the script says so
 and carries on. The Moonshine models for the fallback are found the same
 way, by looking for one per language.
+
+A pair with no model of its own is translated by the multilingual model.
+Portuguese, Catalan and Romanian reach English through the shared
+`Xenova/opus-mt-ROMANCE-en`. The group models that need a target-language
+token, such as `gem-gem` and `en-ROMANCE`, are not used: through
+transformers.js the token ends up in the translation.
 
 Between English, German and Danish, OPUS-MT has a pair model for every
 direction but German to Danish, which m2m100 translates:

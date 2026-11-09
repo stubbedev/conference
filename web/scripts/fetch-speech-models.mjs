@@ -26,7 +26,8 @@
 //   --asr-fallback=owner/model|none --asr-fallback-dtype=q4
 //   --mt-kind=seq2seq|llm --mt=owner/model --mt-dtype=q4f16
 //   --mt-fallback=owner/model|none, what a language model falls back to
-//   --pair-languages=en,de,da or all --pair-dtype=q4f16
+//   --pair-languages=en,de,da, all or none, every --languages by default
+//   --pair-dtype=q4f16
 //   --builtin
 
 import { createHash } from 'node:crypto'
@@ -183,12 +184,15 @@ export function parseArgs(argv) {
           ? { model: options['mt-fallback'] ?? MT_DEFAULTS.seq2seq.model, dtype: MT_DEFAULTS.seq2seq.dtype }
           : null,
     },
-    pairs:
-      options['pair-languages'] === undefined
-        ? null
-        : { languages: codeList('pair-languages', options['pair-languages']), dtype: options['pair-dtype'] },
+    pairs: pairsFrom(options['pair-languages'], languages, options['pair-dtype']),
     builtin: options.builtin,
   }
+}
+
+function pairsFrom(named, languages, dtype) {
+  if (named === 'none') return null
+  if (named !== undefined) return { languages: codeList('pair-languages', named), dtype }
+  return languages.length === 1 && languages[0] !== 'all' ? null : { languages, dtype }
 }
 
 async function getJSON(url) {
@@ -302,6 +306,9 @@ async function moonshineFor(dir, code, dtypes) {
   return null
 }
 
+const ROMANCE_MODEL = 'Xenova/opus-mt-ROMANCE-en'
+const ROMANCE_INTO_ENGLISH = ['ca', 'pt', 'ro']
+
 export async function planPairs(languages, exists) {
   const found = []
   const skipped = []
@@ -311,7 +318,7 @@ export async function planPairs(languages, exists) {
       if (source === target) continue
 
       const pair = `${source}-${target}`
-      const candidates = PAIR_OWNERS.map((owner) => `${owner}/opus-mt-${pair}`)
+      const candidates = [...PAIR_OWNERS.map((owner) => `${owner}/opus-mt-${pair}`), ...(target === 'en' && ROMANCE_INTO_ENGLISH.includes(source) ? [ROMANCE_MODEL] : [])]
       let model = null
 
       for (const candidate of candidates) {
