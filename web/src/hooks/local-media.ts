@@ -23,6 +23,7 @@ import {
 } from '@/hooks/media'
 import { usePersistentState } from '@/hooks/persistent'
 import { startBlur, type BlurPipeline } from '@/lib/blur'
+import { DeviceQueue } from '@/lib/device-queue'
 import { describeTrackOpenError } from '@/lib/media-errors'
 import type { RoomClient } from '@/lib/sfu'
 
@@ -52,6 +53,11 @@ function trackFailure(kind: TrackKind, error: unknown): string {
   return describeTrackOpenError(device, error)
 }
 
+function tracksOf(stream: MediaStream | null, kind: TrackKind): MediaStreamTrack[] {
+  if (!stream) return []
+  return kind === 'mic' ? stream.getAudioTracks() : stream.getVideoTracks()
+}
+
 function migrateAvPrefs(stored: AvPrefs): AvPrefs {
   return {
     mic: typeof stored.mic === 'boolean' ? stored.mic : true,
@@ -70,6 +76,8 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const [mediaError, setMediaError] = useState('')
   const [mediaBusy, setMediaBusy] = useState(false)
+  const [queue] = useState(() => new DeviceQueue<TrackKind>())
+  const acquiresRef = useRef(0)
 
   const localStreamRef = useRef<MediaStream | null>(null)
   const micPipelineRef = useRef<MicPipeline | null>(null)
@@ -82,14 +90,38 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     blurIntentRef.current = devicePrefs.blur
   }, [devicePrefs.blur])
 
+  const replaceRawCam = useCallback((next: MediaStreamTrack | null) => {
+    const previous = rawCamRef.current
+    if (previous && previous !== next) previous.stop()
+    rawCamRef.current = next
+  }, [])
+
+  const applyEnabled = useCallback((kind: TrackKind, enabled: boolean) => {
+    for (const track of tracksOf(localStreamRef.current, kind)) track.enabled = enabled
+    if (kind === 'mic') {
+      micPipelineRef.current?.setInputEnabled(enabled)
+      return
+    }
+    const raw = rawCamRef.current
+    if (raw) raw.enabled = enabled
+  }, [])
+
+  const releaseAll = useCallback(() => {
+    lossGuardRef.current = {}
+    micPipelineRef.current?.dispose()
+    micPipelineRef.current = null
+    blurPipelineRef.current?.stop()
+    blurPipelineRef.current = null
+    replaceRawCam(null)
+    stopMediaStream(localStreamRef.current)
+    localStreamRef.current = null
+  }, [replaceRawCam])
+
   useEffect(() => {
     return () => {
-      micPipelineRef.current?.dispose()
-      blurPipelineRef.current?.stop()
-      rawCamRef.current = null
-      stopMediaStream(localStreamRef.current)
+      void queue.close(releaseAll)
     }
-  }, [])
+  }, [queue, releaseAll])
 
   const updateControls = useCallback(
     (patch: Partial<Controls>) => {
@@ -129,10 +161,10 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       lossGuardRef.current[kind] = rawTrack
       rawTrack.addEventListener('ended', () => {
         if (lossGuardRef.current[kind] !== rawTrack) return
-        handleLocalTrackLoss(kind, outbound)
+        void queue.run([], async () => handleLocalTrackLoss(kind, outbound))
       })
     },
-    [handleLocalTrackLoss],
+    [handleLocalTrackLoss, queue],
   )
 
   const blurFailed = useCallback(
@@ -168,11 +200,13 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
 
   const blurDied = useCallback(
     (err: unknown) => {
-      blurFailed(err)
-      const raw = rawCamRef.current
-      if (raw) void publishCamera(raw)
+      void queue.run([], async () => {
+        blurFailed(err)
+        const raw = rawCamRef.current
+        if (raw) await publishCamera(raw)
+      })
     },
-    [blurFailed, publishCamera],
+    [blurFailed, publishCamera, queue],
   )
 
   const cameraTrackFor = useCallback(
@@ -199,105 +233,114 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     [blurFailed, blurDied],
   )
 
-  const toggleBlur = useCallback(async () => {
+  const onToggleBlur = useCallback(() => {
     const next = !blurIntentRef.current
     blurIntentRef.current = next
     updateDevicePrefs({ blur: next })
+    void queue.run([], async () => {
+      const raw = rawCamRef.current
+      if (!raw) return
+      await publishCamera(cameraTrackFor(raw, blurIntentRef.current))
+    })
+  }, [cameraTrackFor, publishCamera, updateDevicePrefs, queue])
 
-    const raw = rawCamRef.current
-    if (!raw) return
+  const acquireNow = useCallback(async () => {
+    setMediaError('')
+    const prefs = prefsRef.current
+    const mobile = isMobileDevice()
+    const chosenCam = devicesRef.current.cams.find((device) => device.deviceId === prefs.cam)
+    const camFacing = mobile
+      ? prefs.camFacing || facingFromLabel(chosenCam?.label ?? '') || undefined
+      : undefined
+    if (mobile) releaseAll()
+    const opened = await openMicAndCamera(prefs, camFacing)
+    const micTrack = opened.mic.track
+    const camTrack = opened.cam.track
+    const failures = TRACK_KINDS.flatMap((kind) => {
+      const outcome = opened[kind]
+      return outcome.track === null ? [{ kind, message: trackFailure(kind, outcome.error) }] : []
+    })
 
-    await publishCamera(cameraTrackFor(raw, next))
-  }, [cameraTrackFor, publishCamera, updateDevicePrefs])
+    if (!micTrack && !camTrack) {
+      releaseAll()
+      setLocalStream(null)
+      setMediaError(failures.map(({ message }) => message).join(' '))
+      return
+    }
+    for (const { kind, message } of failures) toast.error(`${message} ${UNSENT[kind]}`)
 
-  const onToggleBlur = useCallback(() => void toggleBlur(), [toggleBlur])
+    micPipelineRef.current?.dispose()
+    micPipelineRef.current = null
+    let outboundMic: MediaStreamTrack | null = micTrack
+    if (micTrack) {
+      const pipeline = await createMicPipeline(micTrack, prefs.micGain)
+      if (pipeline) {
+        micPipelineRef.current = pipeline
+        outboundMic = pipeline.track
+      }
+    }
+
+    replaceRawCam(camTrack)
+    const outboundCam = camTrack ? cameraTrackFor(camTrack, blurIntentRef.current) : null
+
+    const stream = new MediaStream([outboundMic, outboundCam].filter(Boolean) as MediaStreamTrack[])
+    for (const old of localStreamRef.current?.getTracks() ?? []) if (!stream.getTracks().includes(old)) old.stop()
+    localStreamRef.current = stream
+    for (const kind of TRACK_KINDS) applyEnabled(kind, controlsRef.current[kind])
+    setLocalStream(stream)
+    if (micTrack && outboundMic) watchLocalTrack('mic', micTrack, outboundMic)
+    if (camTrack && outboundCam) watchLocalTrack('cam', camTrack, outboundCam)
+    if (camTrack && mobile) {
+      const facing = facingFromTrack(camTrack) ?? camFacing
+      const cams = devicesRef.current.cams
+      let cam = prefs.cam
+      if (facing && (!cam || !cams.some((device) => device.deviceId === cam))) {
+        cam = cams.find((device) => facingFromLabel(device.label) === facing)?.deviceId ?? cam
+      }
+      if (cam !== prefs.cam || (facing ?? '') !== prefs.camFacing) {
+        updateDevicePrefs({ cam, camFacing: facing ?? '' })
+      }
+    }
+    void refreshDevices()
+    const client = clientRef.current
+    if (client) {
+      for (const [kind, track] of [['mic', outboundMic], ['cam', outboundCam]] as const) {
+        if (!track) continue
+        await client.replaceLocalTrack(kind, track)
+        client.setTrackEnabled(kind, controlsRef.current[kind])
+      }
+    }
+  }, [clientRef, refreshDevices, controlsRef, prefsRef, devicesRef, updateDevicePrefs, watchLocalTrack, cameraTrackFor, replaceRawCam, applyEnabled, releaseAll])
 
   const acquireMedia = useCallback(async () => {
+    acquiresRef.current += 1
     setMediaBusy(true)
-    setMediaError('')
     try {
-      const prefs = prefsRef.current
-      const mobile = isMobileDevice()
-      const chosenCam = devicesRef.current.cams.find((device) => device.deviceId === prefs.cam)
-      const camFacing = mobile
-        ? prefs.camFacing || facingFromLabel(chosenCam?.label ?? '') || undefined
-        : undefined
-      if (mobile) {
-        lossGuardRef.current = {}
-        micPipelineRef.current?.dispose()
-        micPipelineRef.current = null
-        blurPipelineRef.current?.stop()
-        blurPipelineRef.current = null
-        stopMediaStream(localStreamRef.current)
-      }
-      const opened = await openMicAndCamera(prefs, camFacing)
-      const micTrack = opened.mic.track
-      const camTrack = opened.cam.track
-      const failures = TRACK_KINDS.flatMap((kind) => {
-        const outcome = opened[kind]
-        return outcome.track === null ? [{ kind, message: trackFailure(kind, outcome.error) }] : []
-      })
-
-      if (!micTrack && !camTrack) {
-        stopMediaStream(localStreamRef.current)
-        localStreamRef.current = null
-        setLocalStream(null)
-        setMediaError(failures.map(({ message }) => message).join(' '))
-        return
-      }
-      for (const { kind, message } of failures) toast.error(`${message} ${UNSENT[kind]}`)
-
-      micPipelineRef.current?.dispose()
-      micPipelineRef.current = null
-      let outboundMic: MediaStreamTrack | null = micTrack
-      if (micTrack) {
-        const pipeline = await createMicPipeline(micTrack, prefs.micGain)
-        if (pipeline) {
-          micPipelineRef.current = pipeline
-          outboundMic = pipeline.track
-        }
-      }
-
-      rawCamRef.current = camTrack
-      const outboundCam = camTrack ? cameraTrackFor(camTrack, blurIntentRef.current) : null
-
-      for (const track of [micTrack, outboundMic]) if (track) track.enabled = controlsRef.current.mic
-      for (const track of [camTrack, outboundCam]) if (track) track.enabled = controlsRef.current.cam
-
-      stopMediaStream(localStreamRef.current)
-      const stream = new MediaStream([outboundMic, outboundCam].filter(Boolean) as MediaStreamTrack[])
-      localStreamRef.current = stream
-      setLocalStream(stream)
-      if (micTrack && outboundMic) watchLocalTrack('mic', micTrack, outboundMic)
-      if (camTrack && outboundCam) watchLocalTrack('cam', camTrack, outboundCam)
-      if (camTrack && mobile) {
-        const facing = facingFromTrack(camTrack) ?? camFacing
-        const cams = devicesRef.current.cams
-        let cam = prefs.cam
-        if (facing && (!cam || !cams.some((device) => device.deviceId === cam))) {
-          cam = cams.find((device) => facingFromLabel(device.label) === facing)?.deviceId ?? cam
-        }
-        if (cam !== prefs.cam || (facing ?? '') !== prefs.camFacing) {
-          updateDevicePrefs({ cam, camFacing: facing ?? '' })
-        }
-      }
-      void refreshDevices()
-      const client = clientRef.current
-      if (client) {
-        for (const [kind, track] of [['mic', outboundMic], ['cam', outboundCam]] as const) {
-          if (!track) continue
-          await client.replaceLocalTrack(kind, track)
-          client.setTrackEnabled(kind, controlsRef.current[kind])
-        }
-      }
+      await queue.run(TRACK_KINDS, acquireNow)
     } finally {
-      setMediaBusy(false)
+      acquiresRef.current -= 1
+      if (acquiresRef.current === 0) setMediaBusy(false)
     }
-  }, [clientRef, refreshDevices, controlsRef, prefsRef, devicesRef, updateDevicePrefs, watchLocalTrack, cameraTrackFor])
+  }, [queue, acquireNow])
 
-  const switchDevice = useCallback(
-    async (kind: TrackKind, deviceId: string, resolution?: CameraResolution, opts: SwitchOptions = {}) => {
+  const dropCamera = useCallback(() => {
+    lossGuardRef.current.cam = undefined
+    blurPipelineRef.current?.stop()
+    blurPipelineRef.current = null
+    replaceRawCam(null)
+    const stream = localStreamRef.current
+    const outbound = stream?.getVideoTracks()[0]
+    if (!stream || !outbound) return
+    stream.removeTrack(outbound)
+    outbound.stop()
+    setLocalStream(new MediaStream(stream.getTracks()))
+  }, [replaceRawCam])
+
+  const switchDeviceNow = useCallback(
+    async (kind: TrackKind, deviceId: string, resolution: CameraResolution | undefined, opts: SwitchOptions) => {
       const mode = opts.mode ?? 'switch'
+      if (mode !== 'switch' && tracksOf(localStreamRef.current, kind).length > 0) return
+      if (mode === 'enable' && !controlsRef.current[kind]) return
       const failed = (error: unknown) => {
         const message = trackFailure(kind, error)
         if (mode === 'switch') toast.error(`Could not switch the ${DEVICE_LABELS[kind].toLowerCase()}. ${message}`)
@@ -315,8 +358,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
                 (deviceId === prefs.cam ? prefs.camFacing || undefined : undefined))
               : undefined))
           : undefined
-      const live = localStreamRef.current
-      const previous = kind === 'cam' && isMobileDevice() ? live?.getVideoTracks()[0] : undefined
+      const previous = kind === 'cam' && isMobileDevice() ? (rawCamRef.current ?? undefined) : undefined
       let previousOpen: { deviceId: string; facing?: CameraFacing } | undefined
       if (previous) {
         previousOpen = {
@@ -346,10 +388,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         }
       }
       if (opened.track === null) {
-        if (previous && live) {
-          live.removeTrack(previous)
-          setLocalStream(new MediaStream(live.getTracks()))
-        }
+        if (previous) dropCamera()
         failed(opened.error)
         return
       }
@@ -359,8 +398,6 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
           `That ${DEVICE_LABELS[kind].toLowerCase()} is unavailable here, using the system default.`,
         )
       }
-      track.enabled = controlsRef.current[kind]
-
       let outbound = track
       if (kind === 'mic') {
         const pipeline = micPipelineRef.current
@@ -375,14 +412,13 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
           }
         }
       } else {
-        rawCamRef.current = track
+        replaceRawCam(track)
         outbound = cameraTrackFor(track, blurIntentRef.current)
       }
-      outbound.enabled = controlsRef.current[kind]
 
       const current = localStreamRef.current
       if (current) {
-        const old = kind === 'mic' ? current.getAudioTracks()[0] : current.getVideoTracks()[0]
+        const old = tracksOf(current, kind)[0]
         if (old && old !== outbound) {
           current.removeTrack(old)
           if (old !== rawCamRef.current) old.stop()
@@ -396,6 +432,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         localStreamRef.current = stream
         setLocalStream(stream)
       }
+      applyEnabled(kind, controlsRef.current[kind])
 
       watchLocalTrack(kind, track, outbound)
       if (kind === 'mic') {
@@ -427,25 +464,25 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       clientRef.current?.setTrackEnabled(kind, controlsRef.current[kind])
       if (mode === 'recover') toast.success(`${DEVICE_LABELS[kind]} is back in the call`)
     },
-    [clientRef, updateDevicePrefs, refreshDevices, controlsRef, prefsRef, devicesRef, watchLocalTrack, cameraTrackFor],
+    [clientRef, updateDevicePrefs, refreshDevices, controlsRef, prefsRef, devicesRef, watchLocalTrack, cameraTrackFor, replaceRawCam, applyEnabled, dropCamera],
+  )
+
+  const switchDevice = useCallback(
+    (kind: TrackKind, deviceId: string, resolution?: CameraResolution, opts: SwitchOptions = {}) =>
+      queue.run([kind], () => switchDeviceNow(kind, deviceId, resolution, opts)),
+    [queue, switchDeviceNow],
   )
 
   const toggleTrack = useCallback(
     (kind: TrackKind) => {
-      const current = localStreamRef.current
-      const tracks = (kind === 'mic' ? current?.getAudioTracks() : current?.getVideoTracks()) ?? []
-      if (tracks.length === 0) {
-        updateControls(kind === 'mic' ? { mic: true } : { cam: true })
-        void switchDevice(kind, prefsRef.current[kind], undefined, { mode: 'enable' })
-        return
-      }
-      const enabled = !controlsRef.current[kind]
-      for (const track of tracks) track.enabled = enabled
-      if (kind === 'mic') micPipelineRef.current?.setInputEnabled(enabled)
-      clientRef.current?.setTrackEnabled(kind, enabled)
-      updateControls(kind === 'mic' ? { mic: enabled } : { cam: enabled })
+      const hasTrack = tracksOf(localStreamRef.current, kind).length > 0
+      const { on, open } = queue.toggle(kind, controlsRef.current[kind], hasTrack)
+      updateControls(kind === 'mic' ? { mic: on } : { cam: on })
+      applyEnabled(kind, on)
+      clientRef.current?.setTrackEnabled(kind, on)
+      if (open) void switchDevice(kind, prefsRef.current[kind], undefined, { mode: 'enable' })
     },
-    [clientRef, updateControls, controlsRef, switchDevice, prefsRef],
+    [clientRef, updateControls, controlsRef, switchDevice, prefsRef, queue, applyEnabled],
   )
 
   const toggleMic = useCallback(() => toggleTrack('mic'), [toggleTrack])
