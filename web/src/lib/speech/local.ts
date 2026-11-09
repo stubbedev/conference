@@ -20,6 +20,7 @@ import type { Engines, Segmenter } from '@/lib/speech/engines'
 import { invented } from '@/lib/speech/invented'
 import { nextRunAt, Pace } from '@/lib/speech/pace'
 import { Recent } from '@/lib/speech/recent'
+import { ResourceSlot } from '@/lib/speech/resource-slot'
 import { message } from '@/lib/speech/runtime'
 import { Sentences, type Line } from '@/lib/speech/sentences'
 import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
@@ -67,7 +68,7 @@ export class LocalTranslator implements Translator {
   private playbackContext: AudioContext | null = null
   private player: VoicePlayer | null = null
   private readonly engines: Engines
-  private segmenter: Segmenter | null = null
+  private readonly segmenter = new ResourceSlot<Segmenter>()
   private readonly sentences = new Sentences()
   private readonly pace = new Pace()
   private holdTimer: ReturnType<typeof setTimeout> | null = null
@@ -98,8 +99,8 @@ export class LocalTranslator implements Translator {
     this.events = events
     this.engines = engines
     this.capture = new MicCapture({
-      onAudio: (pcm) => this.segmenter?.push(new Int16Array(pcm)),
-      onStop: () => this.segmenter?.flush(),
+      onAudio: (pcm) => this.segmenter.current?.push(new Int16Array(pcm)),
+      onStop: () => this.segmenter.current?.flush(),
     })
   }
 
@@ -168,8 +169,7 @@ export class LocalTranslator implements Translator {
     for (const timer of this.interimTimers.values()) clearTimeout(timer)
     this.interimTimers.clear()
     this.interims.clear()
-    this.segmenter?.close()
-    this.segmenter = null
+    this.segmenter.close()
     await this.capture.close()
     await this.playbackContext?.close()
     this.playbackContext = null
@@ -180,7 +180,7 @@ export class LocalTranslator implements Translator {
     for (const off of this.unsubscribe) off()
     this.unsubscribe = []
     this.capture.stop()
-    this.segmenter?.reset()
+    this.segmenter.current?.reset()
     this.expire()
     this.client = null
   }
@@ -213,10 +213,13 @@ export class LocalTranslator implements Translator {
     }
 
     if (!this.canTranscribe) return
-    this.segmenter ??= await this.engines.segmenter({
-      onSegment: (segment) => this.segmented(segment),
-      onError: (error) => this.fail(error),
-    })
+    const segmenter = await this.segmenter.fill(() =>
+      this.engines.segmenter({
+        onSegment: (segment) => this.segmented(segment),
+        onError: (error) => this.fail(error),
+      }),
+    )
+    if (!segmenter) return
 
     this.warmUps = new WarmUps()
     this.warmUpMembers()

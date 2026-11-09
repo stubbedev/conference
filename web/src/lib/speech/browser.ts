@@ -137,6 +137,7 @@ class BrowserEngines implements Engines {
       flush: () => channel.post({ type: 'flush' }),
       reset: () => channel.post({ type: 'reset' }),
       close: () => {
+        if (this.segments !== events) return
         this.segments = null
         this.workers.close('vad')
       },
