@@ -18,6 +18,12 @@ import {
 import {
   cameraLayers,
   cameraSenderParameters,
+  codecPreferences,
+  screenCodec,
+  SCREEN_SHARE_FLUID_MAX_BITRATE,
+  SCREEN_SHARE_FPS,
+  SIMULCAST_STREAM_MODE,
+  type VideoCodec,
   demandParameters,
   LAYER_RIDS,
   SCREEN_CONTENT_HINT,
@@ -237,19 +243,40 @@ function isE2EEStats(data: unknown): data is E2EEStats {
   return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'e2ee-stats'
 }
 
-// preferVP8 pins a video transceiver to VP8. The E2EE transform keeps
-// only the VP8 frame header in the clear; H.264 and AV1 packetizers
-// parse NAL units and OBUs out of the payload and would choke on
-// ciphertext. The SFU mirrors the offer's codec order, so a browser
-// that lists a hardware H.264 encoder first would otherwise get it.
-function preferVP8(transceiver: RTCRtpTransceiver): void {
-  if (transceiver.sender.track?.kind !== 'video') return
-  const codecs = RTCRtpSender.getCapabilities('video')?.codecs ?? []
-  const preferred = codecs.filter(
-    (codec) => codec.mimeType === 'video/VP8' || codec.mimeType === 'video/rtx',
-  )
-  if (!preferred.some((codec) => codec.mimeType === 'video/VP8')) return
+// preferCodec pins a video transceiver to a codec end-to-end encryption
+// can carry. H.264 and AV1 packetizers parse NAL units and OBUs out of
+// the payload and would choke on ciphertext. The SFU mirrors the offer's
+// codec order, so a browser that lists a hardware H.264 encoder first
+// would otherwise get it.
+function preferCodec(transceiver: RTCRtpTransceiver, codec: VideoCodec): void {
+  const preferred = codecPreferences(videoCapabilities(), codec)
+  if (preferred.length === 0) return
   transceiver.setCodecPreferences(preferred)
+}
+
+function videoCapabilities(): RTCRtpCodec[] {
+  return RTCRtpSender.getCapabilities('video')?.codecs ?? []
+}
+
+async function sendsVP9Simulcast(track: MediaStreamTrack): Promise<boolean> {
+  const { width, height, frameRate } = track.getSettings()
+  if (!width || !height) return false
+  try {
+    const info = await navigator.mediaCapabilities.encodingInfo({
+      type: 'webrtc',
+      video: {
+        contentType: 'video/VP9',
+        width,
+        height,
+        bitrate: SCREEN_SHARE_FLUID_MAX_BITRATE,
+        framerate: frameRate ?? SCREEN_SHARE_FPS,
+        scalabilityMode: SIMULCAST_STREAM_MODE,
+      },
+    })
+    return info.supported
+  } catch {
+    return false
+  }
 }
 
 // tuneScreenSender applies the screen-share encoding. A browser that
@@ -458,7 +485,7 @@ export class RoomClient {
       // every member hears what is shared.
       this.screenTrackIds.add(track.id)
 
-      const sender = track.kind === 'video' ? this.addScreenVideo(pc, track, stream) : pc.addTrack(track, stream)
+      const sender = track.kind === 'video' ? await this.addScreenVideo(pc, track, stream) : pc.addTrack(track, stream)
       this.screenSenders.push(sender)
       this.installSenderTransform(sender)
 
@@ -777,14 +804,15 @@ export class RoomClient {
     receiver.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'recv' })
   }
 
-  private addScreenVideo(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): RTCRtpSender {
+  private async addScreenVideo(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): Promise<RTCRtpSender> {
     track.contentHint = SCREEN_CONTENT_HINT
+    const codec = screenCodec(videoCapabilities(), await sendsVP9Simulcast(track))
     const transceiver = pc.addTransceiver(track, {
       direction: 'sendonly',
       streams: [stream],
-      sendEncodings: screenLayers(this.publishCeilingBps),
+      sendEncodings: screenLayers(this.publishCeilingBps, codec),
     })
-    preferVP8(transceiver)
+    preferCodec(transceiver, codec)
     return transceiver.sender
   }
 
@@ -794,7 +822,7 @@ export class RoomClient {
       streams: [stream],
       sendEncodings: cameraLayers(track.getSettings()),
     })
-    preferVP8(transceiver)
+    preferCodec(transceiver, 'VP8')
     return transceiver.sender
   }
 

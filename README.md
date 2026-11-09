@@ -277,10 +277,12 @@ an external service".
   carries its own counter block, so receivers never depend on local
   timing.
 - Only the codec header the RTP layer and hardware decoders must read
-  stays in the clear: the 10-byte VP8 keyframe header (frame tag, start
-  code, dimensions), the 3-byte VP8 delta frame tag, and the 1-byte Opus
-  TOC. Video is pinned to VP8, because H.264 and AV1 packetizers parse
-  the payload and cannot carry ciphertext.
+  stays in the clear: the first 10 bytes of a keyframe (for VP8 the frame
+  tag, start code and dimensions), the first 3 bytes of a delta frame, and
+  the 1-byte Opus TOC. Video is VP8 or VP9, because H.264 and AV1
+  packetizers parse the payload and cannot carry ciphertext; VP9's payload
+  descriptor is written from the encoder's metadata, so the SFU reads it
+  whole.
 - The encryption worker is TypeScript compiled against the WebWorker
   typings (`web/tsconfig.worker.json`), so calling an encoded-frame API a
   browser does not have fails the build instead of silently dropping
@@ -296,7 +298,11 @@ an external service".
   still downloaded. The container follows the browser: WebM on Chrome
   and Firefox, MP4 on Safari.
 - Screen shares are encoded as detailed content, so they stay sharp and
-  drop frames rather than resolution when bandwidth runs short. They go
+  drop frames rather than resolution when bandwidth runs short, at up to
+  60 fps and the screen's own resolution. Where the browser confirms it
+  can send VP9 as simulcast streams (Chrome), a share is VP9, which holds
+  60 fps at a fraction of VP8's bitrate; elsewhere it is VP8. Cameras stay
+  VP8. They go
   out as two full-resolution encodings, a fluid one and a slow one, so a
   viewer on a bad connection gets the slow one instead of holding the
   share back for everyone. While a screen is shared, it outranks the

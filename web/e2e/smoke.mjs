@@ -583,8 +583,9 @@ const screenSent = `
   const mid = pc.getTransceivers().find((t) => t.sender.track?.contentHint === 'detail').mid
   const layers = {}
   let available = 0
-  for (const r of (await pc.getStats()).values()) {
-    if (r.type === 'outbound-rtp' && r.mid === mid && r.rid) layers[r.rid] = { bytes: r.bytesSent || 0, frames: r.framesEncoded || 0, width: r.frameWidth || 0, fps: r.framesPerSecond || 0, target: r.targetBitrate || 0, limit: r.qualityLimitationReason }
+  const stats = await pc.getStats()
+  for (const r of stats.values()) {
+    if (r.type === 'outbound-rtp' && r.mid === mid && r.rid) layers[r.rid] = { bytes: r.bytesSent || 0, frames: r.framesEncoded || 0, width: r.frameWidth || 0, fps: r.framesPerSecond || 0, target: r.targetBitrate || 0, limit: r.qualityLimitationReason, codec: stats.get(r.codecId)?.mimeType ?? '' }
     if (r.type === 'candidate-pair' && r.nominated && r.availableOutgoingBitrate) available = r.availableOutgoingBitrate
   }
   return { layers, available, twcc: /transport-cc/.test(pc.remoteDescription?.sdp ?? '') }

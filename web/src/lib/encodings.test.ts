@@ -6,6 +6,7 @@ import {
   CAMERA_SHARING_PRIORITY,
   cameraLayers,
   cameraSenderParameters,
+  codecPreferences,
   DEFAULT_PRIORITY,
   demandParameters,
   fluidShareBitrate,
@@ -15,6 +16,7 @@ import {
   SCREEN_SHARE_FLUID_MAX_BITRATE,
   SCREEN_SHARE_LOW_MAX_BITRATE,
   SCREEN_SHARE_PRIORITY,
+  screenCodec,
   screenLayers,
   screenSenderParameters,
   sharingLayers,
@@ -37,7 +39,7 @@ const senderPriority = (sent: RTCRtpSendParameters) => {
 }
 
 test('a screen share keeps its resolution when the bitrate shrinks, so text stays legible', () => {
-  assert.equal(screenSenderParameters(parameters(screenLayers(CEILING))).degradationPreference, 'maintain-resolution')
+  assert.equal(screenSenderParameters(parameters(screenLayers(CEILING, 'VP8'))).degradationPreference, 'maintain-resolution')
 })
 
 test('a screen share is encoded as detailed content, not as motion', () => {
@@ -45,9 +47,9 @@ test('a screen share is encoded as detailed content, not as motion', () => {
 })
 
 test('a screen share goes out fluid and slow, both at full resolution', () => {
-  const [low, high] = screenLayers(CEILING)
+  const [low, high] = screenLayers(CEILING, 'VP8')
   assert.deepEqual(
-    screenLayers(CEILING).map(({ rid, scaleResolutionDownBy }) => [rid, scaleResolutionDownBy]),
+    screenLayers(CEILING, 'VP8').map(({ rid, scaleResolutionDownBy }) => [rid, scaleResolutionDownBy]),
     [['l', 1], ['h', 1]],
   )
   assert.equal(high?.maxFramerate, SCREEN_SHARE_FPS)
@@ -67,7 +69,7 @@ test('the fluid share takes what the server allows, up to what crisp 60 fps text
 })
 
 test('both encodings of a share stay within a server ceiling below their budget', () => {
-  assert.equal(total(screenLayers(4_000_000)), 4_000_000)
+  assert.equal(total(screenLayers(4_000_000, 'VP8')), 4_000_000)
 })
 
 test('a server ceiling below the slow encoding still leaves the fluid one at least as much', () => {
@@ -76,7 +78,7 @@ test('a server ceiling below the slow encoding still leaves the fluid one at lea
 
 test('a screen share outranks the camera on the uplink, most of all while it is shared', () => {
   const rank: Record<RTCPriorityType, number> = { 'very-low': 0, low: 1, medium: 2, high: 3 }
-  assert.deepEqual(senderPriority(screenSenderParameters(parameters(screenLayers(CEILING)))), SCREEN_SHARE_PRIORITY)
+  assert.deepEqual(senderPriority(screenSenderParameters(parameters(screenLayers(CEILING, 'VP8')))), SCREEN_SHARE_PRIORITY)
   assert.deepEqual(senderPriority(cameraSenderParameters(parameters(HD), HD, false)), CAMERA_PRIORITY)
   assert.deepEqual(senderPriority(cameraSenderParameters(parameters(HD), HD, true)), CAMERA_SHARING_PRIORITY)
   assert.ok(rank[SCREEN_SHARE_PRIORITY] > rank[CAMERA_PRIORITY])
@@ -85,7 +87,7 @@ test('a screen share outranks the camera on the uplink, most of all while it is 
 
 test('only the first encoding of a sender carries its priority, the way browsers accept it', () => {
   for (const sent of [
-    screenSenderParameters(parameters(screenLayers(CEILING))),
+    screenSenderParameters(parameters(screenLayers(CEILING, 'VP8'))),
     cameraSenderParameters(parameters(HD), HD, true),
     cameraSenderParameters(parameters(HD), HD, false),
   ]) {
@@ -97,26 +99,26 @@ test('only the first encoding of a sender carries its priority, the way browsers
 })
 
 test('the encodings a share is created with carry no priority, which browsers refuse there', () => {
-  for (const layer of screenLayers(CEILING)) {
+  for (const layer of screenLayers(CEILING, 'VP8')) {
     assert.equal(layer.priority, undefined)
     assert.equal(layer.networkPriority, undefined)
   }
 })
 
 test('tuning a share leaves its encodings and the rest of the sender parameters alone', () => {
-  const read = parameters(screenLayers(CEILING))
+  const read = parameters(screenLayers(CEILING, 'VP8'))
   const sent = screenSenderParameters(read)
   assert.equal(sent.transactionId, 'tx')
   assert.equal(sent.rtcp.cname, 'abc')
   assert.deepEqual(
     sent.encodings.map(({ priority: _priority, networkPriority: _networkPriority, ...rest }) => rest),
-    screenLayers(CEILING),
+    screenLayers(CEILING, 'VP8'),
   )
   assert.equal(read.degradationPreference, undefined)
 })
 
 test('a share is paused and resumed by layer like a camera', () => {
-  const sent = demandParameters(parameters(screenLayers(CEILING)), [true, false, false])
+  const sent = demandParameters(parameters(screenLayers(CEILING, 'VP8')), [true, false, false])
   assert.deepEqual(
     sent.encodings.map((encoding) => [encoding.rid, encoding.active]),
     [['l', true], ['h', false]],
@@ -216,4 +218,37 @@ test('layer demand is matched by rid and leaves the bitrate caps alone', () => {
 test('an encoding without a layer rid is left as it is', () => {
   const sent = demandParameters(parameters([{ maxBitrate: 5 }]), [false, false, false])
   assert.deepEqual(sent.encodings, [{ maxBitrate: 5 }])
+})
+
+const VP8 = { mimeType: 'video/VP8', clockRate: 90000 }
+const RTX = { mimeType: 'video/rtx', clockRate: 90000, sdpFmtpLine: 'apt=96' }
+const H264 = { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'profile-level-id=42e01f' }
+const VP9 = { mimeType: 'video/VP9', clockRate: 90000, sdpFmtpLine: 'profile-id=0' }
+const VP9_PROFILE_2 = { mimeType: 'video/VP9', clockRate: 90000, sdpFmtpLine: 'profile-id=2' }
+const VP9_UNPROFILED = { mimeType: 'video/VP9', clockRate: 90000, sdpFmtpLine: 'max-fs=12288;max-fr=60' }
+
+test('a share uses VP9 where the browser can send it as simulcast streams', () => {
+  assert.equal(screenCodec([H264, VP8, VP9, VP9_PROFILE_2, RTX], true), 'VP9')
+})
+
+test('a share stays on VP8 where the browser cannot confirm VP9 simulcast or lacks profile 0', () => {
+  assert.equal(screenCodec([VP8, VP9, RTX], false), 'VP8')
+  assert.equal(screenCodec([VP8, VP9_PROFILE_2, RTX], true), 'VP8')
+  assert.equal(screenCodec([VP8, VP9_UNPROFILED, RTX], true), 'VP8')
+  assert.equal(screenCodec([VP8, RTX], true), 'VP8')
+})
+
+test('codec preferences put the chosen codec first, VP8 after it, and leave out what encryption cannot carry', () => {
+  const available = [H264, VP9_PROFILE_2, VP9, VP8, RTX]
+  assert.deepEqual(codecPreferences(available, 'VP9'), [VP9, VP8, RTX])
+  assert.deepEqual(codecPreferences(available, 'VP8'), [VP8, RTX])
+})
+
+test('no preferences when the chosen codec is missing', () => {
+  assert.deepEqual(codecPreferences([H264, RTX], 'VP8'), [])
+})
+
+test('a VP9 share is sent as single-layer simulcast streams, a VP8 one as plain encodings', () => {
+  assert.deepEqual(screenLayers(CEILING, 'VP9').map((layer) => layer.scalabilityMode), ['L1T1', 'L1T1'])
+  assert.deepEqual(screenLayers(CEILING, 'VP8').map((layer) => layer.scalabilityMode), [undefined, undefined])
 })

@@ -19,6 +19,32 @@ export const CAMERA_SHARING_PRIORITY: RTCPriorityType = 'very-low'
 
 export const SCREEN_SHARE_FLUID_MAX_BITRATE = 12_000_000
 
+export type VideoCodec = 'VP8' | 'VP9'
+
+const VP9_PROFILE = 'profile-id=0'
+
+export const SIMULCAST_STREAM_MODE = 'L1T1'
+
+export interface ScreenEncoding extends RTCRtpEncodingParameters {
+  scalabilityMode?: string
+}
+
+function isCodec(capability: RTCRtpCodec, codec: VideoCodec): boolean {
+  if (capability.mimeType !== `video/${codec}`) return false
+  return codec !== 'VP9' || (capability.sdpFmtpLine ?? '').split(';').includes(VP9_PROFILE)
+}
+
+export function screenCodec(available: readonly RTCRtpCodec[], sendsVP9Simulcast: boolean): VideoCodec {
+  return sendsVP9Simulcast && available.some((capability) => isCodec(capability, 'VP9')) ? 'VP9' : 'VP8'
+}
+
+export function codecPreferences(available: readonly RTCRtpCodec[], codec: VideoCodec): RTCRtpCodec[] {
+  const chosen = available.filter((capability) => isCodec(capability, codec))
+  if (chosen.length === 0) return []
+  const fallback = codec === 'VP8' ? [] : available.filter((capability) => isCodec(capability, 'VP8'))
+  return [...chosen, ...fallback, ...available.filter((capability) => capability.mimeType === 'video/rtx')]
+}
+
 export const LAYER_RIDS = ['l', 'm', 'h'] as const
 
 const CAMERA_LAYER_SCALES = [
@@ -96,19 +122,22 @@ export function fluidShareBitrate(publishCeilingBps: number | null): number {
   return Math.min(SCREEN_SHARE_FLUID_MAX_BITRATE, leftForFluid)
 }
 
-export function screenLayers(publishCeilingBps: number | null): RTCRtpEncodingParameters[] {
+export function screenLayers(publishCeilingBps: number | null, codec: VideoCodec): ScreenEncoding[] {
+  const stream = codec === 'VP9' ? { scalabilityMode: SIMULCAST_STREAM_MODE } : {}
   return [
     {
       rid: LAYER_RIDS[0],
       scaleResolutionDownBy: 1,
       maxBitrate: SCREEN_SHARE_LOW_MAX_BITRATE,
       maxFramerate: SCREEN_SHARE_LOW_FPS,
+      ...stream,
     },
     {
       rid: LAYER_RIDS[2],
       scaleResolutionDownBy: 1,
       maxBitrate: fluidShareBitrate(publishCeilingBps),
       maxFramerate: SCREEN_SHARE_FPS,
+      ...stream,
     },
   ]
 }
