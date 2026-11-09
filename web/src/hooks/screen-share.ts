@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+import { toast } from 'sonner'
 
 import type { Controls } from '@/hooks/local-media'
 import { stopMediaStream } from '@/hooks/media'
@@ -41,8 +42,12 @@ export function useScreenShare(
         setScreenStream(null)
         updateControls({ sharing: false })
       })
-    } catch {
-      return
+    } catch (err) {
+      stopMediaStream(screenStreamRef.current)
+      screenStreamRef.current = null
+      if (err instanceof DOMException && err.name === 'NotAllowedError') return
+      console.error('screen share: starting the share', err)
+      toast.error(`Your screen could not be shared: ${err instanceof Error ? err.message : String(err)}`)
     }
   }, [clientRef, updateControls, controlsRef])
 
