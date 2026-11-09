@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -494,6 +495,34 @@ func TestParserForKnowsTheCodecsTheLayerSwitchReads(t *testing.T) {
 	for _, mime := range []string{webrtc.MimeTypeH264, webrtc.MimeTypeAV1, webrtc.MimeTypeOpus} {
 		if parserFor(mime) != nil {
 			t.Errorf("a descriptor parser for %s, which the layer switch cannot read", mime)
+		}
+	}
+}
+
+func TestAStillScreenKeepsItsLayersWhileACameraLosesThem(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1000, 0)
+	sparse := now.Add(-2 * time.Second)
+
+	for _, tc := range []struct {
+		kind   string
+		active bool
+	}{
+		{kind: KindScreen, active: true},
+		{kind: KindCamera, active: false},
+	} {
+		layer := &upLayer{remote: nil, lastPacket: atomic.Int64{}}
+		layer.lastPacket.Store(sparse.UnixNano())
+
+		track := &UpTrack{
+			mid: "1", kind: tc.kind, pc: nil, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP9,
+			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{layer, nil, nil}, viewers: map[string]*upViewer{},
+			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
+		}
+
+		if got := track.activeLayers(now)[layerLow]; got != tc.active {
+			t.Errorf("%s layer silent for 2 s counts as active=%v, want %v", tc.kind, got, tc.active)
 		}
 	}
 }

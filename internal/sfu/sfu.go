@@ -60,7 +60,12 @@ const (
 	rembInterval        = time.Second
 
 	// A simulcast layer without packets for this long counts as paused.
-	layerIdleAfter = time.Second
+	// A camera sends at a steady rate, so a second of silence means its
+	// encoder stopped the layer. A shared screen that does not change is
+	// sent as one repeated frame a second, so its layers are only paused
+	// after several seconds without any.
+	cameraLayerIdleAfter = time.Second
+	screenLayerIdleAfter = 4 * time.Second
 )
 
 // Sentinel errors surfaced to signaling clients and the API layer.
@@ -1683,6 +1688,14 @@ func (v *upViewer) forward(layer int, packet *rtp.Packet, desc payloadDescriptor
 	return v.local.WriteRTP(&rtp.Packet{Header: header, Payload: payload}, extURIs)
 }
 
+func (ut *UpTrack) layerIdleAfter() time.Duration {
+	if ut.kind == KindScreen {
+		return screenLayerIdleAfter
+	}
+
+	return cameraLayerIdleAfter
+}
+
 // activeLayers reports which layers the publisher is currently sending:
 // browsers pause the upper encodings when their uplink shrinks.
 func (ut *UpTrack) activeLayers(now time.Time) [layerCount]bool {
@@ -1692,7 +1705,7 @@ func (ut *UpTrack) activeLayers(now time.Time) [layerCount]bool {
 	var active [layerCount]bool
 
 	for index, layer := range ut.layers {
-		active[index] = layer != nil && now.UnixNano()-layer.lastPacket.Load() < int64(layerIdleAfter)
+		active[index] = layer != nil && now.UnixNano()-layer.lastPacket.Load() < int64(ut.layerIdleAfter())
 	}
 
 	return active
