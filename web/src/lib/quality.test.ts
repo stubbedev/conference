@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { lowerLayer, newQualityState, nextQuality, preferredLayer } from './quality.ts'
+import { countsSince, lowerLayer, newQualityState, nextQuality, preferredLayer } from './quality.ts'
 
-const clean = { droppedFrames: 0, lostPackets: 0 }
-const stalled = { droppedFrames: 3, lostPackets: 0 }
-const lossy = { droppedFrames: 0, lostPackets: 25 }
+const clean = { droppedFrames: 0, decodedFrames: 60, lostPackets: 0, receivedPackets: 400 }
+const stalled = { droppedFrames: 10, decodedFrames: 50, lostPackets: 0, receivedPackets: 400 }
+const lossy = { droppedFrames: 0, decodedFrames: 60, lostPackets: 40, receivedPackets: 400 }
 
 test('a viewer asks for the layer its layout wants', () => {
   assert.equal(preferredLayer('h', newQualityState().ceiling), 'h')
@@ -90,4 +90,30 @@ test('a layer lost again right after it came back waits twice as long next time,
   for (let i = 0; i < 30; i += 1) state = nextQuality(state, 'h', clean)
   state = nextQuality(state, 'h', stalled)
   assert.equal(samplesToClimb(), 3)
+})
+
+test('a busy share losing a fraction of a percent of its packets is not in trouble', () => {
+  const share = { droppedFrames: 0, decodedFrames: 120, lostPackets: 20, receivedPackets: 2400 }
+  assert.equal(nextQuality(newQualityState(), 'h', share).ceiling, 'h')
+})
+
+test('a 60 fps stream dropping a few frames is not in trouble', () => {
+  const share = { droppedFrames: 3, decodedFrames: 117, lostPackets: 0, receivedPackets: 2400 }
+  assert.equal(nextQuality(newQualityState(), 'h', share).ceiling, 'h')
+})
+
+test('a large share of a tiny sample is not trouble either', () => {
+  const quiet = { droppedFrames: 2, decodedFrames: 2, lostPackets: 10, receivedPackets: 10 }
+  assert.equal(nextQuality(newQualityState(), 'h', quiet).ceiling, 'h')
+})
+
+test('a busy share losing a real share of its packets is in trouble', () => {
+  const share = { droppedFrames: 0, decodedFrames: 120, lostPackets: 300, receivedPackets: 2400 }
+  assert.equal(nextQuality(newQualityState(), 'h', share).ceiling, 'm')
+})
+
+test('a sample is the difference between two readings, never negative', () => {
+  const before = { droppedFrames: 5, decodedFrames: 100, lostPackets: 7, receivedPackets: 900 }
+  const after = { droppedFrames: 6, decodedFrames: 160, lostPackets: 3, receivedPackets: 1300 }
+  assert.deepEqual(countsSince(before, after), { droppedFrames: 1, decodedFrames: 60, lostPackets: 0, receivedPackets: 400 })
 })

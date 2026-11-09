@@ -7,10 +7,12 @@
 
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
 import {
+  addCounts,
+  countsSince,
   newQualityState,
   nextQuality,
+  noCounts,
   preferredLayer,
-  since,
   type InboundCounters,
   type Layer as LayerName,
   type QualityState,
@@ -112,9 +114,13 @@ async function readInboundCounters(
       const kind = mid === undefined ? undefined : kindOf(mid)
       if (!isLayeredKind(kind)) continue
 
-      const sum = counters.get(kind) ?? { droppedFrames: 0, lostPackets: 0 }
-      sum.droppedFrames += Number(entry.framesDropped ?? 0)
-      sum.lostPackets += Number(entry.packetsLost ?? 0)
+      const sum = counters.get(kind) ?? noCounts()
+      addCounts(sum, {
+        droppedFrames: Number(entry.framesDropped ?? 0),
+        decodedFrames: Number(entry.framesDecoded ?? 0),
+        lostPackets: Number(entry.packetsLost ?? 0),
+        receivedPackets: Number(entry.packetsReceived ?? 0),
+      })
       counters.set(kind, sum)
     }
   } catch {
@@ -619,10 +625,7 @@ export class RoomClient {
     if (!previous || !layout) return
 
     const quality = this.quality.get(key) ?? newQualityState()
-    const stepped = nextQuality(quality, layout, {
-      droppedFrames: since(previous.droppedFrames, counters.droppedFrames),
-      lostPackets: since(previous.lostPackets, counters.lostPackets),
-    })
+    const stepped = nextQuality(quality, layout, countsSince(previous, counters))
     this.quality.set(key, stepped)
 
     if (stepped.ceiling !== quality.ceiling) {

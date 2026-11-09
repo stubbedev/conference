@@ -12,11 +12,11 @@ const LAYERS: readonly Layer[] = ['l', 'm', 'h']
 
 const TOP_LAYER: Layer = 'h'
 
-/** Dropped decoder frames in one sample that mean the stream is too big. */
 const DROPPED_FRAMES_LIMIT = 3
+const DROPPED_FRAMES_SHARE = 0.1
 
-/** Packets lost in one sample that mean the same. */
 const LOST_PACKETS_LIMIT = 20
+const LOST_PACKETS_SHARE = 0.05
 
 /** Clean samples in a row before one layer is added back. */
 const RECOVER_SAMPLES = 3
@@ -28,10 +28,30 @@ const FAILED_RECOVERY_SAMPLES = 5
 const SETTLED_SAMPLES = 30
 
 export interface InboundCounters {
- /** Frames this viewer's decoder dropped, cumulatively. */
- droppedFrames: number
- /** Video packets lost, cumulatively. */
- lostPackets: number
+  droppedFrames: number
+  decodedFrames: number
+  lostPackets: number
+  receivedPackets: number
+}
+
+export function noCounts(): InboundCounters {
+  return { droppedFrames: 0, decodedFrames: 0, lostPackets: 0, receivedPackets: 0 }
+}
+
+export function addCounts(into: InboundCounters, more: InboundCounters): void {
+  into.droppedFrames += more.droppedFrames
+  into.decodedFrames += more.decodedFrames
+  into.lostPackets += more.lostPackets
+  into.receivedPackets += more.receivedPackets
+}
+
+export function countsSince(previous: InboundCounters, current: InboundCounters): InboundCounters {
+  return {
+    droppedFrames: since(previous.droppedFrames, current.droppedFrames),
+    decodedFrames: since(previous.decodedFrames, current.decodedFrames),
+    lostPackets: since(previous.lostPackets, current.lostPackets),
+    receivedPackets: since(previous.receivedPackets, current.receivedPackets),
+  }
 }
 
 export interface QualityState {
@@ -61,8 +81,15 @@ function step(layer: Layer, by: number): Layer {
   return LAYERS[index] ?? 'l'
 }
 
+function significant(bad: number, good: number, limit: number, share: number): boolean {
+  return bad >= limit && bad > (bad + good) * share
+}
+
 function troubled(health: InboundCounters): boolean {
-  return health.droppedFrames >= DROPPED_FRAMES_LIMIT || health.lostPackets >= LOST_PACKETS_LIMIT
+  return (
+    significant(health.droppedFrames, health.decodedFrames, DROPPED_FRAMES_LIMIT, DROPPED_FRAMES_SHARE) ||
+    significant(health.lostPackets, health.receivedPackets, LOST_PACKETS_LIMIT, LOST_PACKETS_SHARE)
+  )
 }
 
 /**
