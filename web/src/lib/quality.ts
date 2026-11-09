@@ -10,6 +10,8 @@ export type Layer = 'l' | 'm' | 'h'
 
 const LAYERS: readonly Layer[] = ['l', 'm', 'h']
 
+const TOP_LAYER: Layer = 'h'
+
 /** Dropped decoder frames in one sample that mean the stream is too big. */
 const DROPPED_FRAMES_LIMIT = 3
 
@@ -41,8 +43,8 @@ export interface QualityState {
   sinceUp: number
 }
 
-export function newQualityState(layout: Layer): QualityState {
-  return { ceiling: layout, clean: 0, wait: RECOVER_SAMPLES, sinceUp: SETTLED_SAMPLES }
+export function newQualityState(): QualityState {
+  return { ceiling: TOP_LAYER, clean: 0, wait: RECOVER_SAMPLES, sinceUp: SETTLED_SAMPLES }
 }
 
 export function layerIndex(layer: Layer): number {
@@ -84,7 +86,7 @@ export function nextQuality(state: QualityState, layout: Layer, health: InboundC
   }
 
   if (layerIndex(state.ceiling) >= layerIndex(layout)) {
-    return { ceiling: layout, clean: 0, wait: settledWait, sinceUp }
+    return { ceiling: state.ceiling, clean: 0, wait: settledWait, sinceUp }
   }
 
   const clean = state.clean + 1

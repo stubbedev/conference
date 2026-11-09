@@ -8,26 +8,26 @@ const stalled = { droppedFrames: 3, lostPackets: 0 }
 const lossy = { droppedFrames: 0, lostPackets: 25 }
 
 test('a viewer asks for the layer its layout wants', () => {
-  assert.equal(preferredLayer('h', newQualityState('h').ceiling), 'h')
-  assert.equal(preferredLayer('m', newQualityState('m').ceiling), 'm')
+  assert.equal(preferredLayer('h', newQualityState().ceiling), 'h')
+  assert.equal(preferredLayer('m', newQualityState().ceiling), 'm')
 })
 
 test('dropped frames lower the ceiling at once', () => {
-  const state = nextQuality(newQualityState('h'), 'h', stalled)
+  const state = nextQuality(newQualityState(), 'h', stalled)
   assert.equal(state.ceiling, 'm')
 })
 
 test('lost packets lower it too', () => {
-  assert.equal(nextQuality(newQualityState('h'), 'h', lossy).ceiling, 'm')
+  assert.equal(nextQuality(newQualityState(), 'h', lossy).ceiling, 'm')
 })
 
 test('trouble never lifts the ceiling above the layout', () => {
-  const state = nextQuality(newQualityState('l'), 'l', stalled)
+  const state = nextQuality(newQualityState(), 'l', stalled)
   assert.equal(state.ceiling, 'l')
 })
 
 test('a clean stream earns its layer back after a run of samples', () => {
-  let state = newQualityState('h')
+  let state = newQualityState()
   state = nextQuality(state, 'h', stalled)
   state = nextQuality(state, 'h', stalled)
 
@@ -47,15 +47,21 @@ test('a clean stream earns its layer back after a run of samples', () => {
 })
 
 test('recovery stops at what the layout can use', () => {
-  let state = newQualityState('l')
+  let state = nextQuality(nextQuality(newQualityState(), 'h', stalled), 'h', stalled)
+  assert.equal(state.ceiling, 'l')
   for (let i = 0; i < 12; i += 1) state = nextQuality(state, 'm', clean)
   assert.equal(state.ceiling, 'm')
 })
 
-test('a smaller layout pulls the ceiling down with it', () => {
-  const state = nextQuality(newQualityState('h'), 'l', clean)
-  assert.equal(state.ceiling, 'l')
+test('a tile that shrinks and grows again gets its layer back at once', () => {
+  let state = newQualityState()
+  for (let i = 0; i < 6; i += 1) state = nextQuality(state, 'l', clean)
   assert.equal(preferredLayer('l', state.ceiling), 'l')
+  assert.equal(preferredLayer('h', state.ceiling), 'h')
+})
+
+test('a stream first seen as a thumbnail can be enlarged at once', () => {
+  assert.equal(preferredLayer('h', newQualityState().ceiling), 'h')
 })
 
 test('the lower of two layers wins', () => {
@@ -64,7 +70,7 @@ test('the lower of two layers wins', () => {
 })
 
 test('a layer lost again right after it came back waits twice as long next time, and a held layer forgives it', () => {
-  let state = nextQuality(newQualityState('h'), 'h', stalled)
+  let state = nextQuality(newQualityState(), 'h', stalled)
   const samplesToClimb = () => {
     let samples = 0
     while (state.ceiling !== 'h') {

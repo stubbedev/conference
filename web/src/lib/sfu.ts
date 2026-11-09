@@ -541,7 +541,7 @@ export class RoomClient {
 
     this.layoutLayers.set(key, layer)
 
-    const quality = this.quality.get(key) ?? newQualityState(layer)
+    const quality = this.quality.get(key) ?? newQualityState()
     this.quality.set(key, quality)
     this.requestLayer(sourceId, kind, preferredLayer(layer, quality.ceiling))
   }
@@ -586,7 +586,7 @@ export class RoomClient {
     const layout = this.layoutLayers.get(key)
     if (!previous || !layout) return
 
-    const quality = this.quality.get(key) ?? newQualityState(layout)
+    const quality = this.quality.get(key) ?? newQualityState()
     const stepped = nextQuality(quality, layout, {
       droppedFrames: since(previous.droppedFrames, counters.droppedFrames),
       lostPackets: since(previous.lostPackets, counters.lostPackets),
