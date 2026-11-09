@@ -562,6 +562,7 @@ const fakeDisplay = `(() => {
     const ctx = canvas.getContext('2d')
     let frame = 0
     const draw = () => {
+      if (window.__shareStill) return
       ctx.fillStyle = '#fff'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
       ctx.fillStyle = '#000'
@@ -706,6 +707,11 @@ async function settledScreenFps(viewer, publisher, settled) {
 }
 
 const FLUID_SHARE_MIN_FPS = 15
+
+const STILL_SETTLE_MS = 4000
+const STILL_WINDOW_MS = 10_000
+const STILL_MAX_KEYFRAMES = 1
+const STILL_MAX_FREEZES = 1
 const SLOW_SHARE_MAX_FPS = 10
 
 // A share goes out as a fluid and a slow encoding, both at full size: a
@@ -745,6 +751,17 @@ async function checkScreenShare(failures, publisher, viewer) {
   const back = await settledScreenFps(viewer, publisher, (measured) => measured.fps >= FLUID_SHARE_MIN_FPS)
   console.log(`screen share pinned again: ${back.width}px at ${back.fps.toFixed(1)} fps`)
   check(failures, 'screen share', back.fps >= FLUID_SHARE_MIN_FPS, `the share pinned again plays at ${back.fps.toFixed(1)} fps, not the fluid encoding`)
+
+  await evalJs(publisher, 'window.__shareStill = true')
+  await sleep(STILL_SETTLE_MS)
+  const stillFrom = await evalJs(viewer, shareReceiveCounters)
+  await sleep(STILL_WINDOW_MS)
+  const stillTo = await evalJs(viewer, shareReceiveCounters)
+  const stillKeyframes = (stillTo?.keyframes ?? 0) - (stillFrom?.keyframes ?? 0)
+  const stillFreezes = (stillTo?.freezes ?? 0) - (stillFrom?.freezes ?? 0)
+  console.log(`screen share held still for ${STILL_WINDOW_MS / 1000} s: +${stillKeyframes} keyframes, +${stillFreezes} freezes`)
+  check(failures, 'screen share', stillKeyframes <= STILL_MAX_KEYFRAMES, `a still share brought ${stillKeyframes} keyframes in ${STILL_WINDOW_MS / 1000} s: its viewers are switching layers`)
+  check(failures, 'screen share', stillFreezes <= STILL_MAX_FREEZES, `a still share froze ${stillFreezes} times in ${STILL_WINDOW_MS / 1000} s`)
 
   check(failures, 'screen share', await clickButtonByTitle(publisher, 'Stop sharing'), 'no "Stop sharing" button')
   const gone = await waitFor(viewer, remoteScreen, (v) => v === null, 20000)
