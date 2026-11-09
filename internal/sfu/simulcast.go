@@ -406,8 +406,12 @@ func picNewer(a, b, mask uint16) bool {
 }
 
 const (
-	// Receiver-report loss above which a viewer steps down one layer.
+	// Receiver-report loss above which a report counts as lossy, and how
+	// many lossy reports in a row step a viewer down one layer: one burst,
+	// a large keyframe or a scroll on a share, is loss retransmission
+	// repairs, not a link that cannot carry the layer.
 	congestedLossFraction = highLossFraction
+	lossyReportsToStep    = 2
 	// Consecutive loss-free adaptation ticks before stepping back up.
 	upswitchCleanTicks    = 5
 	maxUpswitchCleanTicks = 40
@@ -421,22 +425,34 @@ const (
 // browsers cap it near 1.5x what they currently receive, so a viewer on
 // the low layer could never earn its way back up.
 type ladder struct {
-	ceiling    int
-	congested  bool
-	cleanTicks int
-	wait       int
-	sinceUp    int
+	ceiling     int
+	congested   bool
+	lossyStreak int
+	cleanTicks  int
+	wait        int
+	sinceUp     int
 }
 
 func newLadder() ladder {
-	return ladder{ceiling: layerHigh, congested: false, cleanTicks: 0, wait: upswitchCleanTicks, sinceUp: settledTicks}
+	return ladder{ceiling: layerHigh, congested: false, lossyStreak: 0, cleanTicks: 0, wait: upswitchCleanTicks, sinceUp: settledTicks}
 }
 
 // observeLoss records one receiver report's loss fraction (1/256 units).
 func (l *ladder) observeLoss(fractionLost uint8, current int) {
 	if fractionLost <= congestedLossFraction {
+		l.lossyStreak = 0
+
 		return
 	}
+
+	l.lossyStreak++
+	l.cleanTicks = 0
+
+	if l.lossyStreak < lossyReportsToStep {
+		return
+	}
+
+	l.lossyStreak = 0
 
 	if !l.congested {
 		l.ceiling = max(min(l.ceiling, current)-1, layerLow)

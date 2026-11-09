@@ -219,11 +219,65 @@ func expectContinues(t *testing.T, last, next mungedPacket) {
 	}
 }
 
+// lossyPeriod reports loss above the congestion threshold for as many
+// receiver reports in a row as it takes to step down.
+func lossyPeriod(steps *ladder) {
+	for range lossyReportsToStep {
+		steps.observeLoss(congestedLossFraction+1, layerHigh)
+	}
+}
+
+func TestLadderRidesOutALossBurst(t *testing.T) {
+	t.Parallel()
+
+	steps := newLadder()
+
+	steps.observeLoss(255, layerHigh)
+	steps.tick()
+
+	if steps.ceiling != layerHigh {
+		t.Fatalf("ceiling %d after one lossy report, want the layer kept through a burst", steps.ceiling)
+	}
+
+	steps.observeLoss(0, layerHigh)
+	steps.observeLoss(255, layerHigh)
+	steps.tick()
+
+	if steps.ceiling != layerHigh {
+		t.Fatalf("ceiling %d after two bursts a clean report apart, want them not to add up", steps.ceiling)
+	}
+
+	lossyPeriod(&steps)
+
+	if steps.ceiling != layerMid {
+		t.Fatalf("ceiling %d after sustained loss, want one step down", steps.ceiling)
+	}
+}
+
+func TestLadderHoldsItsClimbThroughABurst(t *testing.T) {
+	t.Parallel()
+
+	steps := newLadder()
+	lossyPeriod(&steps)
+	steps.tick()
+
+	for range upswitchCleanTicks - 1 {
+		steps.tick()
+	}
+
+	steps.observeLoss(255, layerMid)
+	steps.tick()
+
+	if steps.ceiling != layerMid {
+		t.Fatalf("ceiling %d, want the climb held by a lossy report on the way up", steps.ceiling)
+	}
+}
+
 func TestLadderBacksOffALayerItCannotHold(t *testing.T) {
 	t.Parallel()
 
 	steps := newLadder()
-	steps.observeLoss(congestedLossFraction+1, layerHigh)
+	lossyPeriod(&steps)
 	steps.tick()
 
 	climb := func() int {
@@ -241,7 +295,7 @@ func TestLadderBacksOffALayerItCannotHold(t *testing.T) {
 	climbAndFail := func() int {
 		ticks := climb()
 
-		steps.observeLoss(congestedLossFraction+1, layerHigh)
+		lossyPeriod(&steps)
 		steps.tick()
 
 		return ticks
@@ -261,7 +315,7 @@ func TestLadderBacksOffALayerItCannotHold(t *testing.T) {
 		steps.tick()
 	}
 
-	steps.observeLoss(congestedLossFraction+1, layerHigh)
+	lossyPeriod(&steps)
 	steps.tick()
 
 	if again := climbAndFail(); again != upswitchCleanTicks {
