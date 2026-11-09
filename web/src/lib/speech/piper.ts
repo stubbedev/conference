@@ -16,7 +16,7 @@
 // translated.
 
 import { readBody } from './fetching'
-import { fetchRetrying, reportLoading } from './loading'
+import { fetchRetrying, reportLoading, reportWarning } from './loading'
 import { ort } from './ort'
 import { phonemeIds, phonemes, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
 import { fallbackToWasm, message } from './runtime'
@@ -133,7 +133,7 @@ async function download(url: string): Promise<Uint8Array> {
 
   if (!cached) {
     await cache.put(url, new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } })).catch((err: unknown) => {
-      console.warn(`the voice model ${url} could not be kept on this device, so it will be fetched again next time:`, err)
+      reportWarning(`The voice model ${url} could not be kept on this device, so it will be downloaded again next time: ${message(err)}`)
     })
   }
   return bytes

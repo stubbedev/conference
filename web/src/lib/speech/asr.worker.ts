@@ -2,7 +2,7 @@ import { pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers, loadingModel } from './hf'
-import { expectLoading, reportLoading } from './loading'
+import { expectLoading, reportLoading, webgpuFailed } from './loading'
 import { asrExport, exportKey, type AsrChoice, type AsrTier, type Export } from './models'
 import { toFloat32 } from './pcm'
 import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
@@ -38,11 +38,11 @@ function exportFor(lang: string): Export {
 }
 
 async function chooseDevice(asr: AsrChoice): Promise<void> {
-  if (!(await webgpuAvailable().catch(() => false))) {
+  if (!(await webgpuAvailable().catch((err: unknown) => webgpuFailed(err, 'transcription runs on the CPU')))) {
     runOnCpu()
     return
   }
-  if (!needsHalves(asr.dtype) || (await webgpuHalves().catch(() => false))) return
+  if (!needsHalves(asr.dtype) || (await webgpuHalves().catch((err: unknown) => webgpuFailed(err, 'transcription runs without 16-bit floats')))) return
 
   if (asr.fallback && !needsHalves(asr.fallback.dtype)) tier = 'fallback'
   else runOnCpu()

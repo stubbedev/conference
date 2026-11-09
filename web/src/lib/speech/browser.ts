@@ -1,4 +1,4 @@
-import type { AsrEngine, Engines, MtEngine, Prepared, Segmenter, SegmenterEvents, Sentence, TtsEngine } from '@/lib/speech/engines'
+import type { AsrEngine, Engines, MtEngine, Prepared, PrepareEvents, Segmenter, SegmenterEvents, Sentence, TtsEngine } from '@/lib/speech/engines'
 import { BuiltinTranslators } from '@/lib/speech/builtin'
 import { browserFetchDeps } from '@/lib/speech/fetching'
 import { asrExport, bytesFor, exportKey, renderPrompt, voiceKey, type SpeechModels } from '@/lib/speech/models'
@@ -8,7 +8,7 @@ import { fetchRuntime, type Runtime } from '@/lib/speech/wasm'
 import { WorkerRpc, type WorkerEvent, type WorkerReply } from '@/lib/speech/worker'
 import { Workers } from '@/lib/speech/workers'
 import { languageName, type Language } from '@/lib/translate/languages'
-import type { LoadingPart, PartLoading, TranslationLevel, VoiceChoice } from '@/lib/translate/types'
+import type { LoadingPart, TranslationLevel, VoiceChoice } from '@/lib/translate/types'
 
 type Purpose = 'vad' | 'asr' | 'mt' | 'tts'
 
@@ -100,7 +100,7 @@ class BrowserEngines implements Engines {
   private runtime: Promise<Runtime> | null = null
   private loadingReport: ReturnType<typeof setTimeout> | null = null
   private readonly builtin = new BuiltinTranslators()
-  private onLoading: (parts: readonly PartLoading[] | null) => void = () => {}
+  private events: PrepareEvents | null = null
   private segments: SegmenterEvents | null = null
 
   constructor(models: SpeechModels, languages: readonly Language[]) {
@@ -109,8 +109,8 @@ class BrowserEngines implements Engines {
     this.requiresWebGpu = !models.asr.fallback
   }
 
-  async prepare(lang: string, onLoading: (parts: readonly PartLoading[] | null) => void): Promise<Prepared> {
-    this.onLoading = onLoading
+  async prepare(lang: string, events: PrepareEvents): Promise<Prepared> {
+    this.events = events
     const room = await this.storageProblem(lang)
     if (room) return { transcribes: false, translates: 'none', problems: [room] }
 
@@ -205,7 +205,7 @@ class BrowserEngines implements Engines {
     const storage = navigator.storage
     if (!storage?.estimate) return null
 
-    await storage.persist?.().catch(() => false)
+    await this.keepModels(storage)
     const { quota, usage } = await storage.estimate()
     if (quota === undefined || usage === undefined) return null
 
@@ -213,6 +213,19 @@ class BrowserEngines implements Engines {
     if (needed <= quota - usage || (await this.cached(lang))) return null
 
     return `Live translation needs ${megabytes(needed)} of storage for its models, and this browser has ${megabytes(Math.max(quota - usage, 0))} left.`
+  }
+
+  private async keepModels(storage: StorageManager): Promise<void> {
+    try {
+      await storage.persist?.()
+    } catch (err) {
+      this.warn(`This browser could not be asked to keep the speech models (${reason(err)}), so it may delete them when it runs short of space and they would be downloaded again.`)
+    }
+  }
+
+  private warn(warning: string): void {
+    console.warn('live translation:', warning)
+    this.events?.onWarning(warning)
   }
 
   private async cached(lang: string): Promise<boolean> {
@@ -234,6 +247,9 @@ class BrowserEngines implements Engines {
         return
       case 'retrying':
         this.retrying(PARTS[purpose], event)
+        return
+      case 'warning':
+        this.warn(String(event.message))
         return
       case 'segment':
         this.segments?.onSegment({ kind: event.kind === 'partial' ? 'partial' : 'utterance', audio: event.audio as Int16Array })
@@ -259,14 +275,14 @@ class BrowserEngines implements Engines {
   private publishLoading(): void {
     const parts = this.progress.snapshot()
     if (parts) {
-      this.onLoading(parts)
+      this.events?.onLoading(parts)
       return
     }
 
     if (this.loadingReport) clearTimeout(this.loadingReport)
     this.loadingReport = null
     this.progress.clear()
-    this.onLoading(null)
+    this.events?.onLoading(null)
   }
 
   private fetchRuntime(): Promise<Runtime> {

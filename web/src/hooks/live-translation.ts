@@ -6,6 +6,7 @@ import { usePersistentState } from '@/hooks/persistent'
 import { api, type TranslationConfig } from '@/lib/api'
 import { browserEngines } from '@/lib/speech/browser'
 import { LocalTranslator } from '@/lib/speech/local'
+import { message } from '@/lib/speech/runtime'
 import { StandInEngines } from '@/lib/speech/standin'
 import { translationKindLang, type MemberInfo, type RoomClient } from '@/lib/sfu'
 import { LOCAL_SOURCE } from '@/lib/tiles'
@@ -26,12 +27,14 @@ const TRANSLATION_CHECKING: TranslationConfig = {
   languages: [],
   external: false,
 }
-const TRANSLATION_UNKNOWN: TranslationConfig = {
-  available: false,
-  reason: 'Live translation is unavailable: the server configuration could not be read.',
-  mode: 'server',
-  languages: [],
-  external: false,
+function translationUnknown(err: unknown): TranslationConfig {
+  return {
+    available: false,
+    reason: `Live translation is unavailable: the server configuration could not be read: ${message(err)}`,
+    mode: 'server',
+    languages: [],
+    external: false,
+  }
 }
 
 export interface ShownCaption {
@@ -116,12 +119,15 @@ export function useLiveTranslation(
     api
       .config()
       .then((config) => setTranslation(config.translation))
-      .catch(() => setTranslation(TRANSLATION_UNKNOWN))
+      .catch((err: unknown) => {
+        console.warn('live translation: reading the server configuration failed:', err)
+        setTranslation(translationUnknown(err))
+      })
   }, [])
 
   useEffect(() => {
     return () => {
-      translatorRef.current?.stop().catch(() => {})
+      translatorRef.current?.stop().catch((err: unknown) => console.warn('live translation could not stop cleanly when leaving the room:', err))
     }
   }, [])
 

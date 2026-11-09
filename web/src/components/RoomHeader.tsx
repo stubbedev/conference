@@ -112,13 +112,12 @@ export function RoomHeader({
         )}
         {translatorStatus?.loading && <SpeechLoading loading={translatorStatus.loading} />}
         {translatorStatus && translationWarnings(translatorStatus, lang, translation.languages).map((warning) => (
-          <span
-            key={warning}
-            className="flex min-w-0 items-center gap-1.5 rounded-full bg-amber-400 px-2.5 py-1 text-xs font-medium text-black"
-          >
-            <TriangleAlert className="size-3 shrink-0" />
-            <span className="truncate">{warning}</span>
-          </span>
+          <Hint key={warning} label={warning} side="bottom">
+            <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-amber-400 px-2.5 py-1 text-xs font-medium text-black">
+              <TriangleAlert className="size-3 shrink-0" />
+              <span className="truncate">{warning}</span>
+            </span>
+          </Hint>
         ))}
       </div>
     </header>

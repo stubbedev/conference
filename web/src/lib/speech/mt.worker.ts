@@ -2,7 +2,7 @@ import { pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers, loadingModel } from './hf'
-import { expectLoading, reportLoading } from './loading'
+import { expectLoading, reportLoading, webgpuFailed } from './loading'
 import { exportKey, pairFor, type Export, type MtChoice } from './models'
 import { dtypeFor, fallbackToWasm, message, needsHalves, type Device } from './runtime'
 import { serve } from './serve'
@@ -129,8 +129,8 @@ serve(async (request) => {
     case 'init': {
       configureTransformers(String(request.base), parseRuntime(request.runtime))
       choice = request.mt as MtChoice
-      gpu = await webgpuAvailable().catch(() => false)
-      halves = gpu && (await webgpuHalves().catch(() => false))
+      gpu = await webgpuAvailable().catch((err: unknown) => webgpuFailed(err, 'translation runs on the CPU'))
+      halves = gpu && (await webgpuHalves().catch((err: unknown) => webgpuFailed(err, 'translation runs without 16-bit floats')))
       return [{ level: await prepare(choice) }]
     }
 

@@ -1,4 +1,5 @@
 import { browserFetchDeps, headFirstFetch, resilientFetch } from './fetching'
+import { message } from './runtime'
 import { notify } from './serve'
 
 interface ProgressInfo {
@@ -18,6 +19,15 @@ export function expectLoading(key: string): void {
 export function reportLoading(info: ProgressInfo): void {
   if (info.status !== 'progress' || !info.file || info.total === undefined || info.loaded === undefined) return
   notify('loading', { file: `${info.name ?? ''}/${info.file}`, loaded: info.loaded, total: info.total })
+}
+
+export function reportWarning(warning: string): void {
+  notify('warning', { message: warning })
+}
+
+export function webgpuFailed(err: unknown, instead: string): false {
+  reportWarning(`WebGPU failed (${message(err)}), so ${instead}.`)
+  return false
 }
 
 export function fetchRetrying(url: string, init: RequestInit = {}): Promise<Response> {

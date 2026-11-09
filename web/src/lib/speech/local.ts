@@ -20,6 +20,7 @@ import type { Engines, Segmenter } from '@/lib/speech/engines'
 import { invented } from '@/lib/speech/invented'
 import { nextRunAt, Pace } from '@/lib/speech/pace'
 import { Recent } from '@/lib/speech/recent'
+import { message } from '@/lib/speech/runtime'
 import { Sentences, type Line } from '@/lib/speech/sentences'
 import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
 import { webgpuAvailable } from '@/lib/speech/webgpu'
@@ -84,6 +85,7 @@ export class LocalTranslator implements Translator {
   private interimTranscriptionAfter = 0
   private readonly spoken = new Set<string>()
   private readonly voiceless = new Set<string>()
+  private readonly notes = new Set<string>()
   private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
   private selfPrefs: LangPrefs
   private stopped = false
@@ -123,6 +125,7 @@ export class LocalTranslator implements Translator {
     if (!this.client) return
     void this.capture.start(localMic)
     if (this.playbackContext?.state === 'suspended') void this.playbackContext.resume()
+    this.notes.clear()
     this.setStatus({ state: 'live', detail: '' })
     void this.prepare().catch((error: unknown) => this.fail(error))
   }
@@ -179,12 +182,14 @@ export class LocalTranslator implements Translator {
     this.canTranscribe = true
     if (this.engines.requiresWebGpu && !(await webgpuAvailable())) {
       this.canTranscribe = false
-      this.setStatus({ state: 'failed', detail: NO_WEBGPU })
+      this.setStatus({ state: 'failed' })
+      this.note(NO_WEBGPU)
     }
 
-    const prepared = await this.engines.prepare(this.selfPrefs.lang, (parts) =>
-      this.setStatus({ loading: parts ? { state: 'loading', parts } : null }),
-    )
+    const prepared = await this.engines.prepare(this.selfPrefs.lang, {
+      onLoading: (parts) => this.setStatus({ loading: parts ? { state: 'loading', parts } : null }),
+      onWarning: (warning) => this.note(warning),
+    })
     if (this.stopped) return
 
     this.canTranscribe &&= prepared.transcribes
@@ -194,7 +199,8 @@ export class LocalTranslator implements Translator {
     if (prepared.problems.length > 0) {
       const detail = prepared.problems.join(' ')
       const loading = { state: 'failed', reason: detail, retry: () => this.retryPreparing() } as const
-      this.setStatus(this.canTranscribe ? { detail, loading } : { state: 'failed', detail, loading })
+      this.setStatus(this.canTranscribe ? { loading } : { state: 'failed', loading })
+      this.note(detail)
       console.warn('live translation:', detail)
     }
 
@@ -205,12 +211,22 @@ export class LocalTranslator implements Translator {
     })
 
     for (const prefs of this.client?.memberLangPrefs.values() ?? []) {
-      if (prefs.lang !== this.selfPrefs.lang) void this.engines.mt(prefs.lang, this.selfPrefs.lang).catch(() => {})
+      if (prefs.lang !== this.selfPrefs.lang) void this.warmUp(prefs.lang, this.selfPrefs.lang)
+    }
+  }
+
+  private async warmUp(source: string, target: string): Promise<void> {
+    try {
+      await this.engines.mt(source, target)
+    } catch (error) {
+      console.warn(`live translation could not prepare translating ${source} into ${target}:`, error)
+      this.note(`Translating ${source} into ${target} could not be prepared, so those sentences may arrive untranslated: ${message(error)}`)
     }
   }
 
   private retryPreparing(): void {
     if (this.stopped) return
+    this.notes.clear()
     this.setStatus({ state: 'live', detail: '', loading: null })
     void this.prepare().catch((error: unknown) => this.fail(error))
   }
@@ -284,7 +300,7 @@ export class LocalTranslator implements Translator {
 
     const model = await this.engines.stepDown(this.selfPrefs.lang)
     this.pace.reset()
-    if (model) this.setStatus({ detail: `This device could not transcribe in time, so it now uses the smaller ${model}.` })
+    if (model) this.note(`This device could not transcribe in time, so it now uses the smaller ${model}.`)
   }
 
   private clearHold(): void {
@@ -470,14 +486,20 @@ export class LocalTranslator implements Translator {
       console.warn('live translation has no voice for', prefs.lang, error)
       if (this.voiceless.has(prefs.lang)) return
       this.voiceless.add(prefs.lang)
-      this.setStatus({ detail: `Translations are shown but not spoken: ${error instanceof Error ? error.message : String(error)}` })
+      this.note(`Translations are shown but not spoken: ${message(error)}`)
     }
   }
 
   private fail(error: unknown): void {
     if (this.stopped) return
     console.warn('live translation:', error)
-    this.setStatus({ detail: error instanceof Error ? error.message : String(error) })
+    this.note(message(error))
+  }
+
+  private note(warning: string): void {
+    if (this.stopped || this.notes.has(warning)) return
+    this.notes.add(warning)
+    this.setStatus({ detail: [...this.notes].join(' ') })
   }
 
   private failed(error: unknown, caption: CaptionLine, target: string): void {

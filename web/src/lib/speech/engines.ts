@@ -44,9 +44,14 @@ export interface Prepared {
   problems: string[]
 }
 
+export interface PrepareEvents {
+  onLoading(parts: readonly PartLoading[] | null): void
+  onWarning(warning: string): void
+}
+
 export interface Engines {
   readonly requiresWebGpu: boolean
-  prepare(lang: string, onLoading: (parts: readonly PartLoading[] | null) => void): Promise<Prepared>
+  prepare(lang: string, events: PrepareEvents): Promise<Prepared>
   segmenter(events: SegmenterEvents): Promise<Segmenter>
   asr(lang: string): Promise<AsrEngine>
   stepDown(lang: string): Promise<string | null>
