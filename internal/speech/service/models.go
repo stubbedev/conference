@@ -332,8 +332,14 @@ func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes 
 		}
 	}
 
+	return recordHostedExports(root, kind, export.Model, metadata, what, sizes)
+}
+
+func recordHostedExports(root string, kind Kind, model string, metadata int64, what string, sizes map[string]int64) error {
+	suffixes := dtypeSuffixes()
+
 	for _, dtype := range slices.Sorted(maps.Keys(suffixes)) {
-		onnx, err = exportBytes(root, exportFiles(kind, suffixes[dtype]), what)
+		onnx, err := exportBytes(root, exportFiles(kind, suffixes[dtype]), what)
 		if errors.Is(err, errModelsMissing) || errors.Is(err, errModelsTooLarge) {
 			continue
 		}
@@ -342,7 +348,7 @@ func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes 
 			return err
 		}
 
-		sizes[exportKey(export.Model, dtype)] = metadata + onnx
+		sizes[exportKey(model, dtype)] = metadata + onnx
 	}
 
 	return nil
