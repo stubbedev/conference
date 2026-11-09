@@ -108,7 +108,7 @@ class BrowserEngines implements Engines {
 
   async prepare(lang: string, events: PrepareEvents): Promise<Prepared> {
     this.events = events
-    this.builtin.tellAgain()
+    this.builtin.startPreparation()
     const room = await this.storageProblem(lang)
     if (room) return { transcribes: false, translates: 'none', problems: [room] }
 

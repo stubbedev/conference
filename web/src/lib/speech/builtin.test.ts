@@ -96,9 +96,46 @@ test('a refusal is told again to a new preparation without asking the browser ag
   const { builtin, warnings } = translators()
 
   await builtin.for('en', 'de')
-  builtin.tellAgain()
+  builtin.startPreparation()
   await builtin.for('en', 'de')
 
   assert.equal(warnings.length, 2)
   assert.equal(asked, 1)
+})
+
+test('a failed creation is tried again by a new preparation, and can then succeed', async () => {
+  let attempts = 0
+  withTranslator(
+    () => Promise.resolve('downloadable'),
+    () => {
+      attempts += 1
+      return attempts === 1 ? Promise.reject(new Error('download declined')) : Promise.resolve(ready)
+    },
+  )
+  const { builtin, warnings } = translators()
+
+  assert.equal(await builtin.for('en', 'de'), null)
+  builtin.startPreparation()
+
+  assert.equal(await builtin.for('en', 'de'), ready)
+  assert.equal(attempts, 2)
+  assert.equal(warnings.length, 1)
+})
+
+test('a failed creation is not tried again within one preparation', async () => {
+  let attempts = 0
+  withTranslator(
+    () => Promise.resolve('downloadable'),
+    () => {
+      attempts += 1
+      return Promise.reject(new Error('download declined'))
+    },
+  )
+  const { builtin, warnings } = translators()
+
+  await builtin.for('en', 'de')
+  await builtin.for('en', 'de')
+
+  assert.equal(attempts, 1)
+  assert.equal(warnings.length, 1)
 })
