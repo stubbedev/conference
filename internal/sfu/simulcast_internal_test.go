@@ -3,10 +3,12 @@ package sfu
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
 )
 
 const (
@@ -314,5 +316,32 @@ func TestLayerDemandIgnoresViewersWithoutALayer(t *testing.T) {
 	wanted, _ := demand.update([]int{-1}, time.Unix(1000, 0))
 	if wanted != [layerCount]bool{true, false, false} {
 		t.Fatalf("a viewer with no layer yet wants nothing above the lowest, got %v", wanted)
+	}
+}
+
+func TestScreenShareKeepsItsFluidLayerWithNobodyWatchingIt(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(1000, 0)
+
+	for _, kind := range []string{KindScreen, KindCamera} {
+		thumbnail := &upViewer{
+			local: nil, rate: newViewerRate(0), mu: sync.Mutex{}, current: layerLow, target: layerLow,
+			preferred: layerLow, steps: newLadder(), mung: newMunger(), buf: nil,
+		}
+		track := &UpTrack{
+			mid: "1", kind: kind, pc: nil, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, vp8: true,
+			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{}, viewers: map[string]*upViewer{"thumbnail": thumbnail},
+			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
+		}
+
+		wanted, _ := track.updateDemand(start)
+		if kind == KindScreen && wanted != [layerCount]bool{true, false, true} {
+			t.Fatalf("a share watched only as a thumbnail wants %v, want its fluid layer kept", wanted)
+		}
+
+		if kind == KindCamera && wanted != [layerCount]bool{true, false, false} {
+			t.Fatalf("a camera watched only as a thumbnail wants %v, want only its lowest layer", wanted)
+		}
 	}
 }

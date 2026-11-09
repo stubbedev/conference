@@ -1745,11 +1745,15 @@ func (ut *UpTrack) updateDemand(now time.Time) ([layerCount]bool, bool) {
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
 
-	desired := make([]int, 0, len(ut.viewers))
+	desired := make([]int, 0, len(ut.viewers)+1)
 	for _, viewer := range ut.viewers {
 		viewer.mu.Lock()
 		desired = append(desired, min(viewer.preferred, viewer.steps.ceiling))
 		viewer.mu.Unlock()
+	}
+
+	if ut.kind == KindScreen {
+		desired = append(desired, layerHigh)
 	}
 
 	return ut.demand.update(desired, now)
