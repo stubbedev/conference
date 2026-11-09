@@ -3,15 +3,24 @@ package service
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"slices"
 	"sync"
 	"testing"
 
 	"github.com/stubbe/conference/internal/speech/vad"
+	"github.com/stubbe/conference/internal/speech/wav"
 	"github.com/stubbe/conference/internal/speech/wire"
 )
 
-const envCloning = "VOICE_CLONING"
+const (
+	envCloning   = "VOICE_CLONING"
+	modelConvert = "chatterbox-vc"
+	sampleText   = "hej du"
+)
 
 // recordingVoice is a voice engine that remembers whether each request
 // carried an own-voice reference, and can fail the cloned ones.
@@ -19,8 +28,10 @@ type recordingVoice struct {
 	stubEngines
 
 	failCloned bool
-	mu         sync.Mutex
-	calls      []bool
+	// unconverted fails own-voice requests the way a failed conversion does.
+	unconverted bool
+	mu          sync.Mutex
+	calls       []bool
 }
 
 func (r *recordingVoice) speak(_ context.Context, _ string, _ language, _ voiceChoice, own *reference) (speech, error) {
@@ -30,6 +41,10 @@ func (r *recordingVoice) speak(_ context.Context, _ string, _ language, _ voiceC
 
 	if own != nil && r.failCloned {
 		return speech{}, errEngineDown
+	}
+
+	if own != nil && r.unconverted {
+		return speech{}, &unconvertedError{stock: speech{pcm: []byte{0, 0}, rate: vad.Rate}, err: errEngineDown}
 	}
 
 	return speech{pcm: []byte{0, 0}, rate: vad.Rate}, nil
@@ -97,7 +112,7 @@ func TestOwnVoiceFallsBackToTheStockVoice(t *testing.T) {
 
 	engines := &recordingVoice{
 		transcribeFn: echoTranscripts, translateFn: echoTranslations,
-		failCloned: true, mu: sync.Mutex{}, calls: nil,
+		failCloned: true, unconverted: false, mu: sync.Mutex{}, calls: nil,
 	}
 	opened, out := newOwnVoiceSession(t, "true", engines)
 
@@ -122,7 +137,7 @@ func TestVoiceOnlyWhereSomeoneListens(t *testing.T) {
 
 	engines := &recordingVoice{
 		transcribeFn: echoTranscripts, translateFn: echoTranslations,
-		failCloned: false, mu: sync.Mutex{}, calls: nil,
+		failCloned: false, unconverted: false, mu: sync.Mutex{}, calls: nil,
 	}
 	opened, out := newOwnVoiceSession(t, "", engines)
 	opened.setVoiceTargets([]string{})
@@ -149,7 +164,8 @@ func TestOwnVoiceRequest(t *testing.T) {
 
 	api, seen := fakeAPI(t)
 	settings := openAISettings(t, api)
-	own := &reference{wav: []byte("RIFFwave"), text: "hej du"}
+	settings.voiceCloning = true
+	own := &reference{wav: []byte("RIFFwave"), text: sampleText}
 
 	_, err := newHTTPEngines(settings).speak(t.Context(), "hallo welt", mustLanguage(t, settings, "de"), voiceOwn, own)
 	if err != nil {
@@ -158,7 +174,7 @@ func TestOwnVoiceRequest(t *testing.T) {
 
 	got := seen.speech
 	if got.Voice != "" || got.VoiceRef == nil || got.VoiceRef.Type != "base64" ||
-		got.VoiceRef.Data != base64.StdEncoding.EncodeToString(own.wav) || got.ReferenceText != "hej du" || got.Language != "de" {
+		got.VoiceRef.Data != base64.StdEncoding.EncodeToString(own.wav) || got.ReferenceText != sampleText || got.Language != "de" {
 		t.Fatalf("own-voice request %+v (ref %+v)", got, got.VoiceRef)
 	}
 }
@@ -293,5 +309,136 @@ func TestForgetVoiceDropsEverything(t *testing.T) {
 	err = opened.forgetVoice(sam)
 	if err == nil {
 		t.Fatal("another member made this speaker's voice be forgotten")
+	}
+}
+
+func convertingSettings(t *testing.T, api *httptest.Server, convertURL string) Settings {
+	t.Helper()
+
+	settings := openAISettings(t, api)
+	settings.conversion = &engine{
+		provider: audioCPP, endpoint: mustURL(t, convertURL), apiKey: "", model: modelConvert, problem: "", external: false,
+	}
+
+	return settings
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+
+	return parsed
+}
+
+func TestConvertedVoiceRequests(t *testing.T) {
+	t.Parallel()
+
+	api, seen := fakeAPI(t)
+	settings := convertingSettings(t, api, api.URL+"/v1")
+	own := &reference{wav: []byte("RIFFwave"), text: sampleText}
+
+	spoken, err := newHTTPEngines(settings).speak(t.Context(), helloGerman, mustLanguage(t, settings, "de"), voiceOwn, own)
+	if err != nil {
+		t.Fatalf("speak: %v", err)
+	}
+
+	if spoken.rate != convertTestRate || len(spoken.pcm) != 6 {
+		t.Fatalf("spoke %d bytes at %d Hz, want the converted voice", len(spoken.pcm), spoken.rate)
+	}
+
+	if got := seen.speech; got.Voice != voiceAlloy || got.VoiceRef != nil || got.ReferenceText != "" {
+		t.Fatalf("the stock voice request carried the speaker's voice: %+v", got)
+	}
+
+	checkConvertRequest(t, seen.convert, own)
+}
+
+// checkConvertRequest checks that the stock voice the fake API spoke and
+// the speaker's recording went to the conversion engine.
+func checkConvertRequest(t *testing.T, got convertRequest, own *reference) {
+	t.Helper()
+
+	stock, err := wav.Encode([]int16{1, 2}, voiceTestRate)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	if got.Model != modelConvert || got.Request.Audio != base64.StdEncoding.EncodeToString(stock) ||
+		got.Request.VoiceRef != (voiceRef{Type: "base64", Data: base64.StdEncoding.EncodeToString(own.wav)}) {
+		t.Fatalf("conversion request %+v", got)
+	}
+}
+
+func TestFailedConversionKeepsTheStockVoice(t *testing.T) {
+	t.Parallel()
+
+	api, _ := fakeAPI(t)
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(down.Close)
+
+	settings := convertingSettings(t, api, down.URL)
+
+	_, err := newHTTPEngines(settings).speak(t.Context(), helloGerman, mustLanguage(t, settings, "de"), voiceOwn,
+		&reference{wav: []byte("RIFF"), text: "hej"})
+
+	unconverted, ok := errors.AsType[*unconvertedError](err)
+	if !ok || unconverted.stock.rate != voiceTestRate {
+		t.Fatalf("a failed conversion returned %v, want the stock voice with the error", err)
+	}
+
+	engines := &recordingVoice{
+		transcribeFn: echoTranscripts, translateFn: echoTranslations,
+		failCloned: false, unconverted: true, mu: sync.Mutex{}, calls: nil,
+	}
+	opened, out := newOwnVoiceSession(t, "true", engines)
+
+	job := sentence(t, opened, voiceOwn, 1)
+	job.own = &reference{wav: []byte("RIFF"), text: "hallo"}
+
+	opened.translate(t.Context(), opened.speaker, job, mustLanguage(t, opened.settings, "en"), "hallo", nil)
+
+	if got := engines.seen(); !slices.Equal(got, []bool{true}) {
+		t.Fatalf("voice calls %v, want only the one whose conversion failed", got)
+	}
+
+	out.waitFor(t, func(message any) bool {
+		frame, ok := message.(voiceFrame)
+
+		return ok && !frame.header.Cloned
+	})
+}
+
+func TestConversionSettings(t *testing.T) {
+	t.Parallel()
+
+	converting := load(t, map[string]string{
+		envConvertURL: "http://voice.lan:8099/v1", envConvertModel: modelConvert,
+	})
+	if !converting.Status().OwnVoice || converting.conversion == nil {
+		t.Fatalf("with a conversion engine: %+v", converting.Status())
+	}
+
+	external := load(t, map[string]string{
+		envConvertURL: "https://voices.example.com/v1", envConvertModel: "vc",
+	})
+	if !external.Status().External {
+		t.Fatal("an external conversion engine was not reported as external")
+	}
+
+	for name, values := range map[string]map[string]string{
+		"address only": {envConvertURL: "http://voice.lan/v1"},
+		"model only":   {envConvertModel: "vc"},
+		"and cloning":  {envConvertURL: "http://voice.lan/v1", envConvertModel: "vc", envCloning: "true"},
+	} {
+		_, err := FromEnv(func(key string) string { return values[key] })
+		if err == nil {
+			t.Errorf("%s was accepted", name)
+		}
 	}
 }

@@ -43,8 +43,8 @@ type speechEngines interface {
 	speak(ctx context.Context, text string, lang language, choice voiceChoice, own *reference) (speech, error)
 }
 
-// reference is a speaker's own voice for a cloning voice engine: a WAV
-// of what they said in the call and its transcript.
+// reference is a speaker's own voice, for a cloning voice engine or a
+// conversion engine: the WAV they recorded and its transcript.
 type reference struct {
 	wav  []byte
 	text string
@@ -65,7 +65,35 @@ var (
 	errStatus      = errors.New("unexpected status")
 	errNoChoice    = errors.New("no choices in the reply")
 	errNoVoiceName = errors.New("no voice name")
+	errNoAudio     = errors.New("no audio in the reply")
 )
+
+// unconvertedError is a failed voice conversion that still has the
+// stock voice it started from, so a listener needn't wait for it again.
+type unconvertedError struct {
+	stock speech
+	err   error
+}
+
+func (e *unconvertedError) Error() string { return e.err.Error() }
+
+func (e *unconvertedError) Unwrap() error { return e.err }
+
+// convertRequest is audio.cpp's /tasks/run for a voice conversion model:
+// the stock voice and the speaker's recording, both inline.
+type convertRequest struct {
+	Model   string      `json:"model"`
+	Request convertTask `json:"request"`
+}
+
+type convertTask struct {
+	Audio    string   `json:"audio_base64"` //nolint:tagliatelle // the conversion engine's wire format.
+	VoiceRef voiceRef `json:"voice_ref"`    //nolint:tagliatelle // the conversion engine's wire format.
+}
+
+type convertReply struct {
+	Audio string `json:"audio"`
+}
 
 type chatMessage struct {
 	Role    string `json:"role"`
@@ -264,7 +292,7 @@ func (e *httpEngines) speak(ctx context.Context, text string, lang language, cho
 		VoiceRef: nil, ReferenceText: "", Language: "",
 	}
 
-	if own != nil {
+	if own != nil && e.settings.voiceCloning {
 		request.VoiceRef = &voiceRef{Type: "base64", Data: base64.StdEncoding.EncodeToString(own.wav)}
 		request.ReferenceText = own.text
 		request.Language = lang.Code
@@ -289,14 +317,57 @@ func (e *httpEngines) speak(ctx context.Context, text string, lang language, cho
 		return speech{}, err
 	}
 
-	samples, rate, err := wav.Decode(reply.Bytes())
+	spoken, err := decodeSpeech(voice, reply.Bytes())
+	if err != nil || own == nil || e.settings.conversion == nil {
+		return spoken, err
+	}
+
+	converted, err := e.convert(ctx, reply.Bytes(), own)
 	if err != nil {
-		return speech{}, fmt.Errorf("%s: read the voice: %w", voice, err)
+		return speech{}, &unconvertedError{stock: spoken, err: err}
+	}
+
+	return converted, nil
+}
+
+// convert turns a stock voice WAV into the speaker's own voice.
+func (e *httpEngines) convert(ctx context.Context, stock []byte, own *reference) (speech, error) {
+	request := convertRequest{
+		Model: e.settings.conversion.model,
+		Request: convertTask{
+			Audio:    base64.StdEncoding.EncodeToString(stock),
+			VoiceRef: voiceRef{Type: "base64", Data: base64.StdEncoding.EncodeToString(own.wav)},
+		},
+	}
+
+	var reply convertReply
+
+	err := e.callJSON(ctx, conversion, *e.settings.conversion, "/tasks/run", request, &reply)
+	if err != nil {
+		return speech{}, err
+	}
+
+	if reply.Audio == "" {
+		return speech{}, fmt.Errorf("%s: %w", conversion, errNoAudio)
+	}
+
+	converted, err := base64.StdEncoding.DecodeString(reply.Audio)
+	if err != nil {
+		return speech{}, fmt.Errorf("%s: read the audio: %w", conversion, err)
+	}
+
+	return decodeSpeech(conversion, converted)
+}
+
+func decodeSpeech(use purpose, data []byte) (speech, error) {
+	samples, rate, err := wav.Decode(data)
+	if err != nil {
+		return speech{}, fmt.Errorf("%s: read the voice: %w", use, err)
 	}
 
 	pcm, err := binary.Append(make([]byte, 0, len(samples)*pcmWidth), binary.LittleEndian, samples)
 	if err != nil {
-		return speech{}, fmt.Errorf("%s: encode the voice: %w", voice, err)
+		return speech{}, fmt.Errorf("%s: encode the voice: %w", use, err)
 	}
 
 	return speech{pcm: pcm, rate: int(rate)}, nil

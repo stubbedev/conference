@@ -195,7 +195,7 @@ func (s *session) sampleAudio(header wire.AudioHeader, pcm []int16) error {
 		return fmt.Errorf("%w: %q", errForeignSpeaker, header.Speaker)
 	}
 
-	if s.settings.voiceCloning {
+	if s.settings.ownVoice() {
 		current.incoming = append(current.incoming, pcm[:min(len(pcm), ownVoiceMax-len(current.incoming))]...)
 	}
 
@@ -214,7 +214,7 @@ func (s *session) finishSample(ctx context.Context, speakerID, code string) erro
 	audio := current.incoming
 	current.incoming = nil
 
-	if !s.settings.voiceCloning {
+	if !s.settings.ownVoice() {
 		return nil
 	}
 
@@ -382,7 +382,7 @@ func (s *session) final(ctx context.Context, current *speaker, job final) {
 // ownVoice is the speaker's recorded voice while they have chosen it,
 // or nil for the stock voice.
 func (s *session) ownVoice(current *speaker, job final) *reference {
-	if !s.settings.voiceCloning || job.voice != voiceOwn {
+	if !s.settings.ownVoice() || job.voice != voiceOwn {
 		return nil
 	}
 
@@ -415,8 +415,13 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 	if err != nil && cloned {
 		logFailure(ctx, "own voice, spoke in the stock voice", err)
 
-		spoken, err = s.engines.speak(ctx, translated, target, job.voice, nil)
 		cloned = false
+
+		if unconverted, ok := errors.AsType[*unconvertedError](err); ok {
+			spoken, err = unconverted.stock, nil
+		} else {
+			spoken, err = s.engines.speak(ctx, translated, target, job.voice, nil)
+		}
 	}
 
 	if err != nil {

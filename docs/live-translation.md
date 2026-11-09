@@ -57,6 +57,7 @@ its default.
 | `VOICE_URL`, `VOICE_API_KEY`, `VOICE_MODEL` | OpenAI, `OPENAI_API_KEY`, none | The voice: an OpenAI-compatible `/audio/speech` that returns WAV |
 | `VOICE_NAME` | none | The voice for languages without their own `voices` |
 | `VOICE_CLONING` | `false` | `true` if the voice engine clones voices from a recording; speakers can then choose their own voice (below) |
+| `VOICE_CONVERT_URL`, `VOICE_CONVERT_API_KEY`, `VOICE_CONVERT_MODEL` | none | A voice conversion engine (audio.cpp's `/tasks/run`) that turns the stock voice into the speaker's own; the other way to offer own voice (below). Not together with `VOICE_CLONING` |
 | `OPENAI_API_KEY` | none | The key for every OpenAI-compatible engine without its own |
 | `INTERNAL_DOMAINS` | none | Domains on your network, e.g. `corp.example.com`, so their engines don't count as external |
 | `GLOSSARY` | none | Term translations the translator must use, e.g. `Kontainer = Kontainer` |
@@ -100,8 +101,9 @@ latest.
 
 ## Own voice
 
-With `VOICE_CLONING=true`, a speaker can choose **My own voice** instead
-of the female or male one; without it the app doesn't offer the option.
+With `VOICE_CLONING=true` or a conversion engine (`VOICE_CONVERT_*`), a
+speaker can choose **My own voice** instead of the female or male one;
+without either the app doesn't offer the option.
 Listeners see "AI voice (cloned)" on the tile while it plays, so nobody
 mistakes it for the person speaking that language.
 
@@ -138,14 +140,18 @@ speaker's own microphone.
   dropped when the stream ends, and at once when the speaker deletes it
   or picks a stock voice (the browser sends `forget-voice`). Never logged
   or written to disk.
-- *The voice engine:* gets it inline with each request and stores nothing
-  on disk. audio.cpp does keep prepared voices in memory, so that it
-  doesn't prepare a voice again for every sentence (measured on an M1 Max:
-  2.2 s per sentence with the cache, 6.5 s without). Recommended:
+- *The voice or conversion engine:* gets it inline with each request and
+  stores nothing on disk. A cloning engine does keep prepared voices in
+  memory, so that it doesn't prepare a voice again for every sentence
+  (measured on an M1 Max: 2.2 s per sentence with the cache, 6.5 s
+  without). It prepares a voice per language, so switching between two
+  listener languages costs that again each time unless both stay cached.
+  Recommended:
   - `conditionals_cache_slots` (Chatterbox) or `prompt_cache_slots`
     (VoxCPM2) in the model's `session_options`, set to about the number
-    of speakers using their own voice at the same time (default 1: two
-    such speakers would keep evicting each other);
+    of speakers using their own voice at the same time times the
+    languages they are heard in (default 1: two would keep evicting each
+    other);
   - `--idle-unload-ms 600000`, so after 10 minutes without a request the
     models, and the prepared voices with them, leave memory;
   - `log_request_body` off, so request bodies aren't logged.
@@ -153,7 +159,11 @@ speaker's own microphone.
   Set the slots to 0 if no voice may outlive its request at all, at about
   three times the time per sentence.
 
-The voice engine must accept audio.cpp's request fields:
+**Two ways to make it.** Operators pick one:
+
+- *Cloning* (`VOICE_CLONING=true`): the voice engine speaks the
+  translation in the speaker's voice directly. The voice engine must
+  accept audio.cpp's request fields:
 
 ```json
 {
@@ -170,6 +180,32 @@ and Chatterbox Multilingual (MIT), both covering, among others, Danish,
 German, English and Swedish. Cloning is heavier than a stock voice: it
 needs a GPU to keep up with a live call. Chatterbox needs `language`: a
 German sentence without it comes out garbled.
+
+- *Conversion* (`VOICE_CONVERT_URL`, `VOICE_CONVERT_MODEL`): the stock
+  voice speaks the translation as usual, and a voice conversion model
+  then makes it sound like the speaker. The stock voice can be any
+  engine, the conversion doesn't depend on the language, and it is much
+  lighter: on an M1 Max, Chatterbox's conversion with 3 flow steps took
+  about 0.9 s per sentence, against about 6 s for cloning the same
+  sentence, and listeners couldn't tell the two apart. The service sends:
+
+```json
+{
+  "model": "…",
+  "request": {
+    "audio_base64": "<the stock voice, WAV>",
+    "voice_ref": { "type": "base64", "data": "<the recording, WAV 16 kHz mono>" }
+  }
+}
+```
+
+  to `/tasks/run` and reads the converted WAV from `audio` (base64) in the
+  reply. Set the model's speed in the engine, e.g. audio.cpp's
+  `"default_request_options": {"num_inference_steps": "3"}` for
+  `chatterbox` with `"task": "vc"`. audio.cpp 0.9.4 takes `voice_ref`
+  there only as a file path, so it needs a small change to take it inline
+  as above. If a conversion fails, the listener hears the stock voice
+  already made for it.
 
 **Voices only where someone listens.** Each speaker's browser tells the
 service which languages someone wants a translated voice in; others get

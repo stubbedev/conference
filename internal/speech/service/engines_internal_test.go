@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,9 +15,10 @@ import (
 )
 
 const (
-	bearer        = "Bearer key"
-	helloGerman   = "hallo welt"
-	voiceTestRate = 22050
+	bearer          = "Bearer key"
+	helloGerman     = "hallo welt"
+	voiceTestRate   = 22050
+	convertTestRate = 24000
 )
 
 type transcriptionSeen struct {
@@ -32,6 +34,7 @@ type apiSeen struct {
 	chat          chatRequest
 	ollama        ollamaRequest
 	speech        speechRequest
+	convert       convertRequest
 }
 
 func (a *apiSeen) record(r *http.Request, apply func()) {
@@ -62,6 +65,7 @@ func fakeAPI(t *testing.T) (*httptest.Server, *apiSeen) {
 		chat:          chatRequest{Model: "", Messages: nil},
 		ollama:        ollamaRequest{Model: "", Stream: false, Think: false, Options: ollamaOptions{Temperature: 0}, Messages: nil},
 		speech:        speechRequest{Model: "", Voice: "", Input: "", ResponseFormat: "", VoiceRef: nil, ReferenceText: "", Language: ""},
+		convert:       convertRequest{Model: "", Request: convertTask{Audio: "", VoiceRef: voiceRef{Type: "", Data: ""}}},
 	}
 	mux := http.NewServeMux()
 
@@ -88,6 +92,17 @@ func fakeAPI(t *testing.T) (*httptest.Server, *apiSeen) {
 		}
 
 		_, _ = w.Write(voiced)
+	})
+
+	mux.HandleFunc("POST /v1/tasks/run", func(w http.ResponseWriter, r *http.Request) {
+		seen.record(r, func() { decodeInto(t, r, &seen.convert) })
+
+		converted, err := wav.Encode([]int16{3, 4, 5}, convertTestRate)
+		if err != nil {
+			t.Errorf("encode the converted voice: %v", err)
+		}
+
+		_, _ = io.WriteString(w, `{"audio":"`+base64.StdEncoding.EncodeToString(converted)+`"}`)
 	})
 
 	server := httptest.NewServer(mux)
