@@ -50,7 +50,7 @@ export default function Room() {
   const canBlur = blurSupported()
 
   const media = useLocalMedia(clientRef)
-  const { controls, controlsRef, devicePrefs, localStreamRef, toggleTrack, toggleMic, toggleCam } = media
+  const { controls, controlsRef, devicePrefs, localStreamRef, turnOff, toggleMic, toggleCam } = media
   const { screenStream, screenStreamRef, toggleShare, toggleScreen } = useScreenShare(
     clientRef,
     controlsRef,
@@ -91,16 +91,16 @@ export default function Room() {
       client.on('forced', ({ action }) => {
         if (action === 'mute') {
           toast('The host muted your microphone')
-          if (controlsRef.current.mic) toggleTrack('mic')
+          turnOff('mic')
         } else if (action === 'cam') {
           toast('The host turned off your camera')
-          if (controlsRef.current.cam) toggleTrack('cam')
+          turnOff('cam')
         } else {
           toast('The host stopped your screen share')
           if (controlsRef.current.sharing) void toggleShare()
         }
       }),
-    [controlsRef, toggleTrack, toggleShare],
+    [controlsRef, turnOff, toggleShare],
   )
 
   const binders = useMemo(

@@ -473,17 +473,26 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     [queue, switchDeviceNow],
   )
 
+  const setTrackOn = useCallback(
+    (kind: TrackKind, on: boolean) => {
+      updateControls(kind === 'mic' ? { mic: on } : { cam: on })
+      applyEnabled(kind, on)
+      clientRef.current?.setTrackEnabled(kind, on)
+    },
+    [clientRef, updateControls, applyEnabled],
+  )
+
   const toggleTrack = useCallback(
     (kind: TrackKind) => {
       const hasTrack = tracksOf(localStreamRef.current, kind).length > 0
       const { on, open } = queue.toggle(kind, controlsRef.current[kind], hasTrack)
-      updateControls(kind === 'mic' ? { mic: on } : { cam: on })
-      applyEnabled(kind, on)
-      clientRef.current?.setTrackEnabled(kind, on)
+      setTrackOn(kind, on)
       if (open) void switchDevice(kind, prefsRef.current[kind], undefined, { mode: 'enable' })
     },
-    [clientRef, updateControls, controlsRef, switchDevice, prefsRef, queue, applyEnabled],
+    [controlsRef, switchDevice, prefsRef, queue, setTrackOn],
   )
+
+  const turnOff = useCallback((kind: TrackKind) => setTrackOn(kind, false), [setTrackOn])
 
   const toggleMic = useCallback(() => toggleTrack('mic'), [toggleTrack])
   const toggleCam = useCallback(() => toggleTrack('cam'), [toggleTrack])
@@ -537,7 +546,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     hasCam: Boolean(localStream?.getVideoTracks().length),
     acquireMedia,
     switchDevice,
-    toggleTrack,
+    turnOff,
     toggleMic,
     toggleCam,
     onToggleBlur,
