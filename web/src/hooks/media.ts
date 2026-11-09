@@ -311,26 +311,59 @@ export function trackConstraints(
   return deviceId ? { deviceId: { exact: deviceId }, ...size } : size
 }
 
+function streamTrack(stream: MediaStream, kind: TrackKind): MediaStreamTrack | undefined {
+  return kind === 'mic' ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0]
+}
+
 async function requestTrack(
   kind: TrackKind,
   deviceId: string,
   resolution: CameraResolution,
   facing?: CameraFacing,
-): Promise<MediaStreamTrack | null> {
+): Promise<MediaStreamTrack> {
   const constraints = trackConstraints(kind, deviceId, resolution, facing)
   const request: MediaStreamConstraints = kind === 'mic' ? { audio: constraints } : { video: constraints }
-  const stream = await navigator.mediaDevices.getUserMedia(request).catch(() => null)
-  if (!stream) return null
-  return kind === 'mic'
-    ? (stream.getAudioTracks()[0] ?? null)
-    : (stream.getVideoTracks()[0] ?? null)
+  const stream = await navigator.mediaDevices.getUserMedia(request)
+  const track = streamTrack(stream, kind)
+  if (track) return track
+  stopMediaStream(stream)
+  throw new DOMException(`The browser returned no ${DEVICE_LABELS[kind].toLowerCase()} track`, 'NotFoundError')
 }
 
-export interface OpenTrackResult {
-  track: MediaStreamTrack | null
+export interface OpenedTrack {
+  track: MediaStreamTrack
   deviceId: string
   facing?: CameraFacing
   fallback: boolean
+}
+
+export interface FailedTrack {
+  track: null
+  error: unknown
+}
+
+export type OpenTrackResult = OpenedTrack | FailedTrack
+
+export type TrackOutcome = Pick<OpenedTrack, 'track'> | FailedTrack
+
+interface TrackAttempt {
+  deviceId: string
+  facing?: CameraFacing
+  reportedId: string
+  fallback: boolean
+}
+
+function trackAttempts(kind: TrackKind, deviceId: string, facing?: CameraFacing): TrackAttempt[] {
+  const systemDefault: TrackAttempt = { deviceId: '', reportedId: '', fallback: true }
+  if (kind === 'cam' && facing) {
+    return [
+      { deviceId: '', facing, reportedId: deviceId, fallback: false },
+      ...(deviceId ? [{ deviceId, reportedId: deviceId, fallback: false }] : []),
+      systemDefault,
+    ]
+  }
+  if (!deviceId) return [{ ...systemDefault, fallback: false }]
+  return [{ deviceId, reportedId: deviceId, fallback: false }, systemDefault]
 }
 
 // Tries the requested device, then the system default, and reports which
@@ -343,47 +376,43 @@ export async function openTrackWithFallback(
   resolution: CameraResolution = 'auto',
   facing?: CameraFacing,
 ): Promise<OpenTrackResult> {
-  if (kind === 'cam' && facing) {
-    const track = await requestTrack(kind, '', resolution, facing)
-    if (track) return { track, deviceId, facing: facingFromTrack(track) ?? facing, fallback: false }
-    if (deviceId) {
-      const byId = await requestTrack(kind, deviceId, resolution)
-      if (byId) return { track: byId, deviceId, facing: facingFromTrack(byId), fallback: false }
-    }
-    const fallbackTrack = await requestTrack(kind, '', resolution)
-    if (fallbackTrack) {
-      return {
-        track: fallbackTrack,
-        deviceId: '',
-        facing: facingFromTrack(fallbackTrack),
-        fallback: true,
-      }
-    }
-    return { track: null, deviceId, fallback: false }
-  }
-  for (const attempt of deviceId ? [deviceId, ''] : ['']) {
-    const track = await requestTrack(kind, attempt, resolution)
-    if (track) {
+  let error: unknown
+  for (const attempt of trackAttempts(kind, deviceId, facing)) {
+    try {
+      const track = await requestTrack(kind, attempt.deviceId, resolution, attempt.facing)
       return {
         track,
-        deviceId: attempt,
-        facing: kind === 'cam' ? facingFromTrack(track) : undefined,
-        fallback: Boolean(deviceId) && attempt === '',
+        deviceId: attempt.reportedId,
+        facing: kind === 'cam' ? (facingFromTrack(track) ?? attempt.facing) : undefined,
+        fallback: attempt.fallback,
       }
+    } catch (err) {
+      console.warn(`media: opening the ${DEVICE_LABELS[kind].toLowerCase()} "${attempt.deviceId || 'default'}"`, err)
+      error = err
     }
   }
-  return { track: null, deviceId, fallback: false }
+  return { track: null, error }
 }
 
-export async function openTrack(
-  kind: TrackKind,
-  deviceId: string,
-  allowFallback = true,
-  resolution: CameraResolution = 'auto',
-  facing?: CameraFacing,
-): Promise<MediaStreamTrack | null> {
-  if (!allowFallback) return requestTrack(kind, deviceId, resolution, facing)
-  return (await openTrackWithFallback(kind, deviceId, resolution, facing)).track
+export async function openMicAndCamera(
+  prefs: DevicePrefs,
+  camFacing?: CameraFacing,
+): Promise<Record<TrackKind, TrackOutcome>> {
+  try {
+    const combined = await navigator.mediaDevices.getUserMedia({
+      audio: trackConstraints('mic', prefs.mic),
+      video: trackConstraints('cam', prefs.cam, prefs.resolution, camFacing),
+    })
+    const mic = streamTrack(combined, 'mic')
+    const cam = streamTrack(combined, 'cam')
+    if (mic && cam) return { mic: { track: mic }, cam: { track: cam } }
+    stopMediaStream(combined)
+  } catch (err) {
+    console.warn('media: opening the microphone and camera together, opening each on its own instead', err)
+  }
+  const mic = await openTrackWithFallback('mic', prefs.mic)
+  const cam = await openTrackWithFallback('cam', prefs.cam, prefs.resolution, camFacing)
+  return { mic, cam }
 }
 
 export function stopMediaStream(stream: MediaStream | null | undefined): void {
@@ -477,7 +506,7 @@ function installGestureRetry(): void {
   const retry = () => {
     retryAwaiting()
     const ctx = sharedContext
-    if (ctx?.state === 'suspended') void ctx.resume().catch(() => {})
+    if (ctx) resumeSuspended(ctx)
     if (awaitingGesture.size === 0 && ctx?.state !== 'suspended') {
       window.removeEventListener('pointerdown', retry)
       window.removeEventListener('keydown', retry)
@@ -510,10 +539,15 @@ export function playMediaElement(
     .catch(() => {})
 }
 
+function resumeSuspended(ctx: AudioContext): void {
+  if (ctx.state !== 'suspended') return
+  void ctx.resume().catch((err: unknown) => console.error('media: resuming the shared audio context', err))
+}
+
 export function resumeAudio(): void {
   retryAwaiting()
   const ctx = audioContext()
-  if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {})
+  if (ctx) resumeSuspended(ctx)
 }
 
 // The microphone is routed through a Web Audio graph before it reaches

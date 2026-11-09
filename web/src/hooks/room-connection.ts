@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
+import { connectAndPublish } from '@/lib/connect'
 import { deriveChatKey, deriveMediaKeyMaterial } from '@/lib/roomkeys'
 import { JoinError, RoomClient } from '@/lib/sfu'
 
@@ -73,7 +74,6 @@ export function useRoomConnection({
 
   const connectClient = useCallback(
     async (resume: string): Promise<RoomClient> => {
-      const stream = localStreamRef.current ?? new MediaStream()
       const roomKey = roomKeyRef.current
       if (!roomKey) throw new Error('The room key is missing.')
 
@@ -106,9 +106,9 @@ export function useRoomConnection({
       })
       const afterConnect = binders.flatMap((bind) => bind(client) ?? [])
 
+      let published: MediaStream
       try {
-        await client.connect()
-        await client.publish(stream)
+        published = await connectAndPublish(client, () => localStreamRef.current ?? new MediaStream())
         const screen = screenStreamRef.current
         if (screen?.getVideoTracks().some((track) => track.readyState === 'live')) {
           await client.addScreen(screen)
@@ -118,7 +118,7 @@ export function useRoomConnection({
         if (clientRef.current === client) clientRef.current = null
         throw err
       }
-      for (const after of afterConnect) after(stream)
+      for (const after of afterConnect) after(published)
       setClientGeneration((generation) => generation + 1)
       return client
     },

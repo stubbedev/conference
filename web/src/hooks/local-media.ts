@@ -10,10 +10,9 @@ import {
   facingFromLabel,
   facingFromTrack,
   isMobileDevice,
-  openTrack,
+  openMicAndCamera,
   openTrackWithFallback,
   stopMediaStream,
-  trackConstraints,
   useMediaDevices,
   type AvPrefs,
   type CameraFacing,
@@ -24,6 +23,7 @@ import {
 } from '@/hooks/media'
 import { usePersistentState } from '@/hooks/persistent'
 import { startBlur, type BlurPipeline } from '@/lib/blur'
+import { describeTrackOpenError } from '@/lib/media-errors'
 import type { RoomClient } from '@/lib/sfu'
 
 export interface Controls {
@@ -39,8 +39,17 @@ export interface SwitchOptions {
   facing?: CameraFacing
 }
 
-function blockedMessage(kind: TrackKind): string {
-  return `Your browser is blocking the ${DEVICE_LABELS[kind].toLowerCase()}. Allow it in the site settings next to the address bar, then try again.`
+const TRACK_KINDS: readonly TrackKind[] = ['mic', 'cam']
+
+const UNSENT: Record<TrackKind, string> = {
+  mic: 'Others will not hear you.',
+  cam: 'Others will not see you.',
+}
+
+function trackFailure(kind: TrackKind, error: unknown): string {
+  const device = DEVICE_LABELS[kind].toLowerCase()
+  console.error(`media: opening the ${device}`, error)
+  return describeTrackOpenError(device, error)
 }
 
 function migrateAvPrefs(stored: AvPrefs): AvPrefs {
@@ -221,28 +230,22 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         blurPipelineRef.current = null
         stopMediaStream(localStreamRef.current)
       }
-      const combined = await navigator.mediaDevices
-        .getUserMedia({
-          audio: trackConstraints('mic', prefs.mic),
-          video: trackConstraints('cam', prefs.cam, prefs.resolution, camFacing),
-        })
-        .catch(() => null)
-      const micTrack = combined
-        ? (combined.getAudioTracks()[0] ?? null)
-        : await openTrack('mic', prefs.mic)
-      const camTrack = combined
-        ? (combined.getVideoTracks()[0] ?? null)
-        : await openTrack('cam', prefs.cam, true, prefs.resolution, camFacing)
+      const opened = await openMicAndCamera(prefs, camFacing)
+      const micTrack = opened.mic.track
+      const camTrack = opened.cam.track
+      const failures = TRACK_KINDS.flatMap((kind) => {
+        const outcome = opened[kind]
+        return outcome.track === null ? [{ kind, message: trackFailure(kind, outcome.error) }] : []
+      })
 
       if (!micTrack && !camTrack) {
         stopMediaStream(localStreamRef.current)
         localStreamRef.current = null
         setLocalStream(null)
-        setMediaError('Camera and microphone are unavailable. Allow access in your browser, then retry.')
+        setMediaError(failures.map(({ message }) => message).join(' '))
         return
       }
-      if (!micTrack) toast.warning('No microphone found — others will not hear you.')
-      if (!camTrack) toast.warning('No camera found — others will not see you.')
+      for (const { kind, message } of failures) toast.error(`${message} ${UNSENT[kind]}`)
 
       micPipelineRef.current?.dispose()
       micPipelineRef.current = null
@@ -255,11 +258,11 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         }
       }
 
-      if (micTrack) micTrack.enabled = controlsRef.current.mic
-      if (camTrack) camTrack.enabled = controlsRef.current.cam
-
       rawCamRef.current = camTrack
       const outboundCam = camTrack ? cameraTrackFor(camTrack, blurIntentRef.current) : null
+
+      for (const track of [micTrack, outboundMic]) if (track) track.enabled = controlsRef.current.mic
+      for (const track of [camTrack, outboundCam]) if (track) track.enabled = controlsRef.current.cam
 
       stopMediaStream(localStreamRef.current)
       const stream = new MediaStream([outboundMic, outboundCam].filter(Boolean) as MediaStreamTrack[])
@@ -295,9 +298,10 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
   const switchDevice = useCallback(
     async (kind: TrackKind, deviceId: string, resolution?: CameraResolution, opts: SwitchOptions = {}) => {
       const mode = opts.mode ?? 'switch'
-      const failed = () => {
-        if (mode === 'switch') toast.error(`Could not switch ${DEVICE_LABELS[kind].toLowerCase()}.`)
-        if (mode === 'enable') toast.error(blockedMessage(kind))
+      const failed = (error: unknown) => {
+        const message = trackFailure(kind, error)
+        if (mode === 'switch') toast.error(`Could not switch the ${DEVICE_LABELS[kind].toLowerCase()}. ${message}`)
+        if (mode === 'enable') toast.error(message)
       }
       const prefs = prefsRef.current
       const requestedFacing =
@@ -328,28 +332,28 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         resolution ?? prefs.resolution,
         requestedFacing,
       )
-      if (!opened.track && previousOpen) {
+      if (opened.track === null && previousOpen) {
         const restored = await openTrackWithFallback(
           'cam',
           previousOpen.deviceId,
           prefs.resolution,
           previousOpen.facing,
         )
-        if (restored.track) {
-          failed()
+        if (restored.track !== null) {
+          failed(opened.error)
           opened = { ...restored, fallback: true }
           deviceId = ''
         }
       }
-      const { track, deviceId: usedId, facing: usedFacing, fallback } = opened
-      if (!track) {
+      if (opened.track === null) {
         if (previous && live) {
           live.removeTrack(previous)
           setLocalStream(new MediaStream(live.getTracks()))
         }
-        failed()
+        failed(opened.error)
         return
       }
+      const { track, deviceId: usedId, facing: usedFacing, fallback } = opened
       if (deviceId && fallback && mode !== 'recover') {
         toast(
           `That ${DEVICE_LABELS[kind].toLowerCase()} is unavailable here, using the system default.`,
@@ -374,6 +378,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         rawCamRef.current = track
         outbound = cameraTrackFor(track, blurIntentRef.current)
       }
+      outbound.enabled = controlsRef.current[kind]
 
       const current = localStreamRef.current
       if (current) {
