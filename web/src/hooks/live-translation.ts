@@ -10,7 +10,7 @@ import { message } from '@/lib/speech/runtime'
 import { StandInEngines } from '@/lib/speech/standin'
 import type { MemberInfo, RoomClient } from '@/lib/sfu'
 import { readStored, storedFields } from '@/lib/storage'
-import { withLocalVoices, withVoice, type Translations, type Voices } from '@/lib/tiles'
+import { withLocalVoices, withoutVoice, withVoice, type Translations, type Voices } from '@/lib/tiles'
 import { translationLang } from '@/lib/track-kind'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
@@ -21,6 +21,7 @@ const CAPTION_HOLD_MS = 5000
 const INTERIM_HOLD_MS = 10_000
 const CAPTION_PRUNE_MS = 500
 const LANG_PREFS_KEY = 'conference:translation'
+const NO_LOCAL_VOICES: Readonly<Record<string, MediaStream>> = {}
 
 const TRANSLATION_CHECKING: TranslationConfig = {
   available: false,
@@ -94,7 +95,7 @@ export function useLiveTranslation(
   const [translationBy, setTranslationBy] = useState<string | null>(null)
   const [captions, setCaptions] = useState<Record<string, ShownCaption>>({})
   const [publishedVoices, setPublishedVoices] = useState<Voices<MediaStream>>({})
-  const [localVoices, setLocalVoices] = useState<Readonly<Record<string, MediaStream>>>({})
+  const [localVoices, setLocalVoices] = useState(NO_LOCAL_VOICES)
   const [memberLangs, setMemberLangs] = useState<Record<string, string>>({})
   const [translatorStatus, setTranslatorStatus] = useState<TranslatorStatus | null>(null)
   const [translationFailure, setTranslationFailure] = useState('')
@@ -168,6 +169,7 @@ export function useLiveTranslation(
     const translator = translatorRef.current
     translatorRef.current = null
     setTranslatorStatus(null)
+    setLocalVoices(NO_LOCAL_VOICES)
     await translator?.stop()
   }, [])
 
@@ -242,13 +244,15 @@ export function useLiveTranslation(
       })
       client.on('member-left', ({ id }) => {
         setMemberLangs(({ [id]: _left, ...rest }) => rest)
-        setPublishedVoices(({ [id]: _gone, ...rest }) => rest)
         setLocalVoices(({ [id]: _gone, ...rest }) => rest)
       })
       client.on('track', ({ sourceId, stream, kind }) => {
         const lang = translationLang(kind)
-        if (lang === null) return
-        setPublishedVoices((prev) => withVoice(prev, sourceId, lang, stream))
+        if (lang !== null) setPublishedVoices((prev) => withVoice(prev, sourceId, lang, stream))
+      })
+      client.on('track-removed', ({ sourceId, stream, kind }) => {
+        const lang = translationLang(kind)
+        if (lang !== null) setPublishedVoices((prev) => withoutVoice(prev, sourceId, lang, stream))
       })
       client.on('caption', ({ caption }) => {
         const translator = translatorRef.current
@@ -259,11 +263,7 @@ export function useLiveTranslation(
       client.on('translating', ({ from, on }) => {
         setTranslationBy(on ? from : null)
         if (on) startTranslation(client)
-        else {
-          setPublishedVoices({})
-          setLocalVoices({})
-          void stopTranslation()
-        }
+        else void stopTranslation()
         if (from === client.memberId) {
           if (on) toast.success('Live translation started')
           else toast('Live translation stopped')

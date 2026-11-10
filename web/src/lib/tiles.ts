@@ -27,6 +27,20 @@ export function withVoice<Stream>(voices: Voices<Stream>, member: string, lang: 
 }
 
 /**
+ * withoutVoice is voices once the track behind stream is gone. Only that
+ * very stream is taken out: a translator that starts over may publish
+ * its new voice before the old one is seen to leave, and that one stays.
+ */
+export function withoutVoice<Stream>(voices: Voices<Stream>, member: string, lang: string, stream: Stream): Voices<Stream> {
+  const ofMember: Readonly<Record<string, Stream>> | undefined = voices[member]
+  if (ofMember?.[lang] !== stream) return voices
+
+  const { [member]: _gone, ...others } = voices
+  const { [lang]: _ended, ...kept } = ofMember
+  return Object.keys(kept).length === 0 ? others : { ...others, [member]: kept }
+}
+
+/**
  * withLocalVoices adds the voices the listener's own engines make, one
  * per member, to those published to the room. Such a voice speaks the
  * listener's language, whichever that is by now, so it is filed under
@@ -61,8 +75,9 @@ export type Heard<Stream> = { through: 'own'; stream: Stream | null } | { throug
  * plays, what every speaking signal measures and what a recording holds.
  * A translated voice replaces a member's own only when the listener
  * wants translations spoken, the member speaks another language and that
- * voice exists. Everyone else, and every share, is heard through their
- * own stream, so no preference leaves a member silent.
+ * voice exists, which it does for as long as something carries it.
+ * Everyone else, and every share, is heard through their own stream, so
+ * no preference and no translator that stopped leaves a member silent.
  */
 export function heardThrough<Stream>(
   tile: { sourceId: string; kind: TileKind; stream: Stream | null },

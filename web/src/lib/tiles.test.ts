@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { heardThrough, layoutLayer, withLocalVoices, withVoice, type Tile, type Translations } from './tiles.ts'
+import { heardThrough, layoutLayer, withLocalVoices, withoutVoice, withVoice, type Tile, type Translations } from './tiles.ts'
 import { CAMERA_KIND, SCREEN_KIND } from './track-kind.ts'
 
 const screen: Pick<Tile, 'key' | 'kind'> = { key: 'bob:screen', kind: SCREEN_KIND }
@@ -88,4 +88,24 @@ test('voices made here are added to the published ones, never in their place', (
   const published = { alice: { en: 'published' } }
   assert.deepEqual(withLocalVoices(published, { bob: TRANSLATION }, 'en'), { alice: { en: 'published' }, bob: { en: TRANSLATION } })
   assert.equal(withLocalVoices(published, {}, 'en'), published)
+})
+
+test('a member whose translated voice is gone is heard through their own voice again', () => {
+  const translated = { ...translations, voices: withVoice({}, 'bob', 'en', TRANSLATION) }
+  assert.deepEqual(heardThrough(bobCamera, translated), { through: 'translation', stream: TRANSLATION })
+
+  const stopped = { ...translated, voices: withoutVoice(translated.voices, 'bob', 'en', TRANSLATION) }
+  assert.deepEqual(stopped.voices, {})
+  assert.deepEqual(heardThrough(bobCamera, stopped), HEARD_OWN)
+})
+
+test('a voice that is gone takes nothing else along', () => {
+  const voices = { alice: { en: 'Alice in English' }, bob: { en: TRANSLATION, fr: 'Bob in French' } }
+  assert.deepEqual(withoutVoice(voices, 'bob', 'en', TRANSLATION), { alice: { en: 'Alice in English' }, bob: { fr: 'Bob in French' } })
+})
+
+test('a voice published anew stays when the one before it is seen to leave only afterwards', () => {
+  const restarted = withVoice(withVoice({}, 'bob', 'en', TRANSLATION), 'bob', 'en', 'the new voice')
+  assert.equal(withoutVoice(restarted, 'bob', 'en', TRANSLATION), restarted)
+  assert.equal(withoutVoice(restarted, 'carol', 'en', TRANSLATION), restarted)
 })
