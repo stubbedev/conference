@@ -33,9 +33,9 @@ export interface Controls {
   sharing: boolean
 }
 
-export type SwitchMode = 'switch' | 'recover' | 'enable'
+type SwitchMode = 'switch' | 'recover' | 'enable'
 
-export interface SwitchOptions {
+interface SwitchOptions {
   mode?: SwitchMode
   facing?: CameraFacing
 }

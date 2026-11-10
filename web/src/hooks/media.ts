@@ -116,7 +116,7 @@ export function isMobileDevice(): boolean {
 
 // Chrome prefixes duplicate aliases with "Default -"; collapse aliases so
 // every listed entry is a distinct, selectable device.
-export function dedupeDevices(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
+function dedupeDevices(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
   const byGroup = new Map<string, MediaDeviceInfo>()
   for (const device of devices) {
     const key = device.groupId || device.deviceId
@@ -156,7 +156,7 @@ export function facingFromLabel(label: string): CameraFacing | null {
 // deviceIds, "Camera N, facing X" labels for the same lens), so on phones
 // the picker collapses cameras by the facing direction parsed from the
 // label — the front/back pair mobile apps present.
-export function dedupeCameras(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
+function dedupeCameras(devices: MediaDeviceInfo[]): MediaDeviceInfo[] {
   if (!isMobileDevice()) return devices
 
   const seen = new Set<CameraFacing>()
@@ -291,7 +291,7 @@ function splitViews(stream: MediaStream | null): SplitViews {
   return { source: stream, video: trackView(stream, 'video'), audio: trackView(stream, 'audio') }
 }
 
-export function trackConstraints(
+function trackConstraints(
   kind: TrackKind,
   deviceId: string,
   resolution: CameraResolution = 'auto',
