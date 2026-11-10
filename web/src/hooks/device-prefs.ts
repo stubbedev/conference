@@ -15,14 +15,7 @@ import {
   type DevicePrefs,
 } from '@/hooks/media'
 import { usePersistentState } from '@/hooks/persistent'
-
-function storedFields<T>(stored: unknown): Partial<Record<keyof T, unknown>> {
-  return typeof stored === 'object' && stored !== null ? stored : {}
-}
-
-function text(value: unknown): string {
-  return typeof value === 'string' ? value : ''
-}
+import { storedFields } from '@/lib/storage'
 
 function isResolution(value: unknown): value is CameraResolution {
   return CAMERA_RESOLUTIONS.some((option) => option.value === value)
@@ -37,14 +30,14 @@ function isFacing(value: unknown): value is CameraFacing {
 function parseDevicePrefs(stored: unknown): DevicePrefs {
   const { mic, cam, speaker, resolution, volume, micGain, blur, camFacing } = storedFields<DevicePrefs>(stored)
   return {
-    mic: text(mic),
-    cam: text(cam),
-    speaker: text(speaker),
+    mic: typeof mic === 'string' ? mic : DEFAULT_DEVICE_PREFS.mic,
+    cam: typeof cam === 'string' ? cam : DEFAULT_DEVICE_PREFS.cam,
+    speaker: typeof speaker === 'string' ? speaker : DEFAULT_DEVICE_PREFS.speaker,
     resolution: isResolution(resolution) ? resolution : DEFAULT_DEVICE_PREFS.resolution,
     volume: typeof volume === 'number' ? clampVolume(volume) : DEFAULT_DEVICE_PREFS.volume,
     micGain: typeof micGain === 'number' ? clampMicGain(micGain) : DEFAULT_DEVICE_PREFS.micGain,
-    blur: blur === true,
-    camFacing: isFacing(camFacing) ? camFacing : null,
+    blur: typeof blur === 'boolean' ? blur : DEFAULT_DEVICE_PREFS.blur,
+    camFacing: isFacing(camFacing) ? camFacing : DEFAULT_DEVICE_PREFS.camFacing,
   }
 }
 
@@ -57,11 +50,7 @@ export function parseAvPrefs(stored: unknown): AvPrefs {
 }
 
 export function useDevicePrefs(devices: DeviceGroups) {
-  const [devicePrefs, setDevicePrefs] = usePersistentState<DevicePrefs>(
-    'conference:devices',
-    DEFAULT_DEVICE_PREFS,
-    parseDevicePrefs,
-  )
+  const [devicePrefs, setDevicePrefs] = usePersistentState('conference:devices', { parse: parseDevicePrefs })
   const prefsRef = useLatest(devicePrefs)
   const seenDeviceIdsRef = useRef<Set<string>>(new Set())
 

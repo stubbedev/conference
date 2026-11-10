@@ -5,12 +5,12 @@ import { useLatest } from '@/hooks/latest'
 import { usePersistentState } from '@/hooks/persistent'
 import type { ChatMessage, RoomClient } from '@/lib/sfu'
 
-function migrateSidebar(stored: SidePanelTab | null): SidePanelTab | null {
+function parseSidebar(stored: unknown): SidePanelTab | null {
   return stored === 'people' || stored === 'chat' ? stored : null
 }
 
 export function useSidePanel(clientRef: RefObject<RoomClient | null>) {
-  const [sidebar, setSidebar] = usePersistentState<SidePanelTab | null>('conference:sidebar', null, migrateSidebar)
+  const [sidebar, setSidebar] = usePersistentState('conference:sidebar', { parse: parseSidebar })
   const [unread, setUnread] = useState(0)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const chatOpen = sidebar === 'chat'

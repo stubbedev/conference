@@ -31,7 +31,7 @@ import { useShortcuts } from '@/hooks/shortcuts'
 import { useSidePanel } from '@/hooks/side-panel'
 import { usePreferredLayers, useStageLayout } from '@/hooks/stage-layout'
 import { blurSupported } from '@/lib/blur'
-import { randomDisplayName } from '@/lib/names'
+import { storedDisplayName } from '@/lib/names'
 import type { RecorderTile } from '@/lib/recorder'
 import type { RoomClient } from '@/lib/sfu'
 import { LOCAL_SOURCE, SCREEN_KIND, tileLabel } from '@/lib/tiles'
@@ -44,7 +44,7 @@ export default function Room() {
   const routerLocation = useLocation()
   const navigate = useNavigate()
   const [meetingReady, setMeetingReady] = useState(() => (routerLocation.state as { created?: boolean } | null)?.created === true)
-  const [displayName, setDisplayName] = usePersistentState('conference:name', randomDisplayName)
+  const [displayName, setDisplayName] = usePersistentState('conference:name', { parse: storedDisplayName })
   const clientRef = useRef<RoomClient | null>(null)
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
   const canBlur = blurSupported()

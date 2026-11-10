@@ -6,7 +6,6 @@ import { parseAvPrefs, useDevicePrefs } from '@/hooks/device-prefs'
 import { useLatest } from '@/hooks/latest'
 import {
   createMicPipeline,
-  DEFAULT_AV_PREFS,
   DEVICE_LABELS,
   facingFromLabel,
   facingFromTrack,
@@ -15,7 +14,6 @@ import {
   openTrackWithFallback,
   stopMediaStream,
   useMediaDevices,
-  type AvPrefs,
   type CameraFacing,
   type CameraResolution,
   type DeviceKind,
@@ -84,7 +82,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
   // trails the stored choice while that is being applied.
   const devicePrefs = useMemo(() => ({ ...storedPrefs, speaker }), [storedPrefs, speaker])
 
-  const [avPrefs, setAvPrefs] = usePersistentState<AvPrefs>('conference:av', DEFAULT_AV_PREFS, parseAvPrefs)
+  const [avPrefs, setAvPrefs] = usePersistentState('conference:av', { parse: parseAvPrefs })
   const [controls, setControls] = useState<Controls>({ mic: avPrefs.mic, cam: avPrefs.cam, sharing: false })
   const controlsRef = useLatest(controls)
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)

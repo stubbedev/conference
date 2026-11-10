@@ -28,6 +28,12 @@ export function randomDisplayName(): string {
   return `${capitalize(pick(ADJECTIVES))} ${capitalize(pick(NOUNS))}`
 }
 
+// The name a member last went by, or a fresh random one when nothing
+// usable is stored.
+export function storedDisplayName(stored: unknown): string {
+  return typeof stored === 'string' ? stored : randomDisplayName()
+}
+
 const AVATAR_COLORS = ['bg-sky-600', 'bg-emerald-600', 'bg-violet-600', 'bg-amber-600', 'bg-rose-600', 'bg-teal-600', 'bg-indigo-600'] as const
 
 export function initials(name: string): string {

@@ -9,6 +9,7 @@ import { LocalTranslator } from '@/lib/speech/local'
 import { message } from '@/lib/speech/runtime'
 import { StandInEngines } from '@/lib/speech/standin'
 import { translationKindLang, type MemberInfo, type RoomClient } from '@/lib/sfu'
+import { storedFields } from '@/lib/storage'
 import { LOCAL_SOURCE } from '@/lib/tiles'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
@@ -69,12 +70,13 @@ function localMicTrack(stream: MediaStream | null): MediaStreamTrack | null {
   return stream?.getAudioTracks()[0] ?? null
 }
 
-function migrateLangPrefs(stored: LangPrefs): LangPrefs {
+function parseLangPrefs(stored: unknown): LangPrefs {
+  const { lang, voice, subtitles, voiceChoice } = storedFields<LangPrefs>(stored)
   return {
-    lang: typeof stored.lang === 'string' && stored.lang ? stored.lang : DEFAULT_LANGUAGE,
-    voice: typeof stored.voice === 'boolean' ? stored.voice : true,
-    subtitles: typeof stored.subtitles === 'boolean' ? stored.subtitles : true,
-    voiceChoice: isVoiceChoice(stored.voiceChoice) ? stored.voiceChoice : 'female',
+    lang: typeof lang === 'string' && lang ? lang : DEFAULT_LANGUAGE,
+    voice: typeof voice === 'boolean' ? voice : true,
+    subtitles: typeof subtitles === 'boolean' ? subtitles : true,
+    voiceChoice: isVoiceChoice(voiceChoice) ? voiceChoice : 'female',
   }
 }
 
@@ -107,11 +109,7 @@ export function useLiveTranslation(
   const voiceEndsRef = useRef(new Map<string, number>())
   const translatorRef = useRef<Translator | null>(null)
   const langChosenRef = useRef(storedLangChoice())
-  const [langPrefs, setLangPrefs] = usePersistentState<LangPrefs>(
-    LANG_PREFS_KEY,
-    { lang: DEFAULT_LANGUAGE, voice: true, subtitles: true, voiceChoice: 'female' },
-    migrateLangPrefs,
-  )
+  const [langPrefs, setLangPrefs] = usePersistentState(LANG_PREFS_KEY, { parse: parseLangPrefs })
   const translationRef = useLatest(translation)
   const langPrefsRef = useLatest(langPrefs)
 
