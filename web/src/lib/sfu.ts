@@ -5,6 +5,7 @@
 // When the room is end-to-end encrypted, encoded frames are transformed
 // through the E2EE worker, so the server only ever relays ciphertext.
 
+import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
 import {
   addCounts,
@@ -101,6 +102,15 @@ function isUpstreamId(pc: string | undefined): pc is UpstreamId {
 interface Upstream {
   pc: RTCPeerConnection
   negotiation: Promise<void>
+}
+
+/** The connection one source's media arrives on, and what it carries. */
+interface Downstream {
+  pc: RTCPeerConnection
+  /** The kind of each media section, by mid, as the source's latest offer announced it. */
+  kinds: Map<string, TrackKind>
+  /** The tracks handed out and still received, by mid. */
+  tracks: Map<string, RemoteTrack>
 }
 
 /**
@@ -232,8 +242,10 @@ interface Events {
   'member-joined': { member: MemberInfo; replaces: string }
   'member-left': { id: string }
   'member-state': { id: string; mic: boolean; cam: boolean; sharing: boolean }
+  /** A track of another member starts arriving. */
   track: RemoteTrack
-  'track-removed': { sourceId: string; mid: string }
+  /** That track is no longer received: its publisher took it away, or its connection is gone. */
+  'track-removed': RemoteTrack
   chat: ChatMessage
   recording: { from: string; on: boolean }
   lang: { from: string; prefs: LangAnnouncement }
@@ -316,10 +328,9 @@ export class RoomClient {
   private ws: WebSocket | null = null
   private opts: RoomClientOptions
   private ups = new Map<UpstreamId, Upstream>()
-  private downs = new Map<string, RTCPeerConnection>()
+  private downs = new Map<string, Downstream>()
   private pendingIce = new Map<string, RTCIceCandidateInit[]>()
   private members = new Map<string, MemberInfo>()
-  private downKinds = new Map<string, TrackKind>()
   private translationTrackLangs = new Map<string, string>()
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
@@ -639,8 +650,8 @@ export class RoomClient {
   }
 
   private async sampleQuality(): Promise<void> {
-    for (const [sourceId, pc] of this.downs) {
-      const streams = await readInboundCounters(pc, (mid) => this.downKinds.get(`${sourceId}:${mid}`))
+    for (const [sourceId, down] of this.downs) {
+      const streams = await readInboundCounters(down.pc, (mid) => down.kinds.get(mid))
       if (!streams) continue
 
       for (const [kind, counters] of streams) this.stepQuality(sourceId, kind, counters)
@@ -760,8 +771,7 @@ export class RoomClient {
     this.stopQualityWatch()
     this.ws?.close()
     this.closeUps()
-    for (const pc of this.downs.values()) pc.close()
-    this.downs.clear()
+    for (const sourceId of [...this.downs.keys()]) this.closeDown(sourceId)
     this.worker.terminate()
   }
 
@@ -1019,40 +1029,61 @@ export class RoomClient {
     }
     this.memberLangs.delete(id)
     const known = this.members.delete(id)
-    this.downs.get(id)?.close()
-    this.downs.delete(id)
+    this.closeDown(id)
     return known
   }
 
-  private async handleDownOffer(sourceId: string, msg: ReceivedMessage): Promise<void> {
-    let pc = this.downs.get(sourceId)
-    if (!pc) {
-      pc = this.newPC(`down-${sourceId}`)
-      this.downs.set(sourceId, pc)
-      this.startQualityWatch()
-      pc.ontrack = (ev) => {
-        this.installReceiverTransform(ev.receiver)
-        const mid = ev.transceiver.mid
-        const kind = mid === null ? undefined : this.downKinds.get(`${sourceId}:${mid}`)
-        if (kind === undefined || isAudioKind(kind) !== (ev.track.kind === 'audio')) {
-          console.warn(
-            `sfu: dropping the ${ev.track.kind} track in section ${mid} from ${sourceId}: announced as ${kind ?? 'no kind this client knows'}`,
-          )
-          return
-        }
-        // A translated voice and a share's sound are played on their own
-        // terms, never as part of the speaker's camera stream, so each
-        // gets a stream of its own.
-        const stream =
-          translationLang(kind) !== null || kind === SCREEN_AUDIO_KIND
-            ? new MediaStream([ev.track])
-            : (ev.streams[0] ?? new MediaStream([ev.track]))
-        this.emit('track', { sourceId, stream, kind })
+  private openDown(sourceId: string): Downstream {
+    const down: Downstream = { pc: this.newPC(`down-${sourceId}`), kinds: new Map(), tracks: new Map() }
+    this.downs.set(sourceId, down)
+    this.startQualityWatch()
+    down.pc.ontrack = (ev) => {
+      this.installReceiverTransform(ev.receiver)
+      const mid = ev.transceiver.mid
+      const kind = mid === null ? undefined : down.kinds.get(mid)
+      if (mid === null || kind === undefined || isAudioKind(kind) !== (ev.track.kind === 'audio')) {
+        console.warn(
+          `sfu: dropping the ${ev.track.kind} track in section ${mid} from ${sourceId}: announced as ${kind ?? 'no kind this client knows'}`,
+        )
+        return
       }
+      // A translated voice and a share's sound are played on their own
+      // terms, never as part of the speaker's camera stream, so each
+      // gets a stream of its own.
+      const stream =
+        translationLang(kind) !== null || kind === SCREEN_AUDIO_KIND
+          ? new MediaStream([ev.track])
+          : (ev.streams[0] ?? new MediaStream([ev.track]))
+      const track: RemoteTrack = { sourceId, stream, kind }
+      down.tracks.set(mid, track)
+      this.emit('track', track)
     }
+    return down
+  }
+
+  /** Closes the connection a source's media arrives on; every track it carried goes with it. */
+  private closeDown(sourceId: string): void {
+    const down = this.downs.get(sourceId)
+    if (!down) return
+
+    this.downs.delete(sourceId)
+    down.pc.close()
+    this.removeTracks(down, [...down.tracks])
+  }
+
+  private removeTracks(down: Downstream, gone: readonly [string, RemoteTrack][]): void {
+    for (const [mid, track] of gone) {
+      down.tracks.delete(mid)
+      this.emit('track-removed', track)
+    }
+  }
+
+  private async handleDownOffer(sourceId: string, msg: ReceivedMessage): Promise<void> {
+    const down = this.downs.get(sourceId) ?? this.openDown(sourceId)
+    const { pc } = down
 
     const { kinds, refused } = announcedKinds(msg.tracks)
-    for (const [mid, kind] of kinds) this.downKinds.set(`${sourceId}:${mid}`, kind)
+    down.kinds = kinds
     for (const entry of refused) console.warn(`sfu: ${sourceId} announced a track this client cannot place:`, entry)
 
     await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp ?? '' })
@@ -1062,6 +1093,9 @@ export class RoomClient {
 
     const answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
+    // Only the answered offer says which sections the source still sends
+    // on: a track taken away neither ends nor leaves a stream of its own.
+    this.removeTracks(down, unreceived(down.tracks, pc.getTransceivers()))
 
     this.send({ type: 'answer', pc: `down-${sourceId}`, sdp: pc.localDescription?.sdp ?? '' })
     this.send({ type: 'pli', member: sourceId })
@@ -1071,7 +1105,7 @@ export class RoomClient {
     if (!msg.candidate || !msg.pc) return
 
     const id = msg.pc
-    const pc = isUpstreamId(id) ? this.ups.get(id)?.pc : this.downs.get(id.slice('down-'.length))
+    const pc = isUpstreamId(id) ? this.ups.get(id)?.pc : this.downs.get(id.slice('down-'.length))?.pc
     // A publishing connection exists before the server learns of it, so a
     // candidate for one that is gone trails its close and has nowhere to go.
     if (isUpstreamId(id) && !pc) return
@@ -1142,7 +1176,7 @@ export class RoomClient {
 
     const connections: [string, RTCPeerConnection][] = []
     for (const [id, up] of this.ups) connections.push([id, up.pc])
-    for (const [id, down] of this.downs) connections.push([`down-${id.slice(0, 6)}`, down])
+    for (const [id, down] of this.downs) connections.push([`down-${id.slice(0, 6)}`, down.pc])
 
     for (const [label, pc] of connections) {
       try {
