@@ -22,16 +22,22 @@ func capAt(bps uint64) bitrateLimit {
 	return bitrateLimit{bps: bps, bound: true}
 }
 
+// clamp is rate held to the limit.
+func (l bitrateLimit) clamp(rate uint64) uint64 {
+	if !l.bound {
+		return rate
+	}
+
+	return min(rate, l.bps)
+}
+
 // tighter is whichever of the two limits allows less.
 func (l bitrateLimit) tighter(other bitrateLimit) bitrateLimit {
-	switch {
-	case !l.bound:
-		return other
-	case !other.bound:
+	if !other.bound {
 		return l
-	default:
-		return capAt(min(l.bps, other.bps))
 	}
+
+	return capAt(l.clamp(other.bps))
 }
 
 // Loss-controller tuning shared by the viewer and the publisher
@@ -257,12 +263,7 @@ func (e uplinkEstimate) next(sample linkSample) uplinkEstimate {
 
 	switch {
 	case fraction > highLossFraction:
-		through := rate
-		if e.limit.bound {
-			through = min(through, e.limit.bps)
-		}
-
-		e.limit = capAt(max(backOff(through, fraction), minPublisherBitrate))
+		e.limit = capAt(max(backOff(e.limit.clamp(rate), fraction), minPublisherBitrate))
 	case fraction < lowLossFraction:
 		e.peak = max(e.peak, rate)
 
