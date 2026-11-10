@@ -184,9 +184,13 @@ and then its smaller one, still on the GPU. The CPU is the last rung, and
 a failed download never moves down the ladder, because another export
 would fail the same way. A GPU can also hang without failing, as forced
 WebGPU does in Firefox on Linux, and a hung worker cannot rescue itself.
-So the page watches each GPU attempt: after five minutes without
-activity it terminates that worker and starts a new one on the CPU for
-the rest of the visit.
+So the page watches each GPU attempt and times its longest stretch
+without activity. A GPU it has not seen before gets 60 seconds of quiet;
+one that has loaded these models before gets four times its longest
+earlier stretch, at least 10 seconds. A worker that runs past its budget
+is terminated and a new one starts on the CPU. The browser remembers the
+hang in local storage, so later visits start on the CPU at once until
+the browser version or the model setup changes.
 
 The models are large: whisper-large-v3-turbo at q4f16 is about 570 MB,
 m2m100_418M at q4f16 about 740 MB, Qwen2.5-1.5B-Instruct at q4f16 about 1.2 GB, a

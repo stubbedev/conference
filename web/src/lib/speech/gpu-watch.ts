@@ -1,29 +1,51 @@
-export const GPU_STALL_MS = 300_000
-
 export class GpuWatch {
-  private readonly stallMs: number
   private readonly onStall: () => void
   private timer: ReturnType<typeof setTimeout> | null = null
+  private budgetMs = 0
+  private lastActivity = 0
+  private longestQuiet = 0
 
-  constructor(stallMs: number, onStall: () => void) {
-    this.stallMs = stallMs
+  constructor(onStall: () => void) {
     this.onStall = onStall
   }
 
-  started(): void {
-    this.settled()
-    this.timer = setTimeout(() => {
-      this.timer = null
-      this.onStall()
-    }, this.stallMs)
+  started(budgetMs: number): void {
+    this.stop()
+    this.budgetMs = budgetMs
+    this.longestQuiet = 0
+    this.lastActivity = performance.now()
+    this.arm()
   }
 
   active(): void {
-    if (this.timer !== null) this.started()
+    if (this.timer === null) return
+    this.noteQuiet()
+    this.arm()
   }
 
-  settled(): void {
+  settled(): number | null {
+    if (this.timer === null) return null
+    this.noteQuiet()
+    this.stop()
+    return this.longestQuiet
+  }
+
+  stop(): void {
     if (this.timer !== null) clearTimeout(this.timer)
     this.timer = null
+  }
+
+  private noteQuiet(): void {
+    const now = performance.now()
+    this.longestQuiet = Math.max(this.longestQuiet, now - this.lastActivity)
+    this.lastActivity = now
+  }
+
+  private arm(): void {
+    if (this.timer !== null) clearTimeout(this.timer)
+    this.timer = setTimeout(() => {
+      this.timer = null
+      this.onStall()
+    }, this.budgetMs)
   }
 }

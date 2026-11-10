@@ -2,7 +2,8 @@ import type { AsrEngine, Engines, MtEngine, Prepared, PrepareEvents, Segmenter, 
 import { BuiltinTranslators } from '@/lib/speech/builtin'
 import { browserFetchDeps } from '@/lib/speech/fetching'
 import { asrExport, bytesFor, exportKey, loadsUpFront, renderPrompt, voiceKey, type SpeechModels } from '@/lib/speech/models'
-import { GPU_STALL_MS, GpuWatch } from '@/lib/speech/gpu-watch'
+import { budgetFor, fingerprint, parseHistory, withHang, withQuiet, type GpuHistory } from '@/lib/speech/gpu-history'
+import { GpuWatch } from '@/lib/speech/gpu-watch'
 import { Progress } from '@/lib/speech/progress'
 import { message } from '@/lib/speech/runtime'
 import { Serial } from '@/lib/speech/serial'
@@ -12,7 +13,8 @@ import { Workers } from '@/lib/speech/workers'
 import { languageName, type Language } from '@/lib/translate/languages'
 import type { LoadingPart, TranslationLevel, VoiceChoice } from '@/lib/translate/types'
 
-type Purpose = 'vad' | 'asr' | 'mt' | 'tts'
+const PURPOSES = ['vad', 'asr', 'mt', 'tts'] as const
+type Purpose = (typeof PURPOSES)[number]
 
 const PARTS: Record<Purpose, LoadingPart> = {
   vad: 'transcription',
@@ -25,6 +27,7 @@ const VAD_BASE = '/vad/'
 const MODEL_CACHE = 'transformers-cache'
 const MEGABYTE = 1e6
 const LOADING_REPORT_MS = 250
+const GPU_HISTORY_KEY = 'speech-gpu-history'
 
 interface TextReply extends WorkerReply {
   text: string
@@ -97,6 +100,7 @@ class BrowserEngines implements Engines {
   private readonly progress = new Progress()
   private readonly noGpu = new Set<Purpose>()
   private readonly watches = new Map<Purpose, GpuWatch>()
+  private gpuHistory: GpuHistory<Purpose>
   private runtime: Promise<Runtime> | null = null
   private loadingReport: ReturnType<typeof setTimeout> | null = null
   private readonly builtin = new BuiltinTranslators((warning) => this.warn(warning))
@@ -107,10 +111,15 @@ class BrowserEngines implements Engines {
     this.models = models
     this.languages = languages
     this.requiresWebGpu = !models.asr.fallback
+    this.gpuHistory = readGpuHistory(`${navigator.userAgent}\n${fingerprint(JSON.stringify(models))}`)
+    for (const purpose of this.gpuHistory.hung) this.noGpu.add(purpose)
   }
 
   async prepare(lang: string, events: PrepareEvents): Promise<Prepared> {
     this.events = events
+    for (const purpose of this.gpuHistory.hung) {
+      this.warn(`The GPU stopped responding while loading the ${PARTS[purpose]} models on an earlier visit, so they run on the CPU until this browser is updated.`)
+    }
     this.builtin.startPreparation()
     const room = await this.storageProblem(lang)
     if (room) return { transcribes: false, translates: 'none', problems: [room] }
@@ -186,7 +195,7 @@ class BrowserEngines implements Engines {
   }
 
   close(): void {
-    for (const watch of this.watches.values()) watch.settled()
+    for (const watch of this.watches.values()) watch.stop()
     this.workers.closeAll()
   }
 
@@ -206,15 +215,32 @@ class BrowserEngines implements Engines {
     const known = this.watches.get(purpose)
     if (known) return known
 
-    const watch = new GpuWatch(GPU_STALL_MS, () => this.gpuStalled(purpose))
+    const watch = new GpuWatch(() => this.gpuStalled(purpose))
     this.watches.set(purpose, watch)
     return watch
   }
 
   private gpuStalled(purpose: Purpose): void {
+    const budget = budgetFor(this.gpuHistory, purpose)
     this.noGpu.add(purpose)
-    this.warn(`The GPU stopped responding while loading the ${PARTS[purpose]} models, so they run on the CPU for the rest of this visit.`)
+    this.remember(withHang(this.gpuHistory, purpose))
+    this.warn(`The GPU stopped responding for ${Math.round(budget / 1000)} s while loading the ${PARTS[purpose]} models, so they run on the CPU until this browser is updated.`)
     this.workers.close(purpose)
+  }
+
+  private gpuSettled(purpose: Purpose): void {
+    const quiet = this.watch(purpose).settled()
+    if (quiet !== null) this.remember(withQuiet(this.gpuHistory, purpose, quiet))
+  }
+
+  private remember(history: GpuHistory<Purpose>): void {
+    if (history === this.gpuHistory) return
+    this.gpuHistory = history
+    try {
+      localStorage.setItem(GPU_HISTORY_KEY, JSON.stringify(history))
+    } catch (err) {
+      console.warn(`live translation: could not remember how this GPU behaved (${message(err)}), so the next visit waits the first-visit time for it again`)
+    }
   }
 
   private async translate(sentence: Sentence): Promise<string> {
@@ -287,10 +313,10 @@ class BrowserEngines implements Engines {
     this.watch(purpose).active()
     switch (event.event) {
       case 'gpu-started':
-        this.watch(purpose).started()
+        this.watch(purpose).started(budgetFor(this.gpuHistory, purpose))
         return
       case 'gpu-settled':
-        this.watch(purpose).settled()
+        this.gpuSettled(purpose)
         return
       case 'expect':
         this.progress.expect(PARTS[purpose], this.models.sizes[String(event.key)] ?? 0)
@@ -404,6 +430,15 @@ class BrowserEngines implements Engines {
         return channel.call<WorkerReply>({ ...settings, gpu: !this.noGpu.has(purpose), runtime, type: 'init' })
       })
     })
+  }
+}
+
+function readGpuHistory(setup: string): GpuHistory<Purpose> {
+  try {
+    return parseHistory(localStorage.getItem(GPU_HISTORY_KEY), setup, PURPOSES)
+  } catch (err) {
+    console.warn(`live translation: could not read how this GPU behaved before (${message(err)}), so it gets the first-visit time`)
+    return parseHistory(null, setup, PURPOSES)
   }
 }
 
