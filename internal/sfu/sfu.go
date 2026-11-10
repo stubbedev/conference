@@ -2008,7 +2008,7 @@ func (ut *UpTrack) updateViewerReport(viewerID string, report rtcp.ReceptionRepo
 		return
 	}
 
-	viewer.rate.updateLoss(report.FractionLost, elapsed, ut.delivered.Load())
+	viewer.rate.updateLoss(reportedBy(report), elapsed, ut.delivered.Load())
 
 	viewer.mu.Lock()
 	viewer.steps.observeLoss(report.FractionLost, viewer.current)
