@@ -8,6 +8,7 @@ import { useTileDebug } from '@/hooks/tileDebug'
 import { Hint } from '@/components/Hint'
 import {
   aspectRatioChanged,
+  clampVolume,
   playMediaElement,
   resumeAudio,
   useSplitStreams,
@@ -161,7 +162,7 @@ export const VideoTile = memo(function VideoTile({
   useEffect(() => {
     const audio = audioRef.current
     if (!audio || volume === undefined) return
-    audio.volume = Math.min(1, Math.max(0, volume))
+    audio.volume = clampVolume(volume)
   }, [volume])
 
   const enableSound = () => {
@@ -169,7 +170,6 @@ export const VideoTile = memo(function VideoTile({
     const audio = audioRef.current
     if (audio) playMediaElement(audio, setAudioBlocked)
   }
-
 
   const hideVideo = Boolean(camOff && !sharing)
   const speakingNow = speaking && !micOff && !sharing
