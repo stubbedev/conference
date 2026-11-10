@@ -21,6 +21,7 @@ import { networkInterfaces, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import {
+  accessibleName,
   callJs,
   check,
   checkCall,
@@ -66,7 +67,7 @@ function lanAddress() {
 }
 
 async function controlPresent(label) {
-  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].some((b) => b.getAttribute('aria-label') === label)
+  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].some((b) => accessibleName(b) === label)
   if (find()) return true
   const more = document.querySelector('button[aria-label="More options"]')
   if (!more) return false
@@ -706,7 +707,7 @@ async function checkTooltips(failures, browser) {
   // Picking a menu item hands focus back to the menu's trigger. Into full
   // screen and out again, the one item every member always has; the bar
   // moves in full screen, so it is measured again each time.
-  for (const item of ['Enter fullscreen', 'Exit fullscreen']) {
+  for (const item of ['Full screen', 'Exit full screen']) {
     const layout = await callJs(browser, callBarLayout)
     const more = layout.controls.find((c) => c.label === 'More options')
     check(failures, label, more, `no "More options" button among the call bar controls: ${JSON.stringify(layout.controls)}`)
@@ -716,7 +717,7 @@ async function checkTooltips(failures, browser) {
     await press(browser, more)
     const target = await waitFor(
       browser,
-      `(() => { const r = document.querySelector('[role="menuitem"][aria-label=${JSON.stringify(item)}]')?.getBoundingClientRect(); return r && { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`,
+      `(() => { const r = [...document.querySelectorAll('[role="menuitem"]')].find((el) => (${accessibleName})(el) === ${JSON.stringify(item)})?.getBoundingClientRect(); return r && { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`,
       Boolean,
       TOOLTIP_WAIT_MS,
     )

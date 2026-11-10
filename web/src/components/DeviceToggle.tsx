@@ -1,13 +1,14 @@
 import { Mic, MicOff, Video, VideoOff } from 'lucide-react'
 
 import { deviceNoun, type TrackKind } from '@/hooks/media'
+import { shortcutKey, type Shortcut } from '@/hooks/shortcuts'
 import { Hint } from '@/components/Hint'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
-const LABELS: Record<TrackKind, { on: string; off: string; blocked: string; shortcut: string }> = {
-  mic: { on: 'Mute microphone', off: 'Unmute microphone', blocked: 'Allow microphone', shortcut: 'M' },
-  cam: { on: 'Turn camera off', off: 'Turn camera on', blocked: 'Allow camera', shortcut: 'V' },
+const LABELS: Record<TrackKind, { on: string; off: string; blocked: string; shortcut: Shortcut }> = {
+  mic: { on: 'Mute microphone', off: 'Unmute microphone', blocked: 'Allow microphone', shortcut: 'toggleMic' },
+  cam: { on: 'Turn camera off', off: 'Turn camera on', blocked: 'Allow camera', shortcut: 'toggleCam' },
 }
 
 interface DeviceToggleProps {
@@ -23,10 +24,11 @@ export function DeviceToggle({ kind, on, available, onToggle, withShortcut = fal
   const labels = LABELS[kind]
   const live = available && on
   const label = !available ? labels.blocked : on ? labels.on : labels.off
+  const shortcut = withShortcut ? shortcutKey(labels.shortcut) : undefined
   const hint = !available
     ? `Your browser has not allowed the ${deviceNoun(kind)} yet. Click to ask again.`
-    : withShortcut
-      ? `${label} (${labels.shortcut})`
+    : shortcut
+      ? `${label} (${shortcut})`
       : label
   const Icon = kind === 'mic' ? (live ? Mic : MicOff) : live ? Video : VideoOff
 
@@ -37,6 +39,7 @@ export function DeviceToggle({ kind, on, available, onToggle, withShortcut = fal
         size="icon"
         className={cn('relative', className)}
         onClick={onToggle}
+        aria-keyshortcuts={shortcut}
       >
         <Icon />
         {!available && (
