@@ -22,7 +22,6 @@ import (
 
 const (
 	engineTimeout     = 15 * time.Second
-	contextSentences  = 3
 	maxResponseBytes  = 32 << 20
 	fakeToneSeconds   = 0.4
 	warmUpSamples     = vad.Rate / 2
@@ -232,7 +231,7 @@ func transcriptionForm(audio []int16, model, lang string, format responseFormat)
 
 func (e *httpEngines) translate(ctx context.Context, text string, source, target language, earlier []string) (string, error) {
 	messages := []chatMessage{
-		{Role: "system", Content: translationPrompt(source, target, e.settings.glossary, earlier)},
+		{Role: "system", Content: e.settings.prompt.render(source, target, earlier)},
 		{Role: "user", Content: text},
 	}
 
@@ -266,28 +265,6 @@ func (e *httpEngines) translate(ctx context.Context, text string, source, target
 	}
 
 	return strings.TrimSpace(reply.Message.Content), nil
-}
-
-func translationPrompt(source, target language, glossary string, earlier []string) string {
-	var prompt strings.Builder
-
-	fmt.Fprintf(&prompt, "You translate spoken %s from a business video call into natural spoken %s. Reply with the translation only.",
-		source.Name, target.Name)
-
-	if target.Address != "" {
-		fmt.Fprintf(&prompt, " %s.", target.Address)
-	}
-
-	if glossary != "" {
-		fmt.Fprintf(&prompt, " Use these term translations: %s.", glossary)
-	}
-
-	if len(earlier) > 0 {
-		prompt.WriteString(" Earlier sentences, for context only: ")
-		prompt.WriteString(strings.Join(earlier[max(0, len(earlier)-contextSentences):], " "))
-	}
-
-	return prompt.String()
 }
 
 func (e *httpEngines) speak(ctx context.Context, text string, lang language, choice voiceChoice, own *reference) (speech, error) {

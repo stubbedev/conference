@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 
 import { audioContext } from '@/hooks/media'
-import { isSpeaking, nextLevel, SPEAKING_SAMPLE_MS } from '@/lib/speaking'
+import { SPEAKING_SAMPLE_MS } from '@/lib/speaking'
+import { VoiceMeter } from '@/lib/voice-meter'
 
 // Speaking detection for every tile in the call runs on one loop. A
 // per-tile requestAnimationFrame loop wakes the page at display refresh
@@ -12,10 +13,8 @@ import { isSpeaking, nextLevel, SPEAKING_SAMPLE_MS } from '@/lib/speaking'
 
 interface Probe {
   stream: MediaStream
-  analyser: AnalyserNode
+  meter: VoiceMeter
   source: MediaStreamAudioSourceNode | null
-  samples: Uint8Array<ArrayBuffer>
-  level: number
   active: boolean
   listeners: Set<(active: boolean) => void>
 }
@@ -32,21 +31,13 @@ function bind(probe: Probe, ctx: AudioContext): void {
   if (!track) return
 
   probe.source = ctx.createMediaStreamSource(new MediaStream([track]))
-  probe.source.connect(probe.analyser)
+  probe.source.connect(probe.meter.input)
 }
 
-function sample(probe: Probe): void {
-  probe.analyser.getByteTimeDomainData(probe.samples)
+function sample(probe: Probe, now: number): void {
+  probe.meter.sample(now)
 
-  let sum = 0
-  for (const value of probe.samples) {
-    const deviation = (value - 128) / 128
-    sum += deviation * deviation
-  }
-
-  probe.level = nextLevel(probe.level, Math.sqrt(sum / probe.samples.length))
-
-  const active = isSpeaking(probe.level)
+  const active = probe.meter.speaking(now)
   if (active === probe.active) return
 
   probe.active = active
@@ -56,7 +47,7 @@ function sample(probe: Probe): void {
 function tick(now: number): void {
   if (now - lastSample >= SPEAKING_SAMPLE_MS) {
     lastSample = now
-    for (const probe of probes.values()) sample(probe)
+    for (const probe of probes.values()) sample(probe, now)
   }
 
   frame = probes.size > 0 ? requestAnimationFrame(tick) : 0
@@ -66,15 +57,10 @@ function probeFor(stream: MediaStream, ctx: AudioContext): Probe {
   const known = probes.get(stream)
   if (known) return known
 
-  const analyser = ctx.createAnalyser()
-  analyser.fftSize = 1024
-
   const probe: Probe = {
     stream,
-    analyser,
+    meter: new VoiceMeter(ctx),
     source: null,
-    samples: new Uint8Array(analyser.fftSize),
-    level: 0,
     active: false,
     listeners: new Set(),
   }
@@ -89,7 +75,7 @@ function probeFor(stream: MediaStream, ctx: AudioContext): Probe {
  * watchSpeaking calls listener whenever stream starts or stops carrying a
  * voice, and returns the function that stops watching it.
  */
-export function watchSpeaking(stream: MediaStream, listener: (active: boolean) => void): () => void {
+function watchSpeaking(stream: MediaStream, listener: (active: boolean) => void): () => void {
   const ctx = audioContext()
   if (!ctx) return () => {}
 
@@ -111,12 +97,12 @@ export function watchSpeaking(stream: MediaStream, listener: (active: boolean) =
     if (probe.listeners.size > 0) return
 
     probe.source?.disconnect()
-    probe.analyser.disconnect()
+    probe.meter.input.disconnect()
     probes.delete(stream)
   }
 }
 
-/** Whether this member is speaking right now, for the tile's ring. */
+/** Whether the voice heard on this stream is speaking right now, for the tile's ring. */
 export function useIsSpeaking(stream: MediaStream | null): boolean {
   const [speaking, setSpeaking] = useState<{ source: MediaStream | null; active: boolean }>({
     source: null,

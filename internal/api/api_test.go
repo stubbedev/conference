@@ -41,7 +41,6 @@ func testConfig() *config.Config {
 		ICEUDPPort:         0,
 		ExternalIPs:        nil,
 		Relay:              relay.Config{Port: 3478, TLSHost: ""},
-		MaxPublishKbps:     0,
 		TrustedProxies:     nil,
 		AllowedOrigins:     nil,
 		SessionTTL:         365 * 24 * time.Hour,
@@ -79,11 +78,11 @@ func newTranslatingAPI(t *testing.T, cfg *config.Config, translation service.Sta
 	}
 
 	hub := sfu.NewHub(sfu.HubConfig{
-		Engine:         engine,
-		Relay:          creds,
-		MaxMembers:     0,
-		MaxPublishKbps: 0,
-		Speech:         nil,
+		Engine:     engine,
+		Relay:      creds,
+		MaxMembers: 0,
+		Speech:     nil,
+		Translate:  false,
 	})
 
 	return api.New(storage, hub, cfg, translation)

@@ -102,8 +102,8 @@ func TestVoiceNeedsVoiceNames(t *testing.T) {
 	t.Parallel()
 
 	settings := load(t, map[string]string{envVoiceModel: modelTTS})
-	if settings.voice.ready() || !strings.Contains(settings.voice.problem, envVoiceName) {
-		t.Fatalf("voice %+v, want a problem naming %s", settings.voice, envVoiceName)
+	if settings.voice.ready() || !strings.HasPrefix(settings.voice.problem, "a voice for ") {
+		t.Fatalf("voice %+v, want a problem naming the languages that have no voice", settings.voice)
 	}
 
 	path := filepath.Join(t.TempDir(), "languages.json")

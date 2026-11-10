@@ -1,9 +1,10 @@
 // Package sfu implements the transport-agnostic video core: a hub of live
-// rooms where each member publishes one upstream peer connection and
-// subscribes to every other member through per-source downstream
-// peer connections. RTP packets are forwarded opaquely, which is what
-// makes client-side end-to-end encryption possible: the server never
-// holds media keys and only ever relays ciphertext.
+// rooms where each member publishes on an upstream peer connection (and
+// a second one while sharing its screen) and subscribes to every other
+// member through per-source downstream peer connections. RTP packets are
+// forwarded opaquely, which is what makes client-side end-to-end
+// encryption possible: the server never holds media keys and only ever
+// relays ciphertext.
 //
 // The forwarding design follows Galène (https://github.com/jech/galene):
 // publishers offer upstream, the server offers downstream, ICE is
@@ -25,9 +26,11 @@ import (
 	"github.com/stubbe/conference/internal/relay"
 )
 
-// Engine owns the pion API factory shared by all peer connections.
+// Engine owns the pion API factories: one per kind of connection members
+// publish on, one for the connections they watch others on.
 type Engine struct {
-	API *webrtc.API
+	upstream   [upstreamCount]*webrtc.API
+	downstream *webrtc.API
 
 	mediaAddrs []relay.MediaAddr
 }
@@ -55,6 +58,37 @@ func NewEngine(udpPort int, externalIPs []netip.Addr) (*Engine, func(), error) {
 // newEngine builds the engine on settingEngine with the SFU's codecs
 // and interceptors.
 func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr) (*Engine, error) {
+	var upstream [upstreamCount]*webrtc.API
+
+	for which := range upstreamCount {
+		api, err := newAPI(settingEngine, which.feedback())
+		if err != nil {
+			return nil, fmt.Errorf("sfu: %s api: %w", which, err)
+		}
+
+		upstream[which] = api
+	}
+
+	downstream, err := newAPI(settingEngine, feedbackReceiverEstimate)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Engine{upstream: upstream, downstream: downstream, mediaAddrs: mediaAddrs}, nil
+}
+
+// congestionFeedback is what the server reports back for the browser's
+// send-side bandwidth estimate.
+type congestionFeedback int
+
+const (
+	// feedbackReceiverEstimate is REMB and receiver reports only.
+	feedbackReceiverEstimate congestionFeedback = iota
+	// feedbackTransportWide adds transport-wide congestion control feedback.
+	feedbackTransportWide
+)
+
+func newAPI(settingEngine webrtc.SettingEngine, feedback congestionFeedback) (*webrtc.API, error) {
 	mediaEngine, err := newMediaEngine()
 	if err != nil {
 		return nil, err
@@ -65,13 +99,18 @@ func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr)
 		return nil, err
 	}
 
-	api := webrtc.NewAPI(
+	if feedback == feedbackTransportWide {
+		err = webrtc.ConfigureTWCCSender(mediaEngine, registry)
+		if err != nil {
+			return nil, fmt.Errorf("sfu: transport-wide congestion control feedback: %w", err)
+		}
+	}
+
+	return webrtc.NewAPI(
 		webrtc.WithSettingEngine(settingEngine),
 		webrtc.WithMediaEngine(mediaEngine),
 		webrtc.WithInterceptorRegistry(registry),
-	)
-
-	return &Engine{API: api, mediaAddrs: mediaAddrs}, nil
+	), nil
 }
 
 // MediaAddrs lists the addresses the SFU announces on its UDP mux and
@@ -160,16 +199,78 @@ func mediaAddrs(listen []net.Addr, externalIPs []netip.Addr) []relay.MediaAddr {
 	return out
 }
 
+const (
+	opusFmtp        = "minptime=10;useinbandfec=1;maxaveragebitrate=64000"
+	opusClockRate   = 48_000
+	opusChannels    = 2
+	opusPayloadType = 111
+	vp8PayloadType  = 96
+	rtxPayloadType  = 97
+	vp9PayloadType  = 98
+	vp9RTXType      = 99
+	vp9Fmtp         = "profile-id=0"
+)
+
+// registerCodecs offers exactly what end-to-end encryption can carry and
+// the layer switch can read. The encryption worker leaves the first bytes
+// of a VP8 frame and the Opus TOC byte in the clear; VP9's payload
+// descriptor is written by the packetizer from the encoder's metadata, so
+// it survives encryption whole. H.264 and AV1 packetizers parse the frame
+// itself and would choke on ciphertext.
+func registerCodecs(mediaEngine *webrtc.MediaEngine) error {
+	videoFeedback := []webrtc.RTCPFeedback{
+		{Type: "goog-remb", Parameter: ""},
+		{Type: "ccm", Parameter: "fir"},
+		{Type: "nack", Parameter: ""},
+		{Type: "nack", Parameter: "pli"},
+	}
+	codecs := []struct {
+		params webrtc.RTPCodecParameters
+		kind   webrtc.RTPCodecType
+	}{
+		{codec(webrtc.MimeTypeOpus, opusClockRate, opusChannels, opusFmtp, nil, opusPayloadType), webrtc.RTPCodecTypeAudio},
+		{codec(webrtc.MimeTypeVP8, videoClockRate, 0, "", videoFeedback, vp8PayloadType), webrtc.RTPCodecTypeVideo},
+		{codec(webrtc.MimeTypeRTX, videoClockRate, 0, fmt.Sprintf("apt=%d", vp8PayloadType), nil, rtxPayloadType), webrtc.RTPCodecTypeVideo},
+		{codec(webrtc.MimeTypeVP9, videoClockRate, 0, vp9Fmtp, videoFeedback, vp9PayloadType), webrtc.RTPCodecTypeVideo},
+		{codec(webrtc.MimeTypeRTX, videoClockRate, 0, fmt.Sprintf("apt=%d", vp9PayloadType), nil, vp9RTXType), webrtc.RTPCodecTypeVideo},
+	}
+
+	for _, each := range codecs {
+		err := mediaEngine.RegisterCodec(each.params, each.kind)
+		if err != nil {
+			return fmt.Errorf("sfu: register codec %s: %w", each.params.MimeType, err)
+		}
+	}
+
+	return nil
+}
+
+func codec(
+	mime string,
+	clockRate uint32,
+	channels uint16,
+	fmtp string,
+	feedback []webrtc.RTCPFeedback,
+	payloadType webrtc.PayloadType,
+) webrtc.RTPCodecParameters {
+	return webrtc.RTPCodecParameters{
+		MimeType:     mime,
+		ClockRate:    clockRate,
+		Channels:     channels,
+		SDPFmtpLine:  fmtp,
+		RTCPFeedback: feedback,
+		PayloadType:  payloadType,
+	}
+}
+
 // newMediaEngine registers the codecs and header extensions negotiated
-// on every peer connection. Transport-wide congestion control is
-// deliberately absent: bandwidth is controlled via REMB, which this
-// server sends to publishers and both browser generations still honor.
+// on every peer connection.
 func newMediaEngine() (*webrtc.MediaEngine, error) {
 	mediaEngine := &webrtc.MediaEngine{}
 
-	err := mediaEngine.RegisterDefaultCodecs()
+	err := registerCodecs(mediaEngine)
 	if err != nil {
-		return nil, fmt.Errorf("sfu: register codecs: %w", err)
+		return nil, err
 	}
 
 	extensions := []struct {
@@ -243,11 +344,21 @@ func newInterceptors() (*interceptor.Registry, error) {
 	return registry, nil
 }
 
-// NewPeerConnection creates a peer connection with the shared engine.
-func (e *Engine) NewPeerConnection() (*webrtc.PeerConnection, error) {
-	pc, err := e.API.NewPeerConnection(webrtc.Configuration{})
+// NewUpstreamPeerConnection creates the connection a member publishes up on.
+func (e *Engine) NewUpstreamPeerConnection(up Upstream) (*webrtc.PeerConnection, error) {
+	pc, err := e.upstream[up].NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
-		return nil, fmt.Errorf("sfu: new peer connection: %w", err)
+		return nil, fmt.Errorf("sfu: new %s peer connection: %w", up, err)
+	}
+
+	return pc, nil
+}
+
+// NewDownstreamPeerConnection creates a connection a member watches one source on.
+func (e *Engine) NewDownstreamPeerConnection() (*webrtc.PeerConnection, error) {
+	pc, err := e.downstream.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		return nil, fmt.Errorf("sfu: new downstream peer connection: %w", err)
 	}
 
 	return pc, nil

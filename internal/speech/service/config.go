@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/netip"
 	"net/url"
 	"os"
@@ -40,12 +41,29 @@ const (
 	formatVerbose responseFormat = "verbose_json"
 )
 
+// runtime is the machine that runs the speech engines: this server, or
+// every member's own browser.
+type runtime string
+
+const (
+	runOnServer  runtime = "server"
+	runInBrowser runtime = "browser"
+)
+
 const (
 	openAIURL        = "https://api.openai.com/v1"
 	defaultOllamaURL = "http://localhost:11434"
 	defaultInterim   = 600 * time.Millisecond
+	// defaultCacheLimit is 15 GB, room for the default models' exports a
+	// browser starts on with several languages.
+	defaultCacheLimit = 15 * gigabyte
 
+	envRuntime           = "SPEECH_RUNTIME"
 	envEngines           = "SPEECH_ENGINES"
+	envModelDir          = "SPEECH_MODEL_DIR"
+	envModelsFile        = "SPEECH_MODELS_FILE"
+	envModelCacheMax     = "SPEECH_MODEL_CACHE_MAX"
+	envGlossary          = "GLOSSARY"
 	envLanguagesFile     = "LANGUAGES_FILE"
 	envOpenAIKey         = "OPENAI_API_KEY"
 	envInternalDomains   = "INTERNAL_DOMAINS"
@@ -83,6 +101,7 @@ type namedEngine struct {
 
 // Settings configure the speech service; FromEnv reads them.
 type Settings struct {
+	runtime          runtime
 	transcription    engine
 	transcribeFormat responseFormat
 	translation      engine
@@ -95,13 +114,24 @@ type Settings struct {
 	// voice from their recording (audio.cpp's /tasks/run).
 	conversion *engine
 	interim    time.Duration
-	glossary   string
+	prompt     Prompt
 	languages  languages
+	models     Models
+	modelDir   string
+	cacheLimit int64
+	hub        *url.URL
 }
 
-// LogEngines says which engines are not set up yet, which send audio or
-// text off this network, and whether interim subtitles are on.
+// LogEngines says which runtime runs the engines, which engines are not
+// set up yet, which send audio or text off this network, and whether
+// interim subtitles are on.
 func (s Settings) LogEngines() {
+	if s.runtime == runInBrowser {
+		s.logBrowserRuntime()
+
+		return
+	}
+
 	for _, entry := range s.engines() {
 		switch {
 		case !entry.engine.ready():
@@ -134,22 +164,58 @@ func (s Settings) engines() []namedEngine {
 }
 
 // ownVoice says whether a speaker can be heard in their own voice: the
-// voice engine clones it, or a conversion engine makes it.
+// voice engine clones it, or a conversion engine makes it. The browser
+// runtime makes no voices on the server, so never there.
 func (s Settings) ownVoice() bool {
-	return s.voiceCloning || s.conversion != nil
+	return s.runtime != runInBrowser && (s.voiceCloning || s.conversion != nil)
+}
+
+// logBrowserRuntime says what the browsers load, since no engine on this
+// server is used.
+func (s Settings) logBrowserRuntime() {
+	if s.standIn() {
+		log.Print("live translation runs in the browsers, on stand-in engines")
+
+		return
+	}
+
+	if s.models.problem != "" {
+		log.Printf("live translation runs in the browsers, but is unavailable: it needs %s", s.models.problem)
+
+		return
+	}
+
+	log.Printf("live translation runs in the browsers, which load %s transcribe and %s translate from %s, with voices for %d languages; "+
+		"this server fetches each file from %s once and keeps at most %d bytes of them",
+		s.models.ASR.Model, s.models.MT.Model, envModelDir, len(s.models.Voices), s.hub.Redacted(), s.cacheLimit)
+}
+
+// standIn reports whether the engines are stand-ins. In the browser they
+// stand in for the models too, which are then no files at all.
+func (s Settings) standIn() bool {
+	return s.transcription.provider == fake
 }
 
 func (s Settings) ready() bool {
+	if s.runtime == runInBrowser {
+		return s.models.problem == ""
+	}
+
 	return s.transcription.ready() && s.translation.ready() && s.voice.ready()
 }
 
 func (s Settings) external() bool {
+	if s.runtime == runInBrowser {
+		return false
+	}
+
 	return s.transcription.external || s.translation.external || s.voice.external ||
 		(s.conversion != nil && s.conversion.external)
 }
 
 var (
 	errEnginesMode    = errors.New(envEngines + " must be real or fake")
+	errRuntimeMode    = errors.New(envRuntime + " must be server or browser")
 	errTranslateValue = errors.New(envTranslateProvider + " must be ollama or openai-compatible")
 	errFormatValue    = errors.New(envTranscribeFormat + " must be json or verbose_json")
 	errNegative       = errors.New("must not be negative")
@@ -158,11 +224,17 @@ var (
 	errCloningValue   = errors.New(envVoiceCloning + " must be true or false")
 	errConvertHalf    = errors.New(envConvertURL + " and " + envConvertModel + " must be set together")
 	errOwnVoiceTwice  = errors.New("set " + envVoiceCloning + " or " + envConvertURL + ", not both")
+	errByteSize       = errors.New("must be a whole number of bytes with a unit, e.g. 15GB or 512MiB")
 )
 
 // FromEnv reads the settings from the environment that getenv looks up.
 func FromEnv(getenv func(string) string) (Settings, error) {
 	env := environment(getenv)
+
+	mode, err := env.runtime()
+	if err != nil {
+		return Settings{}, err
+	}
 
 	langs, err := env.languages()
 	if err != nil {
@@ -174,7 +246,13 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		return Settings{}, fmt.Errorf("%w, not %q", errFormatValue, format)
 	}
 
+	cacheLimit, hub, err := env.modelCache()
+	if err != nil {
+		return Settings{}, err
+	}
+
 	settings := Settings{
+		runtime:          mode,
 		transcription:    standIn(),
 		transcribeFormat: format,
 		translation:      standIn(),
@@ -183,8 +261,12 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		voiceCloning:     false,
 		conversion:       nil,
 		interim:          0,
-		glossary:         env("GLOSSARY"),
+		prompt:           newPrompt(env(envGlossary), langs),
 		languages:        langs,
+		models:           noModels(""),
+		modelDir:         env(envModelDir),
+		cacheLimit:       cacheLimit,
+		hub:              hub,
 	}
 
 	settings, err = env.chosenEngines(settings)
@@ -192,14 +274,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		return Settings{}, err
 	}
 
-	settings.voiceCloning, err = env.flag(envVoiceCloning, errCloningValue)
-	if err != nil {
-		return Settings{}, err
-	}
-
-	if settings.conversion != nil && settings.voiceCloning {
-		return Settings{}, errOwnVoiceTwice
-	}
+	settings.models = env.loadModels(settings.modelDir, env(envModelsFile), langs, settings.prompt)
 
 	interimDefault := defaultInterim
 	if settings.transcription.external {
@@ -214,12 +289,45 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 	return settings, nil
 }
 
+// runtime reads which machine runs the engines: this server, as it always
+// did, or every member's own browser.
+func (env environment) runtime() (runtime, error) {
+	switch mode := runtime(env.or(envRuntime, string(runOnServer))); mode {
+	case runOnServer, runInBrowser:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%w, not %q", errRuntimeMode, mode)
+	}
+}
+
+// ownVoice reads whether the voice engine clones voices; a conversion
+// engine, read with the others, is the other way, and only one may be set.
+func (env environment) ownVoice(settings Settings) (Settings, error) {
+	cloning, err := env.flag(envVoiceCloning, errCloningValue)
+	if err != nil {
+		return Settings{}, err
+	}
+
+	if cloning && settings.conversion != nil {
+		return Settings{}, errOwnVoiceTwice
+	}
+
+	settings.voiceCloning = cloning
+
+	return settings, nil
+}
+
 func (env environment) chosenEngines(settings Settings) (Settings, error) {
 	switch env.or(envEngines, "real") {
 	case "fake":
-		return settings, nil
+		return env.ownVoice(settings)
 	case "real":
-		return env.realEngines(settings)
+		withEngines, err := env.realEngines(settings)
+		if err != nil {
+			return Settings{}, err
+		}
+
+		return env.ownVoice(withEngines)
 	default:
 		return Settings{}, errEnginesMode
 	}
@@ -237,7 +345,7 @@ func (env environment) realEngines(settings Settings) (Settings, error) {
 
 	engines := engineReader{env: env, internal: internal}
 
-	settings.transcription, err = engines.openAICompatible(prefixTranscribe, transcription)
+	settings.transcription, err = engines.openAICompatible(prefixTranscribe)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -247,7 +355,7 @@ func (env environment) realEngines(settings Settings) (Settings, error) {
 		return Settings{}, err
 	}
 
-	settings.voice, err = engines.openAICompatible(prefixVoice, voice)
+	settings.voice, err = engines.openAICompatible(prefixVoice)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -258,7 +366,7 @@ func (env environment) realEngines(settings Settings) (Settings, error) {
 	}
 
 	if missing := settings.missingVoices(); settings.voice.ready() && len(missing) > 0 {
-		settings.voice.problem = "set voices in the languages file (or " + envVoiceName + ") for " + strings.Join(missing, ", ")
+		settings.voice.problem = "a voice for " + strings.Join(missing, ", ")
 	}
 
 	return settings, nil
@@ -319,6 +427,66 @@ func (env environment) duration(name string, unit, fallback time.Duration) (time
 	return time.Duration(parsed * float64(unit)), nil
 }
 
+// modelCache reads how much of the model files the cache keeps, and the
+// hub it fetches them from.
+func (env environment) modelCache() (int64, *url.URL, error) {
+	limit, err := env.byteSize(envModelCacheMax, defaultCacheLimit)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	hub, err := url.Parse(huggingFace)
+	if err != nil {
+		return 0, nil, fmt.Errorf("the hub's address %s: %w", huggingFace, err)
+	}
+
+	return limit, hub, nil
+}
+
+// byteSize reads a number of bytes such as 15GB or 512MiB: a whole
+// number with a decimal (kB, MB, GB, TB) or binary (KiB, MiB, GiB, TiB)
+// unit, or none for bytes.
+func (env environment) byteSize(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(env(name))
+	if value == "" {
+		return fallback, nil
+	}
+
+	digits := strings.TrimRightFunc(value, func(r rune) bool { return r < '0' || r > '9' })
+	unit := strings.TrimSpace(value[len(digits):])
+
+	scale, ok := byteUnits()[unit]
+	if !ok || digits == "" {
+		return 0, fmt.Errorf("%s=%q %w", name, value, errByteSize)
+	}
+
+	number, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || number < 0 || number > math.MaxInt64/scale {
+		return 0, fmt.Errorf("%s=%q %w", name, value, errByteSize)
+	}
+
+	return number * scale, nil
+}
+
+func byteUnits() map[string]int64 {
+	return map[string]int64{
+		"": 1, "B": 1,
+		"kB": kilobyte, "KB": kilobyte, "MB": megabyte, "GB": gigabyte, "TB": terabyte,
+		"KiB": kibibyte, "MiB": mebibyte, "GiB": gibibyte, "TiB": tebibyte,
+	}
+}
+
+const (
+	kilobyte = 1000
+	megabyte = kilobyte * kilobyte
+	gigabyte = megabyte * kilobyte
+	terabyte = gigabyte * kilobyte
+	kibibyte = 1024
+	mebibyte = kibibyte * kibibyte
+	gibibyte = mebibyte * kibibyte
+	tebibyte = gibibyte * kibibyte
+)
+
 func (env environment) languages() (languages, error) {
 	path := env(envLanguagesFile)
 	if path == "" {
@@ -378,7 +546,7 @@ func (r engineReader) endpoint(prefix, fallback string) (*url.URL, error) {
 	return parsed, nil
 }
 
-func (r engineReader) openAICompatible(prefix string, use purpose) (engine, error) {
+func (r engineReader) openAICompatible(prefix string) (engine, error) {
 	endpoint, err := r.endpoint(prefix, openAIURL)
 	if err != nil {
 		return engine{}, err
@@ -388,7 +556,7 @@ func (r engineReader) openAICompatible(prefix string, use purpose) (engine, erro
 
 	problem := ""
 	if model == "" {
-		problem = fmt.Sprintf("set %s_MODEL to the %s model to use", prefix, use)
+		problem = prefix + "_MODEL"
 	}
 
 	return engine{
@@ -404,7 +572,7 @@ func (r engineReader) openAICompatible(prefix string, use purpose) (engine, erro
 func (r engineReader) translation() (engine, error) {
 	chosen := provider(r.env.or(envTranslateProvider, string(ollama)))
 	if chosen == openAICompatible {
-		return r.openAICompatible(prefixTranslate, translation)
+		return r.openAICompatible(prefixTranslate)
 	}
 
 	if chosen != ollama {
@@ -420,7 +588,7 @@ func (r engineReader) translation() (engine, error) {
 
 	problem := ""
 	if model == "" {
-		problem = "set " + prefixTranslate + "_MODEL to the Ollama model to translate with"
+		problem = prefixTranslate + "_MODEL"
 	}
 
 	return engine{

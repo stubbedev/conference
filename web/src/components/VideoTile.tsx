@@ -1,21 +1,29 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { MicOff, MonitorUp, Pin, PinOff, VideoOff, VolumeX } from 'lucide-react'
 
+import { useAudioSink } from '@/hooks/audio-output'
 import { useLatest } from '@/hooks/latest'
 import { useIsSpeaking } from '@/hooks/speaking'
 import { useTileDebug } from '@/hooks/tileDebug'
 import { Hint } from '@/components/Hint'
 import {
   aspectRatioChanged,
+  clampVolume,
   playMediaElement,
   resumeAudio,
   useSplitStreams,
 } from '@/hooks/media'
+import { avatarColor, initials } from '@/lib/names'
 import { cn } from '@/lib/utils'
 
 interface VideoTileProps {
   tileKey: string
   stream: MediaStream | null
+  /**
+   * The stream this member is heard through, measured for the speaking
+   * ring: their own, or their translation while it replaces their voice.
+   */
+  heard: MediaStream | null
   name: string
   /** Local tile: no audio sink is rendered (video is always element-muted). */
   muted?: boolean
@@ -28,17 +36,12 @@ interface VideoTileProps {
   pinned?: boolean
   onTogglePin?: (tileKey: string) => void
   compact?: boolean
+  fill?: boolean
   onAspectRatio?: (tileKey: string, ratio: number) => void
   /** Live-translation subtitle for what this member is saying. */
   caption?: string
   /** A translated voice is playing for this member: a stock one or their own, cloned one. */
   aiVoice?: 'stock' | 'cloned'
-  /**
-   * Overrides voice detection for the speaking ring: set while this
-   * member is heard through their translation, which plays later than
-   * their own (muted) voice.
-   */
-  speaking?: boolean
 }
 
 // Mobile browsers suspend decoding in ways that leave elements paused
@@ -69,6 +72,7 @@ function watchVisibility(element: HTMLMediaElement, start: () => void): () => vo
 export const VideoTile = memo(function VideoTile({
   tileKey,
   stream,
+  heard,
   name,
   muted,
   mirrored,
@@ -80,10 +84,10 @@ export const VideoTile = memo(function VideoTile({
   pinned,
   onTogglePin,
   compact,
+  fill = false,
   onAspectRatio,
   caption,
   aiVoice,
-  speaking: speakingOverride,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -92,7 +96,7 @@ export const VideoTile = memo(function VideoTile({
   const [audioBlocked, setAudioBlocked] = useState(false)
   const [debugStats, setDebugStats] = useState('')
   const debugOn = useTileDebug()
-  const speaking = useIsSpeaking(stream)
+  const speaking = useIsSpeaking(sharing ? null : heard)
   const { video: videoStream, audio: audioStream } = useSplitStreams(stream)
 
   useEffect(() => {
@@ -153,16 +157,12 @@ export const VideoTile = memo(function VideoTile({
     }
   }, [muted, audioStream])
 
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio || !sinkId) return
-    if ('setSinkId' in audio) audio.setSinkId(sinkId).catch(() => {})
-  }, [sinkId, stream])
+  useAudioSink(audioRef, sinkId)
 
   useEffect(() => {
     const audio = audioRef.current
     if (!audio || volume === undefined) return
-    audio.volume = Math.min(1, Math.max(0, volume))
+    audio.volume = clampVolume(volume)
   }, [volume])
 
   const enableSound = () => {
@@ -171,16 +171,8 @@ export const VideoTile = memo(function VideoTile({
     if (audio) playMediaElement(audio, setAudioBlocked)
   }
 
-  const initials =
-    name
-      .split(/\s+/)
-      .map((part) => part[0])
-      .join('')
-      .slice(0, 2)
-      .toUpperCase() || '?'
-
   const hideVideo = Boolean(camOff && !sharing)
-  const speakingNow = (speakingOverride ?? speaking) && !micOff && !sharing
+  const speakingNow = speaking && !micOff
 
   useEffect(() => {
     if (!debugOn) return
@@ -199,9 +191,6 @@ export const VideoTile = memo(function VideoTile({
 
   return (
     <div className="group hud-tile relative isolate h-full w-full">
-      {speakingNow && (
-        <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-emerald-400" />
-      )}
       <div className="absolute inset-0 overflow-hidden rounded-xl bg-black [clip-path:inset(0_round_0.75rem)]">
         <video
           ref={videoRef}
@@ -211,7 +200,8 @@ export const VideoTile = memo(function VideoTile({
           disablePictureInPicture
           disableRemotePlayback
           className={cn(
-            'h-full w-full object-contain',
+            'h-full w-full',
+            fill && !sharing ? 'object-cover' : 'object-contain',
             mirrored && !sharing && '-scale-x-100',
             hideVideo && 'opacity-0',
           )}
@@ -222,17 +212,20 @@ export const VideoTile = memo(function VideoTile({
             <div className={cn('flex flex-col items-center', compact ? 'gap-1' : 'gap-2')}>
               <div
                 className={cn(
-                  'grid place-items-center rounded-full bg-background/80 font-semibold text-foreground/70',
-                  compact ? 'size-8 text-xs' : 'size-16 text-xl',
+                  'grid place-items-center rounded-full font-semibold text-white',
+                  avatarColor(name),
+                  compact ? 'size-10 text-sm' : 'size-24 text-3xl',
                 )}
               >
-                {initials}
+                {initials(name)}
               </div>
-              {!compact && <span className="text-xs text-muted-foreground">Camera is off</span>}
             </div>
           </div>
         )}
       </div>
+      {speakingNow && (
+        <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-emerald-400 ring-inset" />
+      )}
       {!muted && audioBlocked && (
         <button
           type="button"
@@ -247,10 +240,10 @@ export const VideoTile = memo(function VideoTile({
         {sharing && <MonitorUp className="size-3.5 shrink-0" />}
         {!sharing && micOff && <MicOff className="size-3.5 shrink-0 text-red-400" />}
         <span className={cn('truncate', compact ? 'max-w-24' : 'max-w-48')}>{name}</span>
-        {sharing && <span className="shrink-0 text-white/60">screen</span>}
         {aiVoice && (
           <span className="shrink-0 text-white/60">{aiVoice === 'cloned' ? 'AI voice (cloned)' : 'AI voice'}</span>
         )}
+        {sharing && <span className="shrink-0 text-white/60">screen</span>}
       </div>
       {caption && (
         <p
@@ -276,7 +269,6 @@ export const VideoTile = memo(function VideoTile({
           <button
             type="button"
             onClick={() => onTogglePin(tileKey)}
-            aria-label={pinned ? 'Unpin' : 'Pin to main view'}
             className={cn(
               'absolute top-2 right-2 grid size-7 cursor-pointer place-items-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-opacity hover:bg-black/80',
               pinned ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',

@@ -14,7 +14,7 @@ require (
 	github.com/pion/turn/v5 v5.1.0
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/vithnilica/go-silerovad v0.0.0-20261009220311-dc87378735b7
-	golang.org/x/net v0.60.0
+	golang.org/x/net v0.62.0
 	modernc.org/sqlite v1.59.0
 )
 

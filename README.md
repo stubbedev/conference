@@ -24,13 +24,18 @@
   controls.
 - 🖥️ **Screen sharing and chat**, with mute and camera controls for
   every participant.
+- 🫥 **Background blur, on your machine.** One switch hides the room
+  behind you without the picture leaving the browser for anyone else's
+  model: the segmentation runs here, and everyone else receives the
+  blurred camera like any other camera.
 - 🎥 **Recording that stays with you.** Anyone in the meeting can
   record it in their own browser and download the video afterwards, one
   person at a time. The recording never touches the server, and everyone
   sees a badge while it runs.
 - 🗣️ **Live translation, if you want it.** Everyone picks their language;
   speech in other languages arrives as subtitles and a translated voice
-  in yours, on speech engines you choose. See
+  in yours, on speech engines you choose, on your server or in every
+  browser with no GPU server. See
   [Live translation](#live-translation).
 - 🌐 **Works on tricky networks.** A built-in relay gets people through
   firewalls and corporate networks, including over port 443.
@@ -102,7 +107,6 @@ All settings are environment variables.
 | `EXTERNAL_IPS`      | —               | Comma-separated public IPs to advertise when behind NAT                                   |
 | `TURN_PORT`         | `3478`          | UDP and TCP port of the built-in relay                                                    |
 | `TURN_TLS_HOST`     | —               | Hostname whose port 443 forwards to the relay over TLS                                    |
-| `MAX_PUBLISH_KBPS`  | `2500`          | Upload bandwidth cap per participant                                                      |
 | `MAX_ROOM_MEMBERS`  | `16`            | Default maximum people per room                                                           |
 | `TRUSTED_PROXIES`   | —               | Comma-separated IPs or CIDRs of reverse proxies whose `X-Forwarded-For` names the real client, so rate limits apply per visitor instead of per proxy |
 | `ALLOWED_ORIGINS`   | same origin     | Extra origins allowed to connect to the signaling WebSocket                               |
@@ -184,9 +188,15 @@ anything older than five minutes.
 
 ### Live translation
 
-Everyone sets **My language** before joining (or in the settings), plus
+Everyone picks the language they speak, under **Language and subtitles**
+before joining or in the settings; it starts in their browser's
+language, so most guests needn't touch it. There they also choose
 whether they want subtitles, a translated voice, and which voice others
-hear them in. A host then turns on **Live translation** in the call:
+hear them in. They hear and read everyone else in that same
+language. A host can also set a participant's language from the
+participants list, e.g. for a guest who joined in the wrong one; the guest
+is told and can change it back. Anyone in the call then turns on
+**Live translation**:
 
 - Subtitles appear on each speaker's tile in your language.
 - Someone speaking another language is heard through their translated
@@ -196,7 +206,7 @@ hear them in. A host then turns on **Live translation** in the call:
 - Everyone sees **Live translation** while it runs, with the state of
   their own translation and anything that keeps their speech from being
   translated, such as nobody else in the call speaking another language.
-- It keeps running when the host who started it leaves, until a host
+- It keeps running when whoever started it leaves, until someone
   switches it off.
 
 The conference server runs the speech service itself, at `/ws/speech`
@@ -217,9 +227,10 @@ languages of Europe that Whisper transcribes are included (35), each
 translated with the form of address a business call uses; the app takes
 its list from the server.
 
-Until all three engines are set up,
-everyone still sees the live-translation settings and hosts the button,
-greyed out, with what is missing (for example "set TRANSLATE_MODEL").
+Until all three engines are set up, live translation is not offered at
+all: no button for hosts, no settings for anyone, and nothing about the
+server's environment in the page. `/api/config` reports which variables
+are still unset, for whoever runs the server.
 With an engine on a public service, the app says "Live translation via
 an external service".
 
@@ -247,7 +258,7 @@ an external service".
   send to a server.
 - Joining is authorized separately from the media key, through a session
   issued by `/auth`.
-- **Live translation**, while a host has it on, sends each speaker's
+- **Live translation**, while it is on, sends each speaker's
   audio from their own browser to the conference server's speech
   service, which hears it in the clear, and on to the engines: so the
   server, unlike for the call itself, can hear what is translated. Run
@@ -265,10 +276,12 @@ an external service".
   carries its own counter block, so receivers never depend on local
   timing.
 - Only the codec header the RTP layer and hardware decoders must read
-  stays in the clear: the 10-byte VP8 keyframe header (frame tag, start
-  code, dimensions), the 3-byte VP8 delta frame tag, and the 1-byte Opus
-  TOC. Video is pinned to VP8, because H.264 and AV1 packetizers parse
-  the payload and cannot carry ciphertext.
+  stays in the clear: the first 10 bytes of a keyframe (for VP8 the frame
+  tag, start code and dimensions), the first 3 bytes of a delta frame, and
+  the 1-byte Opus TOC. Video is VP8 or VP9, because H.264 and AV1
+  packetizers parse the payload and cannot carry ciphertext; VP9's payload
+  descriptor is written from the encoder's metadata, so the SFU reads it
+  whole.
 - The encryption worker is TypeScript compiled against the WebWorker
   typings (`web/tsconfig.worker.json`), so calling an encoded-frame API a
   browser does not have fails the build instead of silently dropping
@@ -283,9 +296,33 @@ an external service".
   browser end the recording itself, everything captured until then is
   still downloaded. The container follows the browser: WebM on Chrome
   and Firefox, MP4 on Safari.
-- Screen shares go out as one full-quality encoding, and the SFU hands a
-  publisher the whole upload budget for it: a screen share that is
-  starved of bitrate drops frames until it looks frozen.
+- Screen shares are encoded as detailed content, so they stay sharp and
+  drop frames rather than resolution when bandwidth runs short, at up to
+  60 fps and the screen's own resolution. Where the browser confirms it
+  can send VP9 as simulcast streams (Chrome), a share is VP9, which holds
+  60 fps at a fraction of VP8's bitrate; elsewhere it is VP8. Cameras stay
+  VP8. They go
+  out as two full-resolution encodings, a fluid one and a slow one, so a
+  viewer on a bad connection gets the slow one instead of holding the
+  share back for everyone. While a screen is shared, it outranks the
+  presenter's camera for the upload.
+- Background blur runs in the browser, before the camera is published:
+  MediaPipe's selfie segmentation model, served from this app
+  (`/vision/`) rather than a CDN, composited at the capture's frame rate
+  over a blurred copy of the same frame. There are two models, landscape
+  and square, and the one whose fixed input matches the camera's shape is
+  the one that runs: a person squeezed from 16:9 into a square is a
+  person the model segments worse. Segmentation is asked for as often as
+  the machine can afford within half of each frame's time; a pixel only
+  changes sides between person and background when the model is sure, so
+  a high-contrast spot of the room is blurred once and stays blurred
+  instead of flickering; and the person's edge is feathered so the
+  cut-out does not look pasted on. The
+  runtime and the models are fetched the first time blur is switched on
+  and cached by the browser afterwards; nothing about the camera leaves
+  the machine, and the SFU only ever relays the composited picture. That
+  is about 15 MB of assets in the binary, which is the price of not
+  sending a face to a model somebody else runs.
 
 </details>
 
@@ -366,12 +403,21 @@ The response has everything you need to hand out links:
 One Go binary serves the website, the REST API, signaling and a
 Galène-style SFU (selective forwarding unit):
 
-- One upstream connection per publisher and one downstream connection per
-  viewer, trickle ICE, keyframe requests, NACK and receiver-report
-  interceptors, and a REMB bandwidth ceiling, all on a single UDP port.
-- Simulcast cameras, with each viewer getting the layer that fits, and
-  a loss-driven bitrate ceiling that climbs back as the network does: a
-  layer or a screen share lost to one bad minute comes back, and the
+- One upstream connection per publisher (and a second one while it shares
+  its screen) and one downstream connection per viewer, trickle ICE,
+  keyframe requests, NACK and receiver-report interceptors, all on a
+  single UDP port.
+- No fixed upload cap: every bandwidth limit comes from measurement. The
+  camera's upload gets transport-wide congestion control feedback, so the
+  publisher's browser measures its own uplink and probes back up after a
+  dip instead of creeping back from packet loss alone. The share's upload
+  gets none; the server estimates it from the packets it receives and
+  loses, keeps the estimate up while the screen is still, and backs off
+  only when packets go missing, so the next scroll is not encoded down to
+  what idling sent.
+- Simulcast cameras and screen shares, with each viewer getting the
+  layer that fits, and a loss-driven bitrate ceiling that climbs back as
+  the network does: a layer lost to one bad minute comes back, and the
   viewer's own REMB is taken as evidence that its link recovered.
 - A built-in TURN relay over UDP, TCP and TLS on 443. No coturn and no
   third-party STUN.
@@ -402,6 +448,8 @@ detector and points headless Chromes with fake cameras at one room. It
 checks that both browsers receive each other's audio and video through
 the encryption transform with zero dropped frames and exactly one tile
 per participant. Then it pins tiles, checks simulcast layer switching,
+shares a screen (both encodings at full size, fluid when pinned, slow in
+the strip),
 drops a browser's signaling and restarts the server mid-call (both must
 reconnect), records (the file must contain the other participant's
 voice), and forces a call through the TURN relay over UDP and TCP. It

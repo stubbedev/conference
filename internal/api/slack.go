@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ const (
 	slackMaxClockSkew     = 5 * time.Minute
 	slackFollowUpTimeout  = 10 * time.Second
 	slackResponseURLHost  = "hooks.slack.com"
+	slackResponseOrigin   = "https://" + slackResponseURLHost
 	slackSignatureVersion = "v0"
 )
 
@@ -41,9 +43,9 @@ type slackMessage struct {
 
 // slackCommand is a verified slash command invocation.
 type slackCommand struct {
-	userID      string
-	roomName    string
-	responseURL *url.URL
+	userID   string
+	roomName string
+	followUp slackFollowUp
 }
 
 // slackMeet answers a Slack slash command by creating an open room,
@@ -104,22 +106,45 @@ func (s *Server) slackMeet(w http.ResponseWriter, r *http.Request) {
 		Text:            meetingAnnouncement(cmd, created),
 	})
 
-	go s.sendSlackFollowUp(context.WithoutCancel(r.Context()), cmd.responseURL, ephemeral(hostNotice(created)))
+	go s.sendSlackFollowUp(context.WithoutCancel(r.Context()), cmd.followUp, ephemeral(hostNotice(created)))
 }
 
 // parseSlackCommand extracts the fields slackMeet relies on and
 // validates the follow-up URL Slack supplied.
 func parseSlackCommand(form url.Values) (slackCommand, error) {
-	responseURL, err := url.Parse(form.Get("response_url"))
-	if err != nil || responseURL.Scheme != "https" || responseURL.Host != slackResponseURLHost {
-		return slackCommand{}, errSlackResponseURL
+	followUp, err := parseSlackFollowUp(form.Get("response_url"))
+	if err != nil {
+		return slackCommand{}, err
 	}
 
 	return slackCommand{
-		userID:      form.Get("user_id"),
-		roomName:    strings.TrimSpace(form.Get("text")),
-		responseURL: responseURL,
+		userID:   form.Get("user_id"),
+		roomName: strings.TrimSpace(form.Get("text")),
+		followUp: followUp,
 	}, nil
+}
+
+// slackFollowUp is the path of a command's response_url on Slack's own
+// host: the follow-up is always posted to https://hooks.slack.com, built
+// from that fixed origin rather than from anything the request supplied.
+type slackFollowUp string
+
+func parseSlackFollowUp(raw string) (slackFollowUp, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != slackResponseURLHost || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || parsed.User != nil || !slackFollowUpPath().MatchString(parsed.Path) {
+		return "", errSlackResponseURL
+	}
+
+	return slackFollowUp(parsed.Path), nil
+}
+
+func slackFollowUpPath() *regexp.Regexp {
+	return regexp.MustCompile(`^/commands/[A-Za-z0-9]+/[0-9]+/[A-Za-z0-9]+$`)
+}
+
+func (f slackFollowUp) url() string {
+	return slackResponseOrigin + string(f)
 }
 
 // validSlackSignature checks Slack's v0 request signature: an
@@ -149,23 +174,23 @@ func validSlackSignature(secret string, header http.Header, body []byte, now tim
 
 // sendSlackFollowUp posts msg to the command's response_url. Failures
 // can only be logged: the slash command has already been answered.
-func (s *Server) sendSlackFollowUp(ctx context.Context, responseURL *url.URL, msg slackMessage) {
+func (s *Server) sendSlackFollowUp(ctx context.Context, followUp slackFollowUp, msg slackMessage) {
 	ctx, cancel := context.WithTimeout(ctx, slackFollowUpTimeout)
 	defer cancel()
 
-	err := postSlackMessage(ctx, s.SlackClient, responseURL, msg)
+	err := postSlackMessage(ctx, s.SlackClient, followUp, msg)
 	if err != nil {
 		log.Printf("api: slack: host link follow-up: %v", err)
 	}
 }
 
-func postSlackMessage(ctx context.Context, client *http.Client, target *url.URL, msg slackMessage) error {
+func postSlackMessage(ctx context.Context, client *http.Client, followUp slackFollowUp, msg slackMessage) error {
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("encode message: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, followUp.url(), bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}

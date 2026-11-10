@@ -124,7 +124,7 @@ func openAISettings(t *testing.T, api *httptest.Server) Settings {
 		envTranslateModel:         "chat",
 		envVoiceModel:             modelTTS,
 		envVoiceName:              voiceAlloy,
-		"GLOSSARY":                "Kontainer = Kontainer",
+		"GLOSSARY":                testGlossary,
 	})
 }
 
@@ -174,7 +174,7 @@ func TestOpenAITranslation(t *testing.T) {
 
 	system := seen.chat.Messages[0].Content
 
-	wants := []string{"spoken German", "natural spoken French", `"vous", never "tu"`, "Kontainer = Kontainer", "context only: b c d"}
+	wants := []string{"spoken German", "natural spoken French", `"vous", never "tu"`, testGlossary, "context only: b c d"}
 	for _, want := range wants {
 		if !strings.Contains(system, want) {
 			t.Fatalf("system prompt %q lacks %q", system, want)

@@ -7,7 +7,7 @@ default:
 
 # vet + test + lint + web build, lint and tests + go build + browser
 # smoke test (what ci.yml runs).
-check: vet test lint brand web web-lint web-test build e2e
+check: vet test lint brand web web-lint web-test build e2e e2e-share
 
 vet:
     go vet ./...
@@ -21,6 +21,22 @@ lint:
 # Build the web UI into web/dist/app; the server binary embeds it.
 web:
     cd web && npm ci && npm run build
+
+# Copy what the browser speech engines need into web/public: ONNX
+# Runtime's wasm and WebGPU builds and Piper's phonemizer.
+speech-files:
+    cd web && node scripts/vendor-speech.mjs
+
+# Write DIR/models.json, naming the models and Piper voices the browser
+# speech engines load and listing their files, which the server fetches
+# from the Hugging Face Hub and caches in DIR as browsers ask for them
+# (see docs/live-translation.md); nothing is downloaded here. Option:
+# languages, as in
+# `just speech-models /srv/speech-models en,de,da`. OPUS-MT pair models
+# cover those languages unless a third argument narrows them, or is none:
+# `just speech-models /srv/speech-models all en,de,da`.
+speech-models dir languages="en" pair_languages="":
+    node web/scripts/fetch-speech-models.mjs {{dir}} --languages={{languages}} {{ if pair_languages == "" { "" } else { "--pair-languages=" + pair_languages } }}
 
 # oxlint over the web UI; any warning fails.
 web-lint:
@@ -69,6 +85,14 @@ dev:
 # CHROME=/path/to/chrome) and ffmpeg.
 e2e:
     node web/e2e/smoke.mjs
+
+# A shared screen scrolled in bursts with still pauses between them,
+# presented from Chrome and from Firefox: every burst must play fluidly
+# after the screen sat still. Prints the share second by second. Needs
+# Chrome and Firefox on PATH (or CHROME= and FIREFOX=); `--skip-firefox`
+# measures Chrome alone.
+e2e-share *args:
+    node web/e2e/share-burst.mjs {{args}}
 
 # Regenerate the logo, favicon, touch icon and link-preview card in
 # web/public from web/brand (needs Inkscape, in the dev shell).
@@ -129,9 +153,25 @@ release level:
 
 # Live translation end to end with stand-in speech engines: two headless
 # Chromes must get each other's subtitles and translated voice. Needs
-# Chrome.
+# Chrome. SPEECH_RUNTIME=browser runs the engines in the browsers instead,
+# on the same stand-ins.
 e2e-translate:
     node web/e2e/translate.mjs
+
+# The same test where every browser runs the speech engines itself.
+e2e-translate-browser:
+    SPEECH_RUNTIME=browser node web/e2e/translate.mjs
+
+# Voice detection in a browser, on the model and ONNX Runtime the build
+# vendors: no download, no GPU. Needs Chrome and a built UI (just web).
+e2e-speech:
+    node web/e2e/speech-vad.mjs
+
+# The browser engines on the real models, served by a freshly built
+# server from DIR, whose models.json `just speech-models` writes; the
+# server caches the files it fetches in DIR.
+e2e-speech-engines dir:
+    SPEECH_MODEL_DIR={{dir}} node web/e2e/speech-engines.mjs
 
 # Live-translation demo: you (English, real mic) and a guest; options: hear, sv, male, openai.
 translate-demo *args:

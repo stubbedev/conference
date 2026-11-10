@@ -180,6 +180,19 @@ func (f *forwardTrack) WriteRTP(packet *rtp.Packet, srcExtURIs map[uint8]string)
 	return nil
 }
 
+// boundSSRC is the SSRC the viewer receives this track on, once bound:
+// the SSRC its feedback names.
+func (f *forwardTrack) boundSSRC() (uint32, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if f.binding == nil {
+		return 0, false
+	}
+
+	return uint32(f.binding.ssrc), true
+}
+
 // matchCodec finds the viewer's negotiated parameters for the
 // publisher's codec: an exact MIME type + fmtp match first, then MIME
 // type alone (the fmtp differences browsers tolerate anyway).

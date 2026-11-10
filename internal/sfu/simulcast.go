@@ -2,15 +2,17 @@ package sfu
 
 import (
 	"encoding/binary"
+	"strings"
 	"time"
 
 	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
 )
 
 // Simulcast layers, lowest quality first. A camera is published as up
-// to three encodings named by their RTP stream IDs (the client's
-// sendEncodings use exactly these rids); audio and screen shares are a
-// single stream without a rid, which is layer 0.
+// to three encodings and a shared screen as its low and high ones, named
+// by their RTP stream IDs (the client's sendEncodings use exactly these
+// rids); audio is a single stream without a rid, which is layer 0.
 const (
 	layerLow = iota
 	layerMid
@@ -55,19 +57,42 @@ const (
 	longPictureIDFlag = uint16(vp8LongPictureID) << 8
 )
 
-// vp8Descriptor locates the rewritable fields of one VP8 RTP payload.
-type vp8Descriptor struct {
+// payloadDescriptor locates the rewritable fields of one VP8 or VP9 RTP
+// payload: both codecs carry a picture ID with the same encoding and an
+// optional TL0PICIDX in a descriptor the packetizer writes, ahead of the
+// encrypted frame.
+type payloadDescriptor struct {
 	keyframe     bool // first packet of a keyframe: a safe layer switch point
 	pictureIDAt  int  // byte offset of the PictureID, -1 when absent
 	pictureIDLen int  // 1 (7-bit) or 2 (15-bit) bytes
 	tl0PicIdxAt  int  // byte offset of TL0PICIDX, -1 when absent
 }
 
+func emptyDescriptor() payloadDescriptor {
+	return payloadDescriptor{keyframe: false, pictureIDAt: -1, pictureIDLen: 0, tl0PicIdxAt: -1}
+}
+
+// descriptorParser reads the payload descriptor of one codec.
+type descriptorParser func(payload []byte) (payloadDescriptor, bool)
+
+// parserFor returns the descriptor parser of a payload format, or nil for
+// one the layer switch does not understand.
+func parserFor(mimeType string) descriptorParser {
+	switch strings.ToLower(mimeType) {
+	case strings.ToLower(webrtc.MimeTypeVP8):
+		return parseVP8
+	case strings.ToLower(webrtc.MimeTypeVP9):
+		return parseVP9
+	default:
+		return nil
+	}
+}
+
 // parseVP8 reads the payload descriptor. The VP8 frame header after it
 // stays in the clear under end-to-end encryption, so the keyframe bit
 // is readable here.
-func parseVP8(payload []byte) (vp8Descriptor, bool) {
-	desc := vp8Descriptor{keyframe: false, pictureIDAt: -1, pictureIDLen: 0, tl0PicIdxAt: -1}
+func parseVP8(payload []byte) (payloadDescriptor, bool) {
+	desc := emptyDescriptor()
 	if len(payload) == 0 {
 		return desc, false
 	}
@@ -96,7 +121,7 @@ func parseVP8(payload []byte) (vp8Descriptor, bool) {
 
 // parseExtension reads the optional fields announced by the extension
 // byte at pos and returns the offset of the VP8 payload header.
-func parseExtension(payload []byte, pos int, desc vp8Descriptor) (vp8Descriptor, int, bool) {
+func parseExtension(payload []byte, pos int, desc payloadDescriptor) (payloadDescriptor, int, bool) {
 	if len(payload) <= pos {
 		return desc, pos, false
 	}
@@ -131,7 +156,86 @@ func parseExtension(payload []byte, pos int, desc vp8Descriptor) (vp8Descriptor,
 	return desc, pos, true
 }
 
-func (d vp8Descriptor) pictureID(payload []byte) uint16 {
+// VP9 payload descriptor (RFC 9628 section 4.2) bits.
+const (
+	vp9HasPictureID  = 0x80
+	vp9InterPicture  = 0x40
+	vp9HasLayers     = 0x20
+	vp9Flexible      = 0x10
+	vp9FrameStart    = 0x08
+	vp9LongPictureID = 0x80
+	vp9SpatialShift  = 1
+	vp9SpatialMask   = 0x07
+)
+
+// parseVP9 reads the payload descriptor. The packetizer writes it from
+// the encoder's metadata rather than from the frame, so it stays readable
+// under end-to-end encryption, keyframe flag included: the first packet
+// of a picture that predicts from no other picture, in its base spatial
+// layer.
+func parseVP9(payload []byte) (payloadDescriptor, bool) {
+	desc := emptyDescriptor()
+	if len(payload) == 0 {
+		return desc, false
+	}
+
+	first := payload[0]
+	pos := 1
+	parsed := true
+
+	if first&vp9HasPictureID != 0 {
+		desc.pictureIDAt, desc.pictureIDLen, pos, parsed = vp9PictureID(payload, pos)
+	}
+
+	spatial := 0
+
+	if parsed && first&vp9HasLayers != 0 {
+		spatial, desc.tl0PicIdxAt, pos, parsed = vp9Layers(payload, pos, first&vp9Flexible == 0)
+	}
+
+	if !parsed || len(payload) <= pos {
+		return emptyDescriptor(), false
+	}
+
+	desc.keyframe = first&vp9FrameStart != 0 && first&vp9InterPicture == 0 && spatial == 0
+
+	return desc, true
+}
+
+// vp9PictureID locates the picture ID at pos: its offset, its length and
+// the offset after it.
+func vp9PictureID(payload []byte, pos int) (int, int, int, bool) {
+	if len(payload) <= pos {
+		return -1, 0, pos, false
+	}
+
+	length := 1
+	if payload[pos]&vp9LongPictureID != 0 {
+		length = 2
+	}
+
+	return pos, length, pos + length, true
+}
+
+// vp9Layers reads the layer indices at pos: the spatial layer, where
+// TL0PICIDX is (non-flexible mode only, -1 otherwise) and the offset
+// after them.
+func vp9Layers(payload []byte, pos int, withTL0 bool) (int, int, int, bool) {
+	if len(payload) <= pos {
+		return 0, -1, pos, false
+	}
+
+	spatial := int(payload[pos]>>vp9SpatialShift) & vp9SpatialMask
+	pos++
+
+	if !withTL0 {
+		return spatial, -1, pos, true
+	}
+
+	return spatial, pos, pos + 1, true
+}
+
+func (d payloadDescriptor) pictureID(payload []byte) uint16 {
 	if d.pictureIDLen == 1 {
 		return uint16(payload[d.pictureIDAt] & pictureIDMask7)
 	}
@@ -139,7 +243,7 @@ func (d vp8Descriptor) pictureID(payload []byte) uint16 {
 	return binary.BigEndian.Uint16(payload[d.pictureIDAt:]) & pictureIDMask15
 }
 
-func (d vp8Descriptor) pictureIDMask() uint16 {
+func (d payloadDescriptor) pictureIDMask() uint16 {
 	if d.pictureIDLen == 1 {
 		return pictureIDMask7
 	}
@@ -147,7 +251,7 @@ func (d vp8Descriptor) pictureIDMask() uint16 {
 	return pictureIDMask15
 }
 
-func (d vp8Descriptor) setPictureID(payload []byte, id uint16) {
+func (d payloadDescriptor) setPictureID(payload []byte, id uint16) {
 	if d.pictureIDLen == 1 {
 		var both [2]byte
 
@@ -201,7 +305,7 @@ func newMunger() munger {
 
 // rebase aligns the deltas so the packet about to be forwarded (the
 // first of a new layer) continues the output stream.
-func (m *munger) rebase(header *rtp.Header, payload []byte, desc vp8Descriptor, now time.Time) {
+func (m *munger) rebase(header *rtp.Header, payload []byte, desc payloadDescriptor, now time.Time) {
 	if !m.started {
 		return
 	}
@@ -222,7 +326,7 @@ func (m *munger) rebase(header *rtp.Header, payload []byte, desc vp8Descriptor, 
 
 // apply rewrites one packet. The payload is shared with every other
 // viewer of the track, so a rewritten descriptor is written into buf.
-func (m *munger) apply(header rtp.Header, payload []byte, desc vp8Descriptor, buf []byte, now time.Time) (rtp.Header, []byte) {
+func (m *munger) apply(header rtp.Header, payload []byte, desc payloadDescriptor, buf []byte, now time.Time) (rtp.Header, []byte) {
 	header = m.applyHeader(header, now)
 
 	rewrite := (desc.pictureIDAt >= 0 && m.picDelta != 0) || (desc.tl0PicIdxAt >= 0 && m.tl0Delta != 0)
@@ -255,7 +359,7 @@ func (m *munger) applyHeader(header rtp.Header, now time.Time) rtp.Header {
 	return header
 }
 
-func (m *munger) applyPictureID(payload []byte, desc vp8Descriptor, rewrite bool) {
+func (m *munger) applyPictureID(payload []byte, desc payloadDescriptor, rewrite bool) {
 	if desc.pictureIDAt < 0 {
 		return
 	}
@@ -272,7 +376,7 @@ func (m *munger) applyPictureID(payload []byte, desc vp8Descriptor, rewrite bool
 	m.hasPic = true
 }
 
-func (m *munger) applyTL0PicIdx(payload []byte, desc vp8Descriptor, rewrite bool) {
+func (m *munger) applyTL0PicIdx(payload []byte, desc payloadDescriptor, rewrite bool) {
 	if desc.tl0PicIdxAt < 0 {
 		return
 	}
@@ -302,10 +406,17 @@ func picNewer(a, b, mask uint16) bool {
 }
 
 const (
-	// Receiver-report loss above which a viewer steps down one layer.
+	// Receiver-report loss above which a report counts as lossy, and how
+	// many lossy reports in a row step a viewer down one layer: one burst,
+	// a large keyframe or a scroll on a share, is loss retransmission
+	// repairs, not a link that cannot carry the layer.
 	congestedLossFraction = highLossFraction
+	lossyReportsToStep    = 2
 	// Consecutive loss-free adaptation ticks before stepping back up.
-	upswitchCleanTicks = 5
+	upswitchCleanTicks    = 5
+	maxUpswitchCleanTicks = 40
+	failedUpswitchTicks   = 10
+	settledTicks          = 60
 )
 
 // ladder is a viewer's loss-driven quality ceiling for one simulcast
@@ -314,23 +425,40 @@ const (
 // browsers cap it near 1.5x what they currently receive, so a viewer on
 // the low layer could never earn its way back up.
 type ladder struct {
-	ceiling    int
-	congested  bool
-	cleanTicks int
+	ceiling     int
+	congested   bool
+	lossyStreak int
+	cleanTicks  int
+	wait        int
+	sinceUp     int
 }
 
 func newLadder() ladder {
-	return ladder{ceiling: layerHigh, congested: false, cleanTicks: 0}
+	return ladder{ceiling: layerHigh, congested: false, lossyStreak: 0, cleanTicks: 0, wait: upswitchCleanTicks, sinceUp: settledTicks}
 }
 
 // observeLoss records one receiver report's loss fraction (1/256 units).
 func (l *ladder) observeLoss(fractionLost uint8, current int) {
 	if fractionLost <= congestedLossFraction {
+		l.lossyStreak = 0
+
 		return
 	}
 
+	l.lossyStreak++
+	l.cleanTicks = 0
+
+	if l.lossyStreak < lossyReportsToStep {
+		return
+	}
+
+	l.lossyStreak = 0
+
 	if !l.congested {
 		l.ceiling = max(min(l.ceiling, current)-1, layerLow)
+		if l.sinceUp < failedUpswitchTicks {
+			l.wait = min(l.wait*2, maxUpswitchCleanTicks)
+		}
 	}
 
 	l.congested = true
@@ -346,9 +474,16 @@ func (l *ladder) tick() {
 	}
 
 	l.cleanTicks++
-	if l.cleanTicks >= upswitchCleanTicks && l.ceiling < layerHigh {
+	l.sinceUp = min(l.sinceUp+1, settledTicks)
+
+	if l.sinceUp >= settledTicks {
+		l.wait = upswitchCleanTicks
+	}
+
+	if l.cleanTicks >= l.wait && l.ceiling < layerHigh {
 		l.ceiling++
 		l.cleanTicks = 0
+		l.sinceUp = 0
 	}
 }
 
@@ -371,4 +506,33 @@ func chooseLayer(active [layerCount]bool, preferred, ceiling int) int {
 	}
 
 	return -1
+}
+
+const layerDemandLinger = 5 * time.Second
+
+type layerDemand struct {
+	lastWanted [layerCount]time.Time
+	sent       [layerCount]bool
+	announced  bool
+}
+
+func (d *layerDemand) update(desired []int, now time.Time) ([layerCount]bool, bool) {
+	for _, layer := range desired {
+		if layer >= layerLow && layer < layerCount {
+			d.lastWanted[layer] = now
+		}
+	}
+
+	var wanted [layerCount]bool
+
+	wanted[layerLow] = true
+	for layer := layerLow + 1; layer < layerCount; layer++ {
+		wanted[layer] = !d.lastWanted[layer].IsZero() && now.Sub(d.lastWanted[layer]) < layerDemandLinger
+	}
+
+	changed := !d.announced || wanted != d.sent
+	d.sent = wanted
+	d.announced = true
+
+	return wanted, changed
 }

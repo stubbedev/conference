@@ -71,6 +71,13 @@ jobs:
         run: node web/e2e/smoke.mjs
         env:
           CHROME: google-chrome
+      # A share scrolled in bursts must stay fluid after sitting still,
+      # presented from Chrome and from Firefox (both on the runner image).
+      - name: share bursts
+        run: node web/e2e/share-burst.mjs
+        env:
+          CHROME: google-chrome
+          FIREFOX: firefox
 
   # Live translation end to end: the server's speech engines are stand-ins
   # (no downloads, no translation service), everything else is real.

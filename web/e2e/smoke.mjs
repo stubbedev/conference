@@ -15,103 +15,47 @@
 // UDP, one over TCP) via the machine's LAN address, since Chrome does
 // not relay TURN/UDP to loopback. Exit code 0 means every assertion
 // held on every browser.
-import { spawn, spawnSync } from 'node:child_process'
-import { createSocket } from 'node:dgram'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { networkInterfaces, tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join, resolve } from 'node:path'
 
 import {
   callJs,
   check,
   checkCall,
+  consoleOf,
+  clickJoin,
   createRoom,
   evalJs,
   findChrome,
   freePort,
+  hook,
   joinRoom,
   launchChrome,
   sleep,
   stopProcess,
   waitFor,
 } from './browser.mjs'
-
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
+import {
+  clickButtonByTitle,
+  fakeDisplay,
+  remoteScreen,
+  screenSent,
+  SHARE_WIDTH,
+  shareMode,
+  shareReceiveCounters,
+  shareSendCounters,
+  tileByLabel,
+  uploads,
+} from './share.mjs'
 
 const args = parseArgs(process.argv.slice(2))
 const seconds = Number(args.seconds ?? 8)
 const stagger = Number(args.stagger ?? 500)
 const chromeBinary = args.chrome ?? process.env.CHROME ?? findChrome()
 const launch = (idx, dir, extraArgs) => launchChrome(chromeBinary, idx, dir, extraArgs)
-
-function parseArgs(argv) {
-  const out = {}
-  for (let i = 0; i < argv.length; i++) {
-    const key = argv[i]
-    if (!key.startsWith('--')) continue
-    out[key.slice(2)] = argv[i + 1]
-    i++
-  }
-  return out
-}
-
-function freeUdpPort() {
-  return new Promise((resolvePort, reject) => {
-    const sock = createSocket('udp4')
-    sock.on('error', reject)
-    sock.bind(0, () => {
-      const { port } = sock.address()
-      sock.close(() => resolvePort(port))
-    })
-  })
-}
-
-function buildServer(dir) {
-  const bin = join(dir, 'server')
-  const res = spawnSync('go', ['build', '-race', '-o', bin, './cmd/server'], {
-    cwd: repoRoot,
-    stdio: 'inherit',
-    env: { ...process.env, CGO_ENABLED: '1' },
-  })
-  if (res.status !== 0) throw new Error('go build failed')
-  return bin
-}
-
-async function serverEnv(dir, port) {
-  return {
-    ...process.env,
-    PORT: String(port),
-    ICE_UDP_PORT: String(await freeUdpPort()),
-    TURN_PORT: String(await freePort()),
-    DB_PATH: join(dir, 'smoke.db'),
-    SPEECH_ENGINES: 'real',
-    TRANSLATE_MODEL: '',
-    GORACE: 'halt_on_error=1',
-  }
-}
-
-async function startServer(bin, env) {
-  const port = env.PORT
-  const proc = spawn(bin, [], {
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let log = ''
-  proc.stdout.on('data', (d) => (log += d))
-  proc.stderr.on('data', (d) => (log += d))
-  for (let i = 0; i < 50; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/config`)
-      if (res.ok) return { proc, log: () => log }
-    } catch {
-      // not up yet
-    }
-    await sleep(200)
-  }
-  proc.kill('SIGKILL')
-  throw new Error(`server did not start:\n${log}`)
-}
 
 function lanAddress() {
   for (const addrs of Object.values(networkInterfaces())) {
@@ -121,20 +65,16 @@ function lanAddress() {
   throw new Error('no non-loopback IPv4 address: Chrome only relays TURN/UDP to a routable host')
 }
 
-function clickButtonByLabel(label) {
-  const button = [...document.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label)
-  if (!button) return false
-  button.click()
-  return true
-}
-
-async function clickButtonByTitle(browser, label) {
-  for (let t = 0; t < 20; t++) {
-    const clicked = await callJs(browser, clickButtonByLabel, label)
-    if (clicked) return true
-    await sleep(250)
-  }
-  return false
+async function controlPresent(label) {
+  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].some((b) => b.getAttribute('aria-label') === label)
+  if (find()) return true
+  const more = document.querySelector('button[aria-label="More options"]')
+  if (!more) return false
+  more.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }))
+  for (let i = 0; i < 20 && !find(); i++) await new Promise((resolve) => setTimeout(resolve, 50))
+  const present = find()
+  document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  return present
 }
 
 // Chrome's fake microphone beeps at about -10 dB; silence is below -60.
@@ -148,8 +88,244 @@ function maxVolume(file) {
   return match ? Number(match[1]) : null
 }
 
+// The video frames of a recording whose timestamps fall in [from, to) seconds (needs ffprobe).
+function framesBetween(file, from, to) {
+  const res = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', file], { encoding: 'utf8' })
+  if (res.error) throw new Error('ffprobe is needed to check the recording: install ffmpeg or put it on PATH')
+  return res.stdout.split('\n').map(Number).filter((t) => Number.isFinite(t) && t >= from && t < to).length
+}
+
+// A hidden tab: another tab in front of it, which is what throttles a page's
+// timers and stops its animation frames.
+async function hideTab(browser) {
+  const { targetId } = await browser.cdp.send('Target.createTarget', { url: 'about:blank' })
+  await browser.cdp.send('Target.activateTarget', { targetId })
+  return async () => {
+    await browser.cdp.send('Target.closeTarget', { targetId })
+  }
+}
+
+const RECORDING_VISIBLE_S = 5
+const RECORDING_HIDDEN_S = 8
+const HIDDEN_RECORDING_MIN_FPS = 10
+
 const recordingBadgePresent = `(() => { const h = document.querySelector('header'); return Boolean(h && [...h.querySelectorAll('span')].some(s => s.textContent.trim() === 'Recording')); })()`
-const recordButtonPresent = `[...document.querySelectorAll('button')].some(b => b.getAttribute('aria-label') === 'Record the call')`
+
+// A camera whose pixels change at random from frame to frame: what a test
+// needs to see a blur at all, since a picture of a flat wall looks the
+// same blurred or sharp. Written here rather than shot with ffmpeg so the
+// check depends on nothing but node.
+function writeNoiseVideo(file, { width = 320, height = 240, frames = 30, rate = 30 } = {}) {
+  const frame = Buffer.alloc(width * height + 2 * ((width / 2) * (height / 2)), 128)
+  const parts = [Buffer.from(`YUV4MPEG2 W${width} H${height} F${rate}:1 Ip A1:1 C420jpeg\n`)]
+
+  for (let index = 0; index < frames; index++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        frame[y * width + x] = (x * 71 + y * 113 + index * 37 + ((x * y) % 251)) & 0xff
+      }
+    }
+    parts.push(Buffer.from('FRAME\n'), frame)
+  }
+
+  writeFileSync(file, Buffer.concat(parts))
+}
+
+const previewSharpness = `(() => {
+  const video = document.querySelector('video')
+  if (!video || !video.videoWidth) return -1
+  const canvas = document.createElement('canvas')
+  canvas.width = 320
+  canvas.height = 240
+  const ctx = canvas.getContext('2d')
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  let energy = 0
+  for (let y = 1; y < canvas.height; y++) {
+    for (let x = 1; x < canvas.width; x++) {
+      const at = (y * canvas.width + x) * 4
+      energy += Math.abs(data[at] - data[at - 4]) + Math.abs(data[at] - data[at - canvas.width * 4])
+    }
+  }
+  return energy / (canvas.width * canvas.height)
+})()`
+
+const previewCameraLabel = `(() => {
+  const video = document.querySelector('video')
+  const track = video && video.srcObject && video.srcObject.getVideoTracks()[0]
+  return track ? track.label : ''
+})()`
+
+// Starting a meeting from the home page goes straight to the join screen as
+// its host, and once in, offers a joining link that carries the room key.
+async function checkNewMeeting(failures, dir, base) {
+  const browser = await launch(6, dir)
+  try {
+    const session = browser.sessionId
+    await browser.cdp.send('Page.enable', {}, session)
+    await browser.cdp.send('Page.navigate', { url: `${base}/` }, session)
+    const started = await waitFor(
+      browser,
+      `(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'New meeting'); if (b && !b.disabled) { b.click(); return true } return false })()`,
+      Boolean,
+      15000,
+    )
+    check(failures, 'new meeting', started.ok, 'no New meeting button on the home page')
+    const lobby = await waitFor(browser, `location.pathname.startsWith('/r/') && location.search.startsWith('?p=') && location.hash.startsWith('#k=')`, Boolean, 15000)
+    check(failures, 'new meeting', lobby.ok, 'New meeting did not open the room as its host')
+    const joined = await waitFor(
+      browser,
+      `(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Join call'); if (b && !b.disabled) { b.click(); return true } return false })()`,
+      Boolean,
+      20000,
+    )
+    check(failures, 'new meeting', joined.ok, 'the new meeting could not be joined')
+    const card = await waitFor(
+      browser,
+      `document.querySelector('section[aria-label="Your meeting\\'s ready"]')?.textContent ?? ''`,
+      (text) => text.includes('/r/') && text.includes('#k='),
+      15000,
+    )
+    check(failures, 'new meeting', card.ok, `no joining link with the room key after starting a meeting: ${JSON.stringify(card.value)}`)
+  } finally {
+    await stopProcess(browser.proc)
+  }
+}
+
+const inboundVideoFrames = `(async () => {
+  let frames = 0
+  for (const pc of window.__pcs) {
+    if (pc.connectionState === 'closed') continue
+    for (const r of (await pc.getStats()).values()) if (r.type === 'inbound-rtp' && r.kind === 'video') frames += r.framesDecoded || 0
+  }
+  return frames
+})()`
+
+// Someone whose browser blocks the camera and microphone can still join,
+// receives the others, and is published into the call as soon as access
+// is granted, without rejoining.
+async function checkJoinWithoutMedia(failures, dir, base) {
+  const label = 'join without media'
+  const room = await createRoom(base, 'no-media')
+  const origin = new URL(base).origin
+  const blocked = await launchChrome(chromeBinary, 7, dir, [], { fakeUi: false })
+  const other = await launch(8, dir)
+  try {
+    const setMedia = (setting) =>
+      Promise.all(
+        ['camera', 'microphone'].map((name) =>
+          blocked.cdp.send('Browser.setPermission', { permission: { name }, setting, origin }),
+        ),
+      )
+    await setMedia('denied')
+    const session = blocked.sessionId
+    await blocked.cdp.send('Page.enable', {}, session)
+    await blocked.cdp.send('Runtime.enable', {}, session)
+    await blocked.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook() }, session)
+    await blocked.cdp.send('Page.navigate', { url: room.url }, session)
+    const joined = await waitFor(blocked, clickJoin('Join without camera and microphone'), Boolean, 20000)
+    check(failures, label, joined.ok, 'no way to join with the camera and microphone blocked')
+    if (!joined.ok) return
+
+    await joinRoom(other, room.url)
+    const allow = await waitFor(blocked, `Boolean(document.querySelector('button[aria-label="Allow camera"]'))`, Boolean, 15000)
+    check(failures, label, allow.ok, 'the call does not show that the camera is blocked')
+    const seesOther = await waitFor(blocked, inboundVideoFrames, (frames) => frames > 0, 20000)
+    check(failures, label, seesOther.ok, 'the member without media does not receive the others')
+    const leaked = await evalJs(other, inboundVideoFrames)
+    check(failures, label, leaked === 0, `${leaked} video frames arrived from a member whose camera is blocked`)
+
+    await setMedia('granted')
+    const published = await waitFor(other, inboundVideoFrames, (frames) => frames > 0, 30000)
+    check(failures, label, published.ok, 'granting access mid-call did not publish the camera')
+  } finally {
+    await stopProcess(blocked.proc)
+    await stopProcess(other.proc)
+  }
+}
+
+const countPreviewFrames = `(() => {
+  const track = document.querySelector('video').srcObject.getVideoTracks()[0].clone()
+  const reader = new MediaStreamTrackProcessor({ track }).readable.getReader()
+  window.__previewFrames = 0
+  void (async () => {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) return
+      value.close()
+      window.__previewFrames++
+    }
+  })()
+  return true
+})()`
+
+async function previewFps(browser, seconds) {
+  const before = await evalJs(browser, 'window.__previewFrames')
+  await sleep(seconds * 1000)
+  return ((await evalJs(browser, 'window.__previewFrames')) - before) / seconds
+}
+
+async function checkBackgroundBlur(failures, dir, base) {
+  const camera = join(dir, 'blur-camera.y4m')
+  writeNoiseVideo(camera)
+
+  const browser = await launch(5, dir, [`--use-file-for-fake-video-capture=${camera}`])
+  try {
+    const room = await createRoom(base, 'blur')
+    const session = browser.sessionId
+    await browser.cdp.send('Page.enable', {}, session)
+    await browser.cdp.send('Runtime.enable', {}, session)
+    await browser.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook() }, session)
+    await browser.cdp.send('Page.navigate', { url: room.url }, session)
+
+    const prejoined = await waitFor(browser, previewSharpness, (value) => value > 0, 20000)
+    check(failures, 'blur', prejoined.ok, `the prejoin preview never showed a camera (${prejoined.value})`)
+
+    const before = await evalJs(browser, previewSharpness)
+    const cameraLabel = await evalJs(browser, previewCameraLabel)
+    check(failures, 'blur', await clickButtonByTitle(browser, 'Blur background'), 'no blur button on the prejoin')
+
+    const blurred = await waitFor(browser, previewSharpness, (value) => value > 0 && value < before / 2, 20000)
+    console.log(`blur: preview sharpness ${before.toFixed(2)} before, ${blurred.value.toFixed(2)} after`)
+    check(failures, 'blur', blurred.ok, `the camera did not blur (sharpness ${blurred.value.toFixed(2)} against ${before.toFixed(2)})`)
+
+    const composited = await evalJs(browser, previewCameraLabel)
+    check(failures, 'blur', composited !== cameraLabel, `the preview still carries the raw camera (${composited})`)
+
+    await evalJs(browser, countPreviewFrames)
+    const visibleFps = await previewFps(browser, 3)
+    const show = await hideTab(browser)
+    const hiddenFps = await previewFps(browser, 4)
+    await show()
+    console.log(`blur: ${visibleFps.toFixed(1)} fps visible, ${hiddenFps.toFixed(1)} fps hidden`)
+    check(
+      failures,
+      'blur',
+      hiddenFps >= HIDDEN_RECORDING_MIN_FPS && hiddenFps >= visibleFps / 2,
+      `the blurred camera stalls in a hidden tab (${hiddenFps.toFixed(1)} fps hidden against ${visibleFps.toFixed(1)} visible)`,
+    )
+
+    const errors = await evalJs(browser, 'window.__errors')
+    check(failures, 'blur', errors.length === 0, `blur page errors: ${errors.join(' | ')}`)
+
+    // The choice belongs to the camera preferences, so it has to survive
+    // a reload — the same person rejoining the same way they left.
+    await browser.cdp.send('Page.reload', {}, session)
+    const remembered = await waitFor(
+      browser,
+      `Boolean(document.querySelector('button[aria-label="Turn off background blur"]'))`,
+      Boolean,
+      20000,
+    )
+    check(failures, 'blur', remembered.ok, 'blur did not survive a reload')
+
+    check(failures, 'blur', await clickButtonByTitle(browser, 'Turn off background blur'), 'no blur-off button after the reload')
+    const cleared = await waitFor(browser, previewCameraLabel, (label) => label === cameraLabel, 20000)
+    check(failures, 'blur', cleared.ok, `turning blur off did not restore the camera (${cleared.value})`)
+  } finally {
+    await stopProcess(browser.proc)
+  }
+}
 
 // waitForBadge polls until the badge reaches the wanted state, so the
 // assertions do not depend on event-arrival timing.
@@ -243,10 +419,22 @@ function clickLocalPin(label) {
   return true
 }
 
+const LAYER_PAUSE_MS = 9000
+
+async function layerGrows(publisher, rid, ms) {
+  const before = (await evalJs(publisher, sentLayers))[rid]?.bytes ?? 0
+  await sleep(ms)
+  return ((await evalJs(publisher, sentLayers))[rid]?.bytes ?? 0) > before
+}
+
+// The publisher encodes only the layers some viewer wants (and always the
+// lowest): in a grid of two nobody needs the middle one, so it is paused.
 async function checkSimulcast(failures, publisher, viewer) {
-  const sent = await waitFor(publisher, sentLayers, (layers) => ['l', 'm', 'h'].every((rid) => layers[rid]?.bytes > 0), 20000)
+  const sent = await waitFor(publisher, sentLayers, (layers) => ['l', 'h'].every((rid) => layers[rid]?.bytes > 0), 20000)
   console.log(`simulcast sent: ${JSON.stringify(sent.value)}`)
-  check(failures, 'simulcast', sent.ok, `publisher is not sending all three layers: ${JSON.stringify(sent.value)}`)
+  check(failures, 'simulcast', sent.ok, `publisher is not sending the lowest and the wanted layer: ${JSON.stringify(sent.value)}`)
+  await sleep(LAYER_PAUSE_MS)
+  check(failures, 'simulcast', !(await layerGrows(publisher, 'm', 3000)), 'the middle layer is still encoded although nobody in a grid of two wants it')
 
   // Sizes are compared with each other, not with pixels: which resolution
   // the capture and the encoder settle on is the browser's business, that
@@ -260,12 +448,161 @@ async function checkSimulcast(failures, publisher, viewer) {
   const filmstrip = await waitFor(viewer, remoteVideoWidth, (width) => width > 0 && width * 2 <= full.value, 20000)
   console.log(`simulcast filmstrip: remote video ${filmstrip.value}px wide against ${full.value}px`)
   check(failures, 'simulcast', filmstrip.ok, `filmstrip: remote video ${filmstrip.value}px wide, not a layer below ${full.value}px`)
+  await sleep(LAYER_PAUSE_MS)
+  check(failures, 'simulcast', !(await layerGrows(publisher, 'h', 3000)), 'the top layer is still encoded although the only viewer shows a thumbnail')
 
   check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
 
-  const back = await waitFor(viewer, remoteVideoWidth, (width) => width >= full.value, 20000)
-  console.log(`simulcast grid again: remote video ${back.value}px wide`)
-  check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, want ${full.value}px or more back`)
+  // What is being checked is that the layer climbs back up, so the bar is
+  // relative to the filmstrip: a capture that settles on a different size
+  // mid-call (a busy machine will do that) must not read as a failure.
+  const back = await waitFor(viewer, remoteVideoWidth, (width) => width >= filmstrip.value * 2, 20000)
+  console.log(`simulcast grid again: remote video ${back.value}px wide against ${filmstrip.value}px in the filmstrip`)
+  check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, not a layer above ${filmstrip.value}px`)
+}
+
+function clickTilePin(suffix, label) {
+  const tile = [...document.querySelectorAll('.group')].find((g) => g.querySelector('.hud-label')?.textContent.trim().endsWith(suffix))
+  const button = tile && [...tile.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label)
+  if (!button) return false
+  button.click()
+  return true
+}
+
+const SHARE_FPS_WINDOW_MS = 3000
+
+async function remoteScreenFps(viewer) {
+  const before = await evalJs(viewer, remoteScreen)
+  await sleep(SHARE_FPS_WINDOW_MS)
+  const after = await evalJs(viewer, remoteScreen)
+  if (!before || !after) return { width: 0, fps: 0 }
+  return { width: after.width, fps: ((after.frames - before.frames) * 1000) / SHARE_FPS_WINDOW_MS }
+}
+
+const SHARE_SETTLE_MS = 20000
+
+const TIMELINE_SECONDS = 20
+
+async function shareTimeline(publisher, viewer) {
+  const samples = []
+  let previous = null
+  for (let second = 0; second <= TIMELINE_SECONDS; second++) {
+    const [recv, send] = await Promise.all([evalJs(viewer, shareReceiveCounters), evalJs(publisher, shareSendCounters)])
+    const estimate = send?.layers.h ? await publisher.outgoingEstimate(send.layers.h.ssrc) : null
+    const sample = { recv, send }
+    if (previous?.recv && recv) {
+      const h = send?.layers.h ?? {}
+      const ph = previous.send?.layers.h ?? {}
+      const l = send?.layers.l ?? {}
+      const pl = previous.send?.layers.l ?? {}
+      console.log(
+        `  t=${second}s viewer: ${recv.decoded - previous.recv.decoded} fps, +${recv.keyframes - previous.recv.keyframes} key, +${recv.freezes - previous.recv.freezes} freeze (${recv.frozenMs - previous.recv.frozenMs} ms), +${recv.plis - previous.recv.plis} pli, +${recv.lost - previous.recv.lost} lost, ${recv.width}px` +
+          ` | presenter h: ${(h.encoded ?? 0) - (ph.encoded ?? 0)} fps, +${(h.keyframes ?? 0) - (ph.keyframes ?? 0)} key, +${(h.plis ?? 0) - (ph.plis ?? 0)} pli, ${(((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8 / 1e6).toFixed(1)} Mbps (target ${((h.target ?? 0) / 1e6).toFixed(1)}), ${h.limit}` +
+          ` l: +${(l.keyframes ?? 0) - (pl.keyframes ?? 0)} key, +${(l.plis ?? 0) - (pl.plis ?? 0)} pli` +
+          ` | share estimate ${((estimate ?? 0) / 1e6).toFixed(1)} Mbps`,
+      )
+    }
+    samples.push(sample)
+    previous = sample
+    await sleep(1000)
+  }
+  return samples
+}
+
+const screenReceived = `
+(async () => {
+  const tile = (${tileByLabel.toString()})('screen')
+  const trackId = tile?.querySelector('video')?.srcObject?.getVideoTracks()[0]?.id
+  for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
+    for (const r of (await pc.getStats()).values()) {
+      if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
+        return { fps: r.framesPerSecond || 0, lost: r.packetsLost || 0, plis: r.pliCount || 0, freezes: r.freezeCount || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0 }
+      }
+    }
+  }
+  return null
+})()
+`
+
+async function settledScreenFps(viewer, publisher, settled) {
+  const deadline = Date.now() + SHARE_SETTLE_MS
+  for (;;) {
+    const measured = await remoteScreenFps(viewer)
+    const sent = await evalJs(publisher, screenSent)
+    const encoded = Object.entries(sent?.layers ?? {}).map(([rid, layer]) => `${rid} ${layer.fps} fps (${layer.limit})`)
+    const received = await evalJs(viewer, screenReceived)
+    console.log(`  share ${measured.width}px at ${measured.fps.toFixed(1)} fps, received ${JSON.stringify(received)}; publisher encodes ${encoded.join(', ')} with ${sent?.available ?? 0} bps available`)
+    if (settled(measured) || Date.now() > deadline) return measured
+  }
+}
+
+const FLUID_SHARE_MIN_FPS = 15
+
+const STILL_SETTLE_MS = 4000
+const STILL_WINDOW_MS = 10_000
+const STILL_MAX_KEYFRAMES = 1
+const STILL_MAX_FREEZES = 1
+const SLOW_SHARE_MAX_FPS = 10
+
+// A share goes out as a fluid and a slow encoding, both at full size: a
+// pinned share plays the fluid one, a share shrunk into the strip under a
+// pinned camera gets the slow one, and the camera thumbnails the viewer
+// asks for do not drag the share's layer down with them.
+async function checkScreenShare(failures, publisher, viewer) {
+  const publisherConsole = await consoleOf(publisher)
+  await evalJs(publisher, fakeDisplay)
+  check(failures, 'screen share', await clickButtonByTitle(publisher, 'Share your screen'), 'no "Share your screen" button')
+
+  const sent = await waitFor(publisher, screenSent, (s) => s && ['l', 'h'].every((rid) => s.layers[rid]?.frames > 0), 20000)
+  console.log(`screen share sent: ${JSON.stringify(sent.value)}`)
+  check(failures, 'screen share', sent.ok, `the share is not sent as a slow and a fluid encoding: ${JSON.stringify(sent.value)}; console: ${publisherConsole.join(' | ')}`)
+  const open = await evalJs(publisher, uploads)
+  console.log(`screen share uploads: ${JSON.stringify(open)}`)
+  check(failures, 'screen share', open.filter((up) => up.share).length === 1, `the share is not published on a connection of its own: ${JSON.stringify(open)}`)
+  check(failures, 'screen share', open.some((up) => !up.share && up.twcc), `the camera's upload lost transport-wide congestion control: ${JSON.stringify(open)}`)
+  check(failures, 'screen share', sent.value?.twcc === false, "the server negotiated transport-wide congestion control on the share's upload, which holds its estimate down while the screen is still")
+  for (const rid of ['l', 'h']) {
+    const width = sent.value?.layers[rid]?.width
+    check(failures, 'screen share', width === SHARE_WIDTH, `the ${rid} encoding of the share is ${width}px wide, not the full ${SHARE_WIDTH}px`)
+  }
+
+  const pinned = await waitFor(viewer, remoteScreen, (v) => v?.width === SHARE_WIDTH, 20000)
+  check(failures, 'screen share', pinned.ok, `the pinned share arrives ${pinned.value?.width}px wide, not ${SHARE_WIDTH}px`)
+  console.log('screen share timeline while pinned:')
+  await shareTimeline(publisher, viewer)
+  const fluid = await remoteScreenFps(viewer)
+  console.log(`screen share pinned: ${fluid.width}px at ${fluid.fps.toFixed(1)} fps`)
+  check(failures, 'screen share', fluid.fps >= FLUID_SHARE_MIN_FPS, `the pinned share plays at ${fluid.fps.toFixed(1)} fps, not the fluid encoding`)
+
+  check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Pin to main view'), 'no "Pin to main view" button on the viewer\'s own tile')
+  const slow = await settledScreenFps(viewer, publisher, (measured) => measured.fps > 0 && measured.fps <= SLOW_SHARE_MAX_FPS)
+  console.log(`screen share in the strip: ${slow.width}px at ${slow.fps.toFixed(1)} fps`)
+  check(failures, 'screen share', slow.width === SHARE_WIDTH, `the share in the strip arrives ${slow.width}px wide, not at full size`)
+  check(failures, 'screen share', slow.fps > 0 && slow.fps <= SLOW_SHARE_MAX_FPS, `the share in the strip plays at ${slow.fps.toFixed(1)} fps, not the slow encoding`)
+
+  check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
+  check(failures, 'screen share', await callJs(viewer, clickTilePin, 'screen', 'Pin to main view'), 'no "Pin to main view" button on the share')
+  const back = await settledScreenFps(viewer, publisher, (measured) => measured.fps >= FLUID_SHARE_MIN_FPS)
+  console.log(`screen share pinned again: ${back.width}px at ${back.fps.toFixed(1)} fps`)
+  check(failures, 'screen share', back.fps >= FLUID_SHARE_MIN_FPS, `the share pinned again plays at ${back.fps.toFixed(1)} fps, not the fluid encoding`)
+
+  await evalJs(publisher, shareMode('still'))
+  await sleep(STILL_SETTLE_MS)
+  const stillFrom = await evalJs(viewer, shareReceiveCounters)
+  await sleep(STILL_WINDOW_MS)
+  const stillTo = await evalJs(viewer, shareReceiveCounters)
+  const stillKeyframes = (stillTo?.keyframes ?? 0) - (stillFrom?.keyframes ?? 0)
+  const stillFreezes = (stillTo?.freezes ?? 0) - (stillFrom?.freezes ?? 0)
+  console.log(`screen share held still for ${STILL_WINDOW_MS / 1000} s: +${stillKeyframes} keyframes, +${stillFreezes} freezes`)
+  check(failures, 'screen share', stillKeyframes <= STILL_MAX_KEYFRAMES, `a still share brought ${stillKeyframes} keyframes in ${STILL_WINDOW_MS / 1000} s: its viewers are switching layers`)
+  check(failures, 'screen share', stillFreezes <= STILL_MAX_FREEZES, `a still share froze ${stillFreezes} times in ${STILL_WINDOW_MS / 1000} s`)
+
+  check(failures, 'screen share', await clickButtonByTitle(publisher, 'Stop sharing'), 'no "Stop sharing" button')
+  const gone = await waitFor(viewer, remoteScreen, (v) => v === null, 20000)
+  check(failures, 'screen share', gone.ok, 'the share tile stayed after the share stopped')
+  const left = await evalJs(publisher, uploads)
+  check(failures, 'screen share', !left.some((up) => up.share), `the share's connection stayed open after the share stopped: ${JSON.stringify(left)}`)
+  check(failures, 'screen share', left.some((up) => !up.share), `stopping the share closed the camera's upload too: ${JSON.stringify(left)}`)
 }
 
 async function checkPinRoundTrip(failures, label, browser) {
@@ -280,6 +617,125 @@ async function checkPinRoundTrip(failures, label, browser) {
   check(failures, label, unpinned.unpinButtons === 0, `expected no pinned tile after unpinning, found ${unpinned.unpinButtons}`)
 }
 
+// Real pointer and key input, so the tooltips see the event sequence a
+// person produces: boundary events, focus on press, focus handed back.
+function pointerAt(browser, type, { x, y }, button = 'none') {
+  return browser.cdp.send('Input.dispatchMouseEvent', { type, x, y, button, clickCount: button === 'none' ? 0 : 1 }, browser.sessionId)
+}
+
+async function glide(browser, from, to) {
+  const steps = 8
+  for (let i = 1; i <= steps; i++) {
+    await pointerAt(browser, 'mouseMoved', { x: from.x + ((to.x - from.x) * i) / steps, y: from.y + ((to.y - from.y) * i) / steps })
+  }
+}
+
+async function press(browser, at) {
+  await pointerAt(browser, 'mousePressed', at, 'left')
+  await pointerAt(browser, 'mouseReleased', at, 'left')
+}
+
+async function pressKey(browser, key, code, keyCode) {
+  for (const type of ['keyDown', 'keyUp']) {
+    await browser.cdp.send('Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode: keyCode }, browser.sessionId)
+  }
+}
+
+// The middle of each call-bar control, left to right, and a point on the
+// bar's own padding that nothing reacts to.
+function callBarLayout() {
+  const bar = document.querySelector('footer').getBoundingClientRect()
+  const centre = (el) => {
+    const r = el.getBoundingClientRect()
+    return { label: el.getAttribute('aria-label'), x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  }
+  return {
+    controls: [...document.querySelectorAll('footer button[aria-label]')].filter((b) => b.getClientRects().length > 0).map(centre),
+    idle: { x: bar.x + 4, y: bar.y + 4 },
+    below: { x: bar.x + bar.width / 2, y: window.innerHeight + 40 },
+  }
+}
+
+const tooltips = `[...document.querySelectorAll('[data-slot="tooltip-content"]')].map((t) => ({ state: t.dataset.state, text: t.textContent }))`
+const TOOLTIP_WAIT_MS = 2000
+
+async function checkTooltips(failures, browser) {
+  const label = 'tooltips'
+  const { controls, idle, below } = await callJs(browser, callBarLayout)
+  const mic = controls.find((c) => c.label === 'Mute microphone')
+  check(failures, label, mic, `no microphone toggle among the call bar controls: ${JSON.stringify(controls)}`)
+  if (!mic) return
+  const shown = async (what) => {
+    const open = await waitFor(browser, tooltips, (all) => all.some((t) => t.state !== 'closed'), TOOLTIP_WAIT_MS)
+    check(failures, label, open.ok, `${what} showed no tooltip`)
+    return open.value.filter((t) => t.state !== 'closed')
+  }
+  const closed = async (what) => {
+    const gone = await waitFor(browser, tooltips, (all) => all.length === 0, TOOLTIP_WAIT_MS)
+    check(failures, label, gone.ok, `${what}, tooltips stayed open: ${JSON.stringify(gone.value)}`)
+  }
+
+  await pointerAt(browser, 'mouseMoved', idle)
+  let from = idle
+  for (const control of controls) {
+    await glide(browser, from, control)
+    from = control
+    const open = await shown(`hovering "${control.label}"`)
+    check(failures, label, open.length <= 1, `hovering "${control.label}" left ${open.length} tooltips open: ${JSON.stringify(open)}`)
+  }
+  await glide(browser, from, idle)
+  await closed('after hovering along the call bar and moving off it')
+
+  // Twice, so the microphone ends as it started.
+  for (let round = 1; round <= 2; round++) {
+    await glide(browser, idle, mic)
+    await shown(`hovering the microphone toggle (round ${round})`)
+    await press(browser, mic)
+    await glide(browser, mic, idle)
+    await closed(`after clicking the microphone toggle (round ${round}) and moving away`)
+  }
+
+  await glide(browser, idle, mic)
+  await shown('hovering the microphone toggle before leaving the window')
+  // One move straight out, as a quick hand leaves the window: no
+  // pointermove follows inside the page.
+  await pointerAt(browser, 'mouseMoved', below)
+  await closed('after leaving the window from a hovered control')
+  await pointerAt(browser, 'mouseMoved', idle)
+
+  // Picking a menu item hands focus back to the menu's trigger. Into full
+  // screen and out again, the one item every member always has; the bar
+  // moves in full screen, so it is measured again each time.
+  for (const item of ['Enter fullscreen', 'Exit fullscreen']) {
+    const layout = await callJs(browser, callBarLayout)
+    const more = layout.controls.find((c) => c.label === 'More options')
+    check(failures, label, more, `no "More options" button among the call bar controls: ${JSON.stringify(layout.controls)}`)
+    if (!more) return
+    await glide(browser, layout.idle, more)
+    await shown(`hovering "More options" before picking "${item}"`)
+    await press(browser, more)
+    const target = await waitFor(
+      browser,
+      `(() => { const r = document.querySelector('[role="menuitem"][aria-label=${JSON.stringify(item)}]')?.getBoundingClientRect(); return r && { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`,
+      Boolean,
+      TOOLTIP_WAIT_MS,
+    )
+    check(failures, label, target.ok, `no "${item}" item in the "More options" menu`)
+    if (!target.ok) return
+    await glide(browser, more, target.value)
+    await press(browser, target.value)
+    await glide(browser, target.value, layout.idle)
+    await closed(`after picking "${item}" from the "More options" menu`)
+  }
+  const fullscreen = await waitFor(browser, 'document.fullscreenElement === null', Boolean, TOOLTIP_WAIT_MS)
+  check(failures, label, fullscreen.ok, 'the page stayed in full screen')
+
+  await pressKey(browser, 'Tab', 'Tab', 9)
+  await shown('moving keyboard focus to the next control')
+  await press(browser, idle)
+  await closed('after clicking away from a keyboard-focused control')
+}
+
 async function checkStillInRoom(failures, label, browsers) {
   for (const [i, browser] of browsers.entries()) {
     const path = await evalJs(browser, 'location.pathname')
@@ -292,7 +748,7 @@ async function main() {
   const procs = []
   const failures = []
   try {
-    const bin = args.server ? resolve(args.server) : buildServer(dir)
+    const bin = args.server ? resolve(args.server) : buildServer(dir, { race: true })
     const port = await freePort()
     const env = await serverEnv(dir, port)
     let server = await startServer(bin, env)
@@ -321,8 +777,14 @@ async function main() {
     for (const [i, browser] of browsers.entries()) {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
     }
+    await checkTooltips(failures, browsers[1])
 
     await checkSimulcast(failures, browsers[0], browsers[1])
+    await checkScreenShare(failures, browsers[0], browsers[1])
+
+    await checkNewMeeting(failures, dir, `http://127.0.0.1:${port}`)
+    await checkBackgroundBlur(failures, dir, `http://127.0.0.1:${port}`)
+    await checkJoinWithoutMedia(failures, dir, `http://127.0.0.1:${port}`)
 
     await evalJs(browsers[1], 'window.__sockets.at(-1).close()')
     await checkCall(failures, browsers, ['dropped signaling 0', 'dropped signaling 1'], { seconds })
@@ -334,19 +796,27 @@ async function main() {
     await checkCall(failures, browsers, ['server restart 0', 'server restart 1'], { seconds })
     await checkStillInRoom(failures, 'server restart', browsers)
 
-    // No translation model here: live translation shows, greyed out with
-    // what has to be set up, and does nothing when clicked.
-    const translateButton = `(() => {
-      const b = document.querySelector('[aria-label="Start live translation"]')
-      return b && { disabled: b.getAttribute('aria-disabled'), reason: b.getAttribute('aria-description') ?? '' }
+    // No speech engines are configured for this server, so live
+    // translation is not offered at all: nobody sees a button to press
+    // and no setting that names the variables the operator has to set.
+    const translationSurfaced = `(() => {
+      const header = document.querySelector('header')
+      const text = header ? header.innerText : ''
+      return {
+        button: Boolean(document.querySelector('[aria-label="Start live translation"]')),
+        settings: text.includes('Live translation'),
+        variables: /[A-Z]+_MODEL/.test(document.body.innerText),
+      }
     })()`
-    const blocked = await waitFor(browsers[0], translateButton, (b) => b?.disabled === 'true', 10_000)
-    check(failures, 'translation', blocked.ok, `translate button not greyed out: ${JSON.stringify(blocked.value)}`)
-    check(failures, 'translation', blocked.value?.reason.includes('TRANSLATE_MODEL'), `no setup hint: ${JSON.stringify(blocked.value)}`)
-    check(failures, 'translation', !(await evalJs(browsers[1], translateButton)), 'translate button visible on the unprivileged browser')
-    await evalJs(browsers[0], `document.querySelector('[aria-label="Start live translation"]')?.click()`)
-    await sleep(500)
-    check(failures, 'translation', !(await evalJs(browsers[0], `document.querySelector('header').innerText.includes('Live translation')`)), 'greyed-out translate button started translation')
+    for (const [index, label] of [
+      [0, 'host'],
+      [1, 'member'],
+    ]) {
+      const shown = await evalJs(browsers[index], translationSurfaced)
+      check(failures, 'translation', !shown.button, `translate button offered on the ${label} browser with no engines configured`)
+      check(failures, 'translation', !shown.settings, `translation settings offered on the ${label} browser`)
+      check(failures, 'translation', !shown.variables, `server settings leaked to the ${label} browser`)
+    }
 
     // Recording phase. Round one: the host records, a third browser
     // joins late (the badge must be replayed in its welcome), then the
@@ -358,7 +828,7 @@ async function main() {
 
     const hostRecordButton = await clickButtonByTitle(browsers[0], 'Record the call')
     check(failures, 'recording', hostRecordButton, 'record button missing on the privileged browser')
-    check(failures, 'recording', await evalJs(browsers[1], recordButtonPresent), 'record button missing on the unprivileged browser')
+    check(failures, 'recording', await callJs(browsers[1], controlPresent, 'Record the call'), 'record button missing on the unprivileged browser')
 
     if (hostRecordButton) {
       check(failures, 'recording', await waitForBadge(browsers[0], true), 'recording badge missing on the recorder page')
@@ -389,7 +859,14 @@ async function main() {
       if (reRecord) {
         check(failures, 'recording', await waitForBadge(late, true), 'recording badge missing on the second recorder')
         check(failures, 'recording', await waitForBadge(browsers[1], true), 'recording badge missing on the guest for the second recorder')
-        await sleep(5000)
+        await sleep(RECORDING_VISIBLE_S * 1000)
+        const hiddenState = await evalJs(late, 'document.visibilityState')
+        const show = await hideTab(late)
+        const hidden = await evalJs(late, 'document.visibilityState')
+        await sleep(RECORDING_HIDDEN_S * 1000)
+        await show()
+        await sleep(2000)
+        check(failures, 'recording', hiddenState === 'visible' && hidden === 'hidden', `the recorder's tab did not go from visible to hidden (${hiddenState} → ${hidden})`)
 
         const stopped = await clickButtonByTitle(late, 'Stop recording')
         check(failures, 'recording', stopped, 'stop button missing while recording')
@@ -407,7 +884,18 @@ async function main() {
         const loudest = download ? maxVolume(join(dlDir, download.name)) : null
         check(failures, 'recording', loudest !== null && loudest > REMOTE_VOICE_MIN_DB, `the guest's voice is not in the recording (loudest ${loudest} dB)`)
 
-        console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
+        const hiddenFrom = RECORDING_VISIBLE_S + 1
+        const hiddenTo = RECORDING_VISIBLE_S + RECORDING_HIDDEN_S - 1
+        const hiddenFps = download ? framesBetween(join(dlDir, download.name), hiddenFrom, hiddenTo) / (hiddenTo - hiddenFrom) : 0
+        const visibleFps = download ? framesBetween(join(dlDir, download.name), 1, RECORDING_VISIBLE_S) / (RECORDING_VISIBLE_S - 1) : 0
+        check(
+          failures,
+          'recording',
+          hiddenFps >= HIDDEN_RECORDING_MIN_FPS && hiddenFps >= visibleFps / 2,
+          `the recording's picture slowed to ${hiddenFps.toFixed(1)} fps while its tab was hidden, from ${visibleFps.toFixed(1)} fps`,
+        )
+
+        console.log(`recording: late-joiner replay, recorder-leave clearing, ${visibleFps.toFixed(1)} fps visible and ${hiddenFps.toFixed(1)} fps hidden, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
 
         // Round three: a recording the browser ends on its own (the
         // encoder failed, the way a long recording can die) must still

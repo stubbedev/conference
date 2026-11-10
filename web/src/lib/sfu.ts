@@ -1,28 +1,40 @@
 // RoomClient: the browser side of the signaling protocol (see
-// internal/sfu) and the WebRTC engine. Each member publishes one
-// upstream peer connection and answers one downstream connection per
-// remote source. When the room is end-to-end encrypted, encoded frames
-// are transformed through the E2EE worker, so the server only ever
-// relays ciphertext.
+// internal/sfu) and the WebRTC engine. Each member publishes its camera
+// and microphone on one upstream peer connection, a shared screen on a
+// second one, and answers one downstream connection per remote source.
+// When the room is end-to-end encrypted, encoded frames are transformed
+// through the E2EE worker, so the server only ever relays ciphertext.
 
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
 import {
+  addCounts,
+  countsSince,
   newQualityState,
   nextQuality,
+  noCounts,
   preferredLayer,
-  since,
   type InboundCounters,
   type Layer as LayerName,
   type QualityState,
 } from '@/lib/quality'
 import {
-  CAMERA_LAYERS,
-  CAMERA_SHARING_LAYERS,
-  relayerParameters,
+  cameraLayers,
+  cameraSenderParameters,
+  codecPreferences,
+  screenCodec,
+  SCREEN_SHARE_FLUID_MAX_BITRATE,
+  SCREEN_SHARE_FPS,
+  SIMULCAST_STREAM_MODE,
+  type VideoCodec,
+  demandParameters,
+  LAYER_RIDS,
+  SCREEN_CONTENT_HINT,
+  screenLayers,
   screenSenderParameters,
 } from '@/lib/encodings'
 import { SCREEN_AUDIO_KIND } from '@/lib/screen'
-import { isLangPrefs, isRoomCaption, type LangPrefs, type RoomCaption } from '@/lib/translate/types'
+import { CAMERA_KIND, SCREEN_KIND, type TileKind } from '@/lib/tiles'
+import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -44,10 +56,25 @@ export interface ChatMessage {
 export interface RemoteTrack {
   sourceId: string
   stream: MediaStream
-  kind: string
+  kind: TrackKind
 }
 
 export type ModerateAction = 'mute' | 'cam' | 'screen' | 'kick'
+
+const AUDIO_KIND = 'audio'
+const TRANSLATION_KIND_PREFIX = 'translation-'
+type TranslationKind = `${typeof TRANSLATION_KIND_PREFIX}${string}`
+
+/** What a published track carries, as offers label it for the SFU and the SFU for viewers. */
+export type TrackKind = typeof AUDIO_KIND | TileKind | typeof SCREEN_AUDIO_KIND | TranslationKind
+
+function translationKind(lang: string): TranslationKind {
+  return `${TRANSLATION_KIND_PREFIX}${lang}`
+}
+
+export function translationKindLang(kind: string): string | null {
+  return kind.startsWith(TRANSLATION_KIND_PREFIX) ? kind.slice(TRANSLATION_KIND_PREFIX.length) : null
+}
 
 /** Simulcast layer of a camera, as the SFU names the encodings. */
 export type { Layer } from '@/lib/quality'
@@ -55,28 +82,75 @@ export type { Layer } from '@/lib/quality'
 /** How often a viewer's own statistics are checked for trouble. */
 const QUALITY_SAMPLE_MS = 2000
 
+const LAYERED_KINDS: readonly TileKind[] = [CAMERA_KIND, SCREEN_KIND]
+
+function isLayeredKind(kind: string | undefined): kind is TileKind {
+  return LAYERED_KINDS.some((layered) => layered === kind)
+}
+
+function streamKey(sourceId: string, kind: TileKind): string {
+  return `${sourceId}:${kind}`
+}
+
+// The connections a member publishes on, named as the SFU names them. A
+// share gets its own: the server answers it without transport-wide
+// congestion control and holds its bandwidth estimate up with REMB, so it
+// stays high while the screen is still instead of settling on what idling
+// sends.
+const MEDIA_UP = 'up'
+const SCREEN_UP = 'up-screen'
+type UpstreamId = typeof MEDIA_UP | typeof SCREEN_UP
+const UPSTREAM_IDS: readonly UpstreamId[] = [MEDIA_UP, SCREEN_UP]
+
+function isUpstreamId(pc: string | undefined): pc is UpstreamId {
+  return UPSTREAM_IDS.some((id) => id === pc)
+}
+
+/** One publishing connection and its chain of serialized offers. */
+interface Upstream {
+  pc: RTCPeerConnection
+  negotiation: Promise<void>
+}
+
 /**
  * readInboundCounters sums this connection's cumulative video decoder
- * counters, the ones that say trouble has already reached the picture.
+ * counters per stream, the ones that say trouble has already reached the
+ * picture. kindOf names the stream a received track belongs to.
  */
-async function readInboundCounters(pc: RTCPeerConnection): Promise<InboundCounters | null> {
-  let seen = false
-  const counters: InboundCounters = { droppedFrames: 0, lostPackets: 0 }
+async function readInboundCounters(
+  pc: RTCPeerConnection,
+  kindOf: (mid: string) => string | undefined,
+): Promise<Map<TileKind, InboundCounters> | null> {
+  const mids = new Map<string, string>()
+  for (const transceiver of pc.getTransceivers()) {
+    if (transceiver.mid !== null) mids.set(transceiver.receiver.track.id, transceiver.mid)
+  }
+
+  const counters = new Map<TileKind, InboundCounters>()
 
   try {
     for (const report of (await pc.getStats()).values()) {
       const entry = report as unknown as Record<string, unknown>
       if (entry.type !== 'inbound-rtp' || entry.kind !== 'video') continue
 
-      seen = true
-      counters.droppedFrames += Number(entry.framesDropped ?? 0)
-      counters.lostPackets += Number(entry.packetsLost ?? 0)
+      const mid = mids.get(String(entry.trackIdentifier))
+      const kind = mid === undefined ? undefined : kindOf(mid)
+      if (!isLayeredKind(kind)) continue
+
+      const sum = counters.get(kind) ?? noCounts()
+      addCounts(sum, {
+        droppedFrames: Number(entry.framesDropped ?? 0),
+        decodedFrames: Number(entry.framesDecoded ?? 0),
+        lostPackets: Number(entry.packetsLost ?? 0),
+        receivedPackets: Number(entry.packetsReceived ?? 0),
+      })
+      counters.set(kind, sum)
     }
   } catch {
     return null
   }
 
-  return seen ? counters : null
+  return counters
 }
 export type ForcedAction = Exclude<ModerateAction, 'kick'>
 
@@ -132,7 +206,7 @@ interface WireMessage {
   members?: MemberInfo[]
   pc?: string
   sdp?: string
-  tracks?: { mid: string; kind: string }[]
+  tracks?: { mid: string; kind: TrackKind }[]
   candidate?: RTCIceCandidateInit
   member?: string
   mic?: boolean
@@ -151,7 +225,10 @@ interface WireMessage {
   iceServers?: RTCIceServer[]
   resume?: string
   replaces?: string
+  kind?: TileKind
   layer?: LayerName
+  mid?: string
+  active?: unknown
   translatingBy?: string
   token?: string
 }
@@ -165,12 +242,14 @@ interface Events {
   'track-removed': { sourceId: string; mid: string }
   chat: ChatMessage
   recording: { from: string; on: boolean }
-  lang: { from: string; prefs: LangPrefs }
-  caption: { from: string; caption: RoomCaption }
+  lang: { from: string; prefs: LangAnnouncement }
+  caption: { from: string; caption: RoomMessage }
   translating: { from: string; on: boolean }
   'translate-token': { token: string }
   error: { code: string; text: string }
   forced: { action: ForcedAction }
+  /** A host set this member's live-translation language. */
+  'lang-set': { from: string; lang: string }
   kicked: Record<string, never>
   closed: Record<string, never>
 }
@@ -192,19 +271,40 @@ function isE2EEStats(data: unknown): data is E2EEStats {
   return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'e2ee-stats'
 }
 
-// preferVP8 pins a video transceiver to VP8. The E2EE transform keeps
-// only the VP8 frame header in the clear; H.264 and AV1 packetizers
-// parse NAL units and OBUs out of the payload and would choke on
-// ciphertext. The SFU mirrors the offer's codec order, so a browser
-// that lists a hardware H.264 encoder first would otherwise get it.
-function preferVP8(transceiver: RTCRtpTransceiver): void {
-  if (transceiver.sender.track?.kind !== 'video') return
-  const codecs = RTCRtpSender.getCapabilities('video')?.codecs ?? []
-  const preferred = codecs.filter(
-    (codec) => codec.mimeType === 'video/VP8' || codec.mimeType === 'video/rtx',
-  )
-  if (!preferred.some((codec) => codec.mimeType === 'video/VP8')) return
+// preferCodec pins a video transceiver to a codec end-to-end encryption
+// can carry. H.264 and AV1 packetizers parse NAL units and OBUs out of
+// the payload and would choke on ciphertext. The SFU mirrors the offer's
+// codec order, so a browser that lists a hardware H.264 encoder first
+// would otherwise get it.
+function preferCodec(transceiver: RTCRtpTransceiver, codec: VideoCodec): void {
+  const preferred = codecPreferences(videoCapabilities(), codec)
+  if (preferred.length === 0) return
   transceiver.setCodecPreferences(preferred)
+}
+
+function videoCapabilities(): RTCRtpCodec[] {
+  return RTCRtpSender.getCapabilities('video')?.codecs ?? []
+}
+
+async function sendsVP9Simulcast(track: MediaStreamTrack): Promise<boolean> {
+  const { width, height, frameRate } = track.getSettings()
+  if (!width || !height) return false
+  try {
+    const info = await navigator.mediaCapabilities.encodingInfo({
+      type: 'webrtc',
+      video: {
+        contentType: 'video/VP9',
+        width,
+        height,
+        bitrate: SCREEN_SHARE_FLUID_MAX_BITRATE,
+        framerate: frameRate ?? SCREEN_SHARE_FPS,
+        scalabilityMode: SIMULCAST_STREAM_MODE,
+      },
+    })
+    return info.supported
+  } catch {
+    return false
+  }
 }
 
 // tuneScreenSender applies the screen-share encoding. A browser that
@@ -218,28 +318,22 @@ async function tuneScreenSender(sender: RTCRtpSender): Promise<void> {
   }
 }
 
-// The camera is published as three encodings so the SFU can give each
-// viewer the one its layout and network can use; the encodings live in
-// encodings.ts, next to the share's.
-export { CAMERA_LAYERS } from '@/lib/encodings'
-
 export class RoomClient {
   private ws: WebSocket | null = null
   private opts: RoomClientOptions
-  private up: RTCPeerConnection | null = null
+  private ups = new Map<UpstreamId, Upstream>()
   private downs = new Map<string, RTCPeerConnection>()
   private pendingIce = new Map<string, RTCIceCandidateInit[]>()
   private members = new Map<string, MemberInfo>()
-  private downKinds = new Map<string, string>()
-  private screenTrackIds = new Set<string>()
-  private screenSenders: RTCRtpSender[] = []
+  private downKinds = new Map<string, TrackKind>()
   private translationTrackLangs = new Map<string, string>()
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
-  private memberLangs = new Map<string, LangPrefs>()
+  private memberLangs = new Map<string, LangAnnouncement>()
+  private translates: TranslationLevel = 'none'
+  private ownVoice = false
   /** The member recording the room, or '' when nobody is. */
   recorder = ''
-  private negotiation: Promise<void> = Promise.resolve()
   private transformed = new WeakSet<object>()
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
@@ -255,6 +349,7 @@ export class RoomClient {
   private localCam: MediaStreamTrack | null = null
   private micSender: RTCRtpSender | null = null
   private camSender: RTCRtpSender | null = null
+  private retuning: Promise<void> = Promise.resolve()
   private state = { mic: true, cam: true, sharing: false }
   private e2eeStats: E2EEStats | null = null
   private e2eeFailureReported = { send: false, recv: false }
@@ -329,8 +424,8 @@ export class RoomClient {
           this.iceServers = msg.iceServers
           this.resumeToken = msg.resume ?? ''
           if (msg.self) this.selfId = msg.self.id
-          for (const member of msg.members ?? []) this.members.set(member.id, member)
           this.recorder = msg.recorder ?? ''
+          for (const member of msg.members ?? []) this.members.set(member.id, member)
           this.emit('welcome', {
             self: msg.self as MemberInfo,
             members: msg.members ?? [],
@@ -378,7 +473,7 @@ export class RoomClient {
   }
 
   /** Language settings other members have announced so far. */
-  get memberLangPrefs(): ReadonlyMap<string, LangPrefs> {
+  get memberLangPrefs(): ReadonlyMap<string, LangAnnouncement> {
     return this.memberLangs
   }
 
@@ -388,8 +483,7 @@ export class RoomClient {
   }
 
   async publish(stream: MediaStream): Promise<void> {
-    const pc = this.newPC('up')
-    this.up = pc
+    const pc = this.openUp(MEDIA_UP)
 
     this.localMic = stream.getAudioTracks()[0] ?? null
     this.localCam = stream.getVideoTracks()[0] ?? null
@@ -397,7 +491,7 @@ export class RoomClient {
     this.camSender = this.localCam ? this.addCamera(pc, this.localCam, stream) : null
 
     for (const sender of pc.getSenders()) this.installSenderTransform(sender)
-    await this.sendUpOffer()
+    if (pc.getSenders().length > 0) await this.sendUpOffer(MEDIA_UP)
 
     this.state = {
       mic: this.localMic?.enabled ?? false,
@@ -407,73 +501,98 @@ export class RoomClient {
     this.sendState()
   }
 
+  // addScreen publishes a share on a connection of its own. A share
+  // carries its own sound when the picker offered it; everything on this
+  // connection is announced as the screen or its audio, so the server
+  // treats the sound as audio and every member hears what is shared.
   async addScreen(stream: MediaStream): Promise<void> {
-    const pc = this.up
-    if (!pc) throw new Error('Publish before sharing your screen.')
+    if (!this.ups.has(MEDIA_UP)) throw new Error('Publish before sharing your screen.')
+    if (this.ups.has(SCREEN_UP)) throw new Error('A screen is already being shared.')
 
-    for (const track of stream.getTracks()) {
-      // A share carries its own sound when the picker offered it; it is
-      // announced as screen audio so the server treats it as audio and
-      // every member hears what is shared.
-      this.screenTrackIds.add(track.id)
+    const pc = this.openUp(SCREEN_UP)
+    try {
+      for (const track of stream.getTracks()) {
+        const sender = track.kind === 'video' ? await this.addScreenVideo(pc, track, stream) : pc.addTrack(track, stream)
+        this.installSenderTransform(sender)
 
-      const sender = pc.addTrack(track, stream)
-      this.screenSenders.push(sender)
-      const transceiver = pc.getTransceivers().find((t) => t.sender === sender)
-      if (transceiver) preferVP8(transceiver)
-      this.installSenderTransform(sender)
-
-      if (track.kind === 'video') {
-        // 'motion' tells the browser this is a moving picture to keep up
-        // with, not a scan of text to keep sharp: a shared window that
-        // keeps its frame rate is what a call is missing otherwise.
-        track.contentHint = 'motion'
-        await tuneScreenSender(sender)
+        if (track.kind === 'video') await tuneScreenSender(sender)
       }
+      await this.sendUpOffer(SCREEN_UP)
+    } catch (err) {
+      this.dropScreen()
+      throw err
     }
 
     this.state = { ...this.state, sharing: true }
-    void this.tuneCamera(CAMERA_SHARING_LAYERS)
+    void this.tuneCamera()
     this.sendState()
-    await this.sendUpOffer()
   }
 
   async removeScreen(): Promise<void> {
-    const pc = this.up
-    if (!pc) return
-
-    for (const sender of this.screenSenders) {
-      if (sender.track) this.screenTrackIds.delete(sender.track.id)
-      try {
-        pc.removeTrack(sender)
-      } catch (err) {
-        console.warn('removeTrack', err)
-      }
-    }
-    this.screenSenders = []
+    if (!this.dropScreen()) return
 
     this.state = { ...this.state, sharing: false }
-    void this.tuneCamera(CAMERA_LAYERS)
+    void this.tuneCamera()
     this.sendState()
-    await this.sendUpOffer()
   }
 
-  // tuneCamera retunes the camera's encodings in place. A browser that
-  // refuses the parameters keeps its own caps, which is a worse picture
-  // during a share, never a broken one.
-  private async tuneCamera(layers: readonly RTCRtpEncodingParameters[]): Promise<void> {
-    const sender = this.camSender
-    if (!sender) return
+  /** Closes the share's connection on both ends; reports whether it was open. */
+  private dropScreen(): boolean {
+    if (!this.closeUp(SCREEN_UP)) return false
+    this.send({ type: 'close', pc: SCREEN_UP })
+    return true
+  }
 
-    try {
-      await sender.setParameters(relayerParameters(sender.getParameters(), layers))
-    } catch (err) {
-      console.warn('sfu: tuning the camera encoder', err)
-    }
+  private openUp(id: UpstreamId): RTCPeerConnection {
+    const pc = this.newPC(id)
+    this.ups.set(id, { pc, negotiation: Promise.resolve() })
+    return pc
+  }
+
+  /** Closes one publishing connection; reports whether it was open. */
+  private closeUp(id: UpstreamId): boolean {
+    const up = this.ups.get(id)
+    if (!up) return false
+
+    this.ups.delete(id)
+    this.pendingIce.delete(id)
+    up.pc.close()
+    return true
+  }
+
+  private closeUps(): void {
+    for (const id of UPSTREAM_IDS) this.closeUp(id)
+  }
+
+  // tuneCamera retunes the camera's encodings in place for the track it
+  // sends and whether a screen is shared. A browser that refuses the
+  // parameters keeps its own caps, which is a worse picture, never a
+  // broken one.
+  private tuneCamera(): Promise<void> {
+    const sender = this.camSender
+    const track = sender?.track
+    if (!sender || !track) return Promise.resolve()
+
+    const layers = cameraLayers(track.getSettings())
+    return this.retune(sender, 'tuning the camera encoder', (parameters) =>
+      cameraSenderParameters(parameters, layers, this.state.sharing),
+    )
+  }
+
+  private demandLayers(up: UpstreamId, mid: string, active: boolean[]): void {
+    const sender = this.ups.get(up)?.pc.getTransceivers().find((transceiver) => transceiver.mid === mid)?.sender
+    if (!sender) return
+    void this.retune(sender, 'pausing and resuming simulcast layers', (parameters) => demandParameters(parameters, active))
+  }
+
+  private retune(sender: RTCRtpSender, doing: string, change: (parameters: RTCRtpSendParameters) => RTCRtpSendParameters): Promise<void> {
+    const next = this.retuning.then(() => sender.setParameters(change(sender.getParameters())))
+    this.retuning = next.catch((err: unknown) => console.warn(`sfu: ${doing}`, err))
+    return this.retuning
   }
 
   async replaceLocalTrack(kind: 'mic' | 'cam', track: MediaStreamTrack): Promise<void> {
-    const pc = this.up
+    const pc = this.ups.get(MEDIA_UP)?.pc
     if (!pc) return
 
     let sender = kind === 'mic' ? this.micSender : this.camSender
@@ -483,31 +602,34 @@ export class RoomClient {
       this.installSenderTransform(sender)
       if (kind === 'mic') this.micSender = sender
       else this.camSender = sender
-      await this.sendUpOffer()
+      await this.sendUpOffer(MEDIA_UP)
     } else {
       await sender.replaceTrack(track)
+      if (kind === 'cam') await this.tuneCamera()
     }
 
     if (kind === 'mic') this.localMic = track
     else this.localCam = track
   }
 
-  /** Tells the SFU the highest camera layer this page's layout can use for a source. */
-  preferLayer(sourceId: string, layer: LayerName): void {
-    if (this.layoutLayers.get(sourceId) === layer) return
+  /** Tells the SFU the highest layer this page's layout can use for a source's camera or screen. */
+  preferLayer(sourceId: string, kind: TileKind, layer: LayerName): void {
+    const key = streamKey(sourceId, kind)
+    if (this.layoutLayers.get(key) === layer) return
 
-    this.layoutLayers.set(sourceId, layer)
+    this.layoutLayers.set(key, layer)
 
-    const quality = this.quality.get(sourceId) ?? newQualityState(layer)
-    this.quality.set(sourceId, quality)
-    this.requestLayer(sourceId, preferredLayer(layer, quality.ceiling))
+    const quality = this.quality.get(key) ?? newQualityState()
+    this.quality.set(key, quality)
+    this.requestLayer(sourceId, kind, preferredLayer(layer, quality.ceiling))
   }
 
-  private requestLayer(sourceId: string, layer: LayerName): void {
-    if (this.layerPrefs.get(sourceId) === layer) return
+  private requestLayer(sourceId: string, kind: TileKind, layer: LayerName): void {
+    const key = streamKey(sourceId, kind)
+    if (this.layerPrefs.get(key) === layer) return
 
-    this.layerPrefs.set(sourceId, layer)
-    this.send({ type: 'layer', member: sourceId, layer })
+    this.layerPrefs.set(key, layer)
+    this.send({ type: 'layer', member: sourceId, kind, layer })
   }
 
   // watchQuality samples every downstream connection and lets each viewer's
@@ -527,32 +649,35 @@ export class RoomClient {
 
   private async sampleQuality(): Promise<void> {
     for (const [sourceId, pc] of this.downs) {
-      const counters = await readInboundCounters(pc)
-      if (!counters) continue
+      const streams = await readInboundCounters(pc, (mid) => this.downKinds.get(`${sourceId}:${mid}`))
+      if (!streams) continue
 
-      const previous = this.inbound.get(sourceId)
-      this.inbound.set(sourceId, counters)
+      for (const [kind, counters] of streams) this.stepQuality(sourceId, kind, counters)
+    }
+  }
 
-      const layout = this.layoutLayers.get(sourceId)
-      if (!previous || !layout) continue
+  private stepQuality(sourceId: string, kind: TileKind, counters: InboundCounters): void {
+    const key = streamKey(sourceId, kind)
+    const previous = this.inbound.get(key)
+    this.inbound.set(key, counters)
 
-      const quality = this.quality.get(sourceId) ?? newQualityState(layout)
-      const stepped = nextQuality(quality, layout, {
-        droppedFrames: since(previous.droppedFrames, counters.droppedFrames),
-        lostPackets: since(previous.lostPackets, counters.lostPackets),
-      })
-      this.quality.set(sourceId, stepped)
+    const layout = this.layoutLayers.get(key)
+    if (!previous || !layout) return
 
-      if (stepped.ceiling !== quality.ceiling) {
-        this.requestLayer(sourceId, preferredLayer(layout, stepped.ceiling))
-      }
+    const quality = this.quality.get(key) ?? newQualityState()
+    const stepped = nextQuality(quality, layout, countsSince(previous, counters))
+    this.quality.set(key, stepped)
+
+    if (stepped.ceiling !== quality.ceiling) {
+      this.requestLayer(sourceId, kind, preferredLayer(layout, stepped.ceiling))
     }
   }
 
   setTrackEnabled(kind: 'mic' | 'cam', enabled: boolean): void {
     const track = kind === 'mic' ? this.localMic : this.localCam
     if (track) track.enabled = enabled
-    this.state = kind === 'mic' ? { ...this.state, mic: enabled } : { ...this.state, cam: enabled }
+    const on = track !== null && enabled
+    this.state = kind === 'mic' ? { ...this.state, mic: on } : { ...this.state, cam: on }
     this.sendState()
   }
 
@@ -571,6 +696,19 @@ export class RoomClient {
     void this.sendLang()
   }
 
+  setTranslates(translates: TranslationLevel): void {
+    if (this.translates === translates) return
+    this.translates = translates
+    void this.sendLang()
+  }
+
+  /** Announces whether this member's translated voice is made from their own recording. */
+  setOwnVoice(ownVoice: boolean): void {
+    if (this.ownVoice === ownVoice) return
+    this.ownVoice = ownVoice
+    void this.sendLang()
+  }
+
   // announceTranslating switches the room's live translation on or off
   // (hosts only). While it is on, the server hands every member a
   // translate-token event for the speech service.
@@ -583,25 +721,25 @@ export class RoomClient {
     this.send({ type: 'translate-token-request' })
   }
 
-  async sendCaption(caption: RoomCaption): Promise<void> {
+  async sendCaption(caption: RoomMessage): Promise<void> {
     const sealed = await encryptChat(this.opts.chatKey, JSON.stringify(caption))
     this.send({ type: 'caption', iv: sealed.iv, ct: sealed.ct })
   }
 
   /** Publishes a translated-voice track, labelled translation-<lang> for the room. */
   async addTranslationTrack(lang: string, track: MediaStreamTrack): Promise<void> {
-    const pc = this.up
+    const pc = this.ups.get(MEDIA_UP)?.pc
     if (!pc) throw new Error('Publish before adding a translation track.')
 
     this.translationTrackLangs.set(track.id, lang)
     const sender = pc.addTrack(track, new MediaStream([track]))
     this.translationSenders.push(sender)
     this.installSenderTransform(sender)
-    await this.sendUpOffer()
+    await this.sendUpOffer(MEDIA_UP)
   }
 
   async removeTranslationTracks(): Promise<void> {
-    const pc = this.up
+    const pc = this.ups.get(MEDIA_UP)?.pc
     if (!pc || this.translationSenders.length === 0) return
 
     for (const sender of this.translationSenders) {
@@ -613,11 +751,17 @@ export class RoomClient {
     }
     this.translationSenders = []
     this.translationTrackLangs.clear()
-    await this.sendUpOffer()
+    await this.sendUpOffer(MEDIA_UP)
   }
 
   moderate(target: string, action: ModerateAction): void {
     this.send({ type: 'moderate', target, action })
+  }
+
+  /** Sets another member's live-translation language (host only); sealed like their own. */
+  async setMemberLanguage(target: string, lang: string): Promise<void> {
+    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify({ lang }))
+    this.send({ type: 'moderate', target, action: 'lang', iv: sealed.iv, ct: sealed.ct })
   }
 
   // announceRecording claims (or releases) the room's recording badge.
@@ -631,7 +775,7 @@ export class RoomClient {
     this.closing = true
     this.stopQualityWatch()
     this.ws?.close()
-    this.up?.close()
+    this.closeUps()
     for (const pc of this.downs.values()) pc.close()
     this.downs.clear()
     this.worker.terminate()
@@ -646,7 +790,7 @@ export class RoomClient {
   pause(): void {
     this.closing = true
     this.ws?.close()
-    this.up?.close()
+    this.closeUps()
   }
 
   destroy(): void {
@@ -660,7 +804,7 @@ export class RoomClient {
 
   private async sendLang(): Promise<void> {
     if (!this.langPrefs) return
-    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify(this.langPrefs))
+    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify({ ...this.langPrefs, translates: this.translates, ownVoice: this.ownVoice }))
     this.send({ type: 'lang', iv: sealed.iv, ct: sealed.ct })
   }
 
@@ -710,28 +854,43 @@ export class RoomClient {
     receiver.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'recv' })
   }
 
+  private async addScreenVideo(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): Promise<RTCRtpSender> {
+    track.contentHint = SCREEN_CONTENT_HINT
+    const codec = screenCodec(videoCapabilities(), await sendsVP9Simulcast(track))
+    const transceiver = pc.addTransceiver(track, {
+      direction: 'sendonly',
+      streams: [stream],
+      sendEncodings: screenLayers(codec),
+    })
+    preferCodec(transceiver, codec)
+    return transceiver.sender
+  }
+
   private addCamera(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): RTCRtpSender {
     const transceiver = pc.addTransceiver(track, {
       direction: 'sendonly',
       streams: [stream],
-      sendEncodings: CAMERA_LAYERS.map((layer) => ({ ...layer })),
+      sendEncodings: cameraLayers(track.getSettings()),
     })
-    preferVP8(transceiver)
+    preferCodec(transceiver, 'VP8')
     return transceiver.sender
   }
 
-  // Offers are serialized: a second createOffer/setLocalDescription
-  // overlapping the first (two translation tracks added at once) makes
-  // Chrome reject the description as modified.
-  private sendUpOffer(): Promise<void> {
-    const next = this.negotiation.then(() => this.negotiateUp())
-    this.negotiation = next.catch(() => {})
+  // Offers are serialized per connection: a second
+  // createOffer/setLocalDescription overlapping the first (two
+  // translation tracks added at once) makes Chrome reject the
+  // description as modified.
+  private sendUpOffer(id: UpstreamId): Promise<void> {
+    const up = this.ups.get(id)
+    if (!up) return Promise.reject(new Error(`Offer on ${id}, which is not open.`))
+
+    const next = up.negotiation.then(() => this.negotiateUp(id, up.pc))
+    up.negotiation = next.catch(() => {})
     return next
   }
 
-  private async negotiateUp(): Promise<void> {
-    const pc = this.up
-    if (!pc) return
+  private async negotiateUp(id: UpstreamId, pc: RTCPeerConnection): Promise<void> {
+    if (this.ups.get(id)?.pc !== pc) return
 
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
@@ -739,28 +898,29 @@ export class RoomClient {
     const tracks = pc
       .getTransceivers()
       .filter((t) => t.sender.track && t.mid)
-      .map((t) => ({ mid: t.mid as string, kind: this.kindOf(t.sender.track) }))
+      .map((t) => ({ mid: t.mid as string, kind: this.kindOf(id, t.sender.track as MediaStreamTrack) }))
 
-    this.send({ type: 'offer', sdp: pc.localDescription?.sdp ?? '', tracks })
+    this.send({ type: 'offer', pc: id, sdp: pc.localDescription?.sdp ?? '', tracks })
   }
 
-  private kindOf(track: MediaStreamTrack | null): string {
-    if (!track) return 'camera'
+  private kindOf(id: UpstreamId, track: MediaStreamTrack): TrackKind {
+    if (id === SCREEN_UP) return track.kind === 'audio' ? SCREEN_AUDIO_KIND : SCREEN_KIND
     const translationLang = this.translationTrackLangs.get(track.id)
-    if (translationLang) return `translation-${translationLang}`
-    if (this.screenTrackIds.has(track.id)) return track.kind === 'audio' ? SCREEN_AUDIO_KIND : 'screen'
-    if (track.kind === 'audio') return 'audio'
-    return 'camera'
+    if (translationLang) return translationKind(translationLang)
+    if (track.kind === 'audio') return AUDIO_KIND
+    return CAMERA_KIND
   }
 
   private async handle(msg: WireMessage): Promise<void> {
     switch (msg.type) {
-      case 'answer':
-        if (msg.pc === 'up' && this.up && msg.sdp) {
-          await this.up.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
-          this.flushIce('up', this.up)
+      case 'answer': {
+        const pc = isUpstreamId(msg.pc) ? this.ups.get(msg.pc)?.pc : undefined
+        if (pc && msg.pc && msg.sdp) {
+          await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
+          this.flushIce(msg.pc, pc)
         }
         return
+      }
       case 'offer':
         if (msg.pc?.startsWith('down-') && msg.sdp) {
           await this.handleDownOffer(msg.pc.slice('down-'.length), msg)
@@ -819,8 +979,8 @@ export class RoomClient {
         }
         return
       case 'lang': {
-        const prefs = await this.openSealed(msg)
-        if (msg.from && isLangPrefs(prefs)) {
+        const prefs = announcement(await this.openSealed(msg))
+        if (msg.from && prefs) {
           this.memberLangs.set(msg.from, prefs)
           this.emit('lang', { from: msg.from, prefs })
         }
@@ -828,9 +988,9 @@ export class RoomClient {
       }
       case 'caption': {
         const caption = await this.openSealed(msg)
-        // Everyone captions their own speech: a caption naming any other
-        // speaker than its sender is dropped.
-        if (msg.from && isRoomCaption(caption) && caption.speaker === msg.from) {
+        // Everyone captions their own speech, and a translation names its
+        // translator: anything claiming to come from another member is dropped.
+        if (msg.from && isRoomMessage(caption) && (caption.k === 'translation' ? caption.by : caption.speaker) === msg.from) {
           this.emit('caption', { from: msg.from, caption })
         }
         return
@@ -845,12 +1005,23 @@ export class RoomClient {
         const action = msg.action
         if (action === 'mute' || action === 'cam' || action === 'screen') {
           this.emit('forced', { action })
+        } else if (action === 'lang') {
+          const sealed = await this.openSealed(msg)
+          const lang = (sealed as { lang?: unknown } | undefined)?.lang
+          if (msg.from && typeof lang === 'string') this.emit('lang-set', { from: msg.from, lang })
         }
         return
       }
       case 'kicked':
         this.emit('kicked', {})
         return
+      case 'layers': {
+        const active = msg.active
+        if (!isUpstreamId(msg.pc) || typeof msg.mid !== 'string' || !Array.isArray(active)) return
+        if (active.length !== LAYER_RIDS.length || !active.every((value) => typeof value === 'boolean')) return
+        this.demandLayers(msg.pc, msg.mid, active as boolean[])
+        return
+      }
       default:
         return
     }
@@ -858,10 +1029,13 @@ export class RoomClient {
 
   /** Forgets a member and closes its downstream; reports whether it was known. */
   private dropMember(id: string): boolean {
-    this.layerPrefs.delete(id)
-    this.layoutLayers.delete(id)
-    this.quality.delete(id)
-    this.inbound.delete(id)
+    for (const kind of LAYERED_KINDS) {
+      const key = streamKey(id, kind)
+      this.layerPrefs.delete(key)
+      this.layoutLayers.delete(key)
+      this.quality.delete(key)
+      this.inbound.delete(key)
+    }
     this.memberLangs.delete(id)
     const known = this.members.delete(id)
     this.downs.get(id)?.close()
@@ -879,19 +1053,19 @@ export class RoomClient {
         this.installReceiverTransform(ev.receiver)
         const key = `${sourceId}:${ev.transceiver.mid ?? ''}`
         const labelled = this.downKinds.get(key)
-        const kind =
+        const kind: TrackKind =
           ev.track.kind === 'audio'
-            ? labelled?.startsWith('translation-')
+            ? labelled !== undefined && translationKindLang(labelled) !== null
               ? labelled
               : labelled === SCREEN_AUDIO_KIND
                 ? SCREEN_AUDIO_KIND
-                : 'audio'
-            : (labelled ?? 'camera')
+                : AUDIO_KIND
+            : (labelled ?? CAMERA_KIND)
         // A translated voice and a share's sound are played on their own
         // terms, never as part of the speaker's camera stream, so each
         // gets a stream of its own.
         const stream =
-          kind.startsWith('translation-') || kind === SCREEN_AUDIO_KIND
+          translationKindLang(kind) !== null || kind === SCREEN_AUDIO_KIND
             ? new MediaStream([ev.track])
             : (ev.streams[0] ?? new MediaStream([ev.track]))
         this.emit('track', { sourceId, stream, kind })
@@ -915,7 +1089,11 @@ export class RoomClient {
   private handleIce(msg: WireMessage): void {
     if (!msg.candidate || !msg.pc) return
 
-    const pc = msg.pc === 'up' ? this.up : this.downs.get(msg.pc.slice('down-'.length))
+    const id = msg.pc
+    const pc = isUpstreamId(id) ? this.ups.get(id)?.pc : this.downs.get(id.slice('down-'.length))
+    // A publishing connection exists before the server learns of it, so a
+    // candidate for one that is gone trails its close and has nowhere to go.
+    if (isUpstreamId(id) && !pc) return
     if (!pc || !pc.remoteDescription) {
       const queue = this.pendingIce.get(msg.pc) ?? []
       queue.push(msg.candidate)
@@ -974,7 +1152,7 @@ export class RoomClient {
     ]
 
     const connections: [string, RTCPeerConnection][] = []
-    if (this.up) connections.push(['up', this.up])
+    for (const [id, up] of this.ups) connections.push([id, up.pc])
     for (const [id, down] of this.downs) connections.push([`down-${id.slice(0, 6)}`, down])
 
     for (const [label, pc] of connections) {

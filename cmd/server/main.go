@@ -5,8 +5,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -33,9 +36,14 @@ const (
 	reapTimeout       = 30 * time.Second
 	indexPage         = "index.html"
 	assetsDir         = "assets/"
-	apiPrefix         = "/api/"
-	signalingPath     = "/ws"
-	speechPath        = "/ws/speech"
+	// The blur model and its runtime never change under the same path, and
+	// they are megabytes: a browser that has them should keep them.
+	visionDir     = "vision/"
+	etagBytes     = 16
+	revalidate    = "no-cache"
+	apiPrefix     = "/api/"
+	signalingPath = "/ws"
+	speechPath    = "/ws/speech"
 )
 
 func main() {
@@ -73,12 +81,12 @@ func run() error {
 		return fmt.Errorf("relay: %w", err)
 	}
 
-	speech, translation, err := newSpeech(cfg)
+	speech, err := newLiveTranslation(cfg)
 	if err != nil {
 		return err
 	}
 
-	hub := newHub(cfg, engine, creds, speech, translation)
+	hub := newHub(cfg, engine, creds, speech)
 
 	turnServer, err := relay.Start(context.Background(), creds, engine.MediaAddrs(), hub.MemberLive)
 	if err != nil {
@@ -89,14 +97,14 @@ func run() error {
 
 	go reapLoop(database, hub, cfg.RoomTTL)
 
-	mux, err := buildMux(database, hub, cfg, speech, translation)
+	mux, err := buildMux(database, hub, cfg, speech)
 	if err != nil {
 		return err
 	}
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           logRequests(mux),
+		Handler:           logRequests(isolate(mux)),
 		ReadHeaderTimeout: headerReadTimeout,
 	}
 
@@ -106,53 +114,78 @@ func run() error {
 	return serveUntilShutdown(srv, hub, speech)
 }
 
-// newSpeech builds live translation's speech service from the
-// environment, with the status the web app shows for it.
-func newSpeech(cfg *config.Config) (*service.Service, service.Status, error) {
+// liveTranslation is what the server runs for live translation: its
+// speech service when the server runs the engines, and the model files
+// the browsers load when they run them instead.
+type liveTranslation struct {
+	status  service.Status
+	streams *service.Service // nil: the browsers transcribe on their own
+	models  http.Handler     // nil unless the browsers load models from here
+}
+
+// newLiveTranslation builds live translation from the environment, with
+// the status the web app shows for it.
+func newLiveTranslation(cfg *config.Config) (liveTranslation, error) {
 	settings, err := service.FromEnv(os.Getenv)
 	if err != nil {
-		return nil, service.Status{}, fmt.Errorf("speech: %w", err)
+		return liveTranslation{}, fmt.Errorf("speech: %w", err)
 	}
 
 	settings.LogEngines()
 
-	speech := service.New(settings, func(r *http.Request) []string { return ws.OriginPatterns(cfg.AllowedOrigins, r) })
-
-	return speech, settings.Status(), nil
-}
-
-// newHub creates the SFU hub, with live translation once its engines are set up.
-func newHub(
-	cfg *config.Config, engine *sfu.Engine, creds *relay.Credentials, speech *service.Service, translation service.Status,
-) *sfu.Hub {
-	var tokens sfu.SpeechTokens
-	if translation.Available {
-		tokens = speech
+	streams, models, err := service.Start(settings, func(r *http.Request) []string {
+		return ws.OriginPatterns(cfg.AllowedOrigins, r)
+	})
+	if err != nil {
+		return liveTranslation{}, fmt.Errorf("speech: %w", err)
 	}
 
-	return sfu.NewHub(sfu.HubConfig{
-		Engine:         engine,
-		Relay:          creds,
-		MaxMembers:     cfg.MaxRoomMembers,
-		MaxPublishKbps: cfg.MaxPublishKbps,
-		Speech:         tokens,
-	})
+	return liveTranslation{status: settings.Status(), streams: streams, models: models}, nil
+}
+
+// tokens is the speech service the SFU streams to, nil when the browsers
+// run the engines. A nil service typed as the interface would not read as
+// nil, so the caller checks the service itself.
+func (l liveTranslation) tokens() *service.Service {
+	return l.streams
+}
+
+// newHub creates the SFU hub, with live translation when it can run.
+func newHub(cfg *config.Config, engine *sfu.Engine, creds *relay.Credentials, translation liveTranslation) *sfu.Hub {
+	hub := sfu.HubConfig{
+		Engine:     engine,
+		Relay:      creds,
+		MaxMembers: cfg.MaxRoomMembers,
+		Speech:     nil,
+		Translate:  translation.status.Available,
+	}
+
+	if streams := translation.tokens(); streams != nil {
+		hub.Speech = streams
+	}
+
+	return sfu.NewHub(hub)
 }
 
 // buildMux assembles the API, signaling, speech, and embedded UI routes.
-func buildMux(
-	database *store.Store, hub *sfu.Hub, cfg *config.Config, speech *service.Service, translation service.Status,
-) (*http.ServeMux, error) {
+func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config, translation liveTranslation) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
-	api.New(database, hub, cfg, translation).Routes(mux)
+	api.New(database, hub, cfg, translation.status).Routes(mux)
 
 	mux.Handle("GET "+signalingPath, &ws.Handler{
 		Hub:            hub,
 		Store:          database,
 		AllowedOrigins: cfg.AllowedOrigins,
 	})
-	mux.Handle("GET "+speechPath, speech)
+
+	if translation.streams != nil {
+		mux.Handle("GET "+speechPath, translation.streams)
+	}
+
+	if translation.models != nil {
+		mux.Handle("GET "+service.ModelsPath, translation.models)
+	}
 
 	dist, err := fs.Sub(web.Dist, "dist/app")
 	if err != nil {
@@ -171,7 +204,7 @@ func buildMux(
 
 // serveUntilShutdown runs the HTTP server until an interrupt or a
 // terminal error, then ends the speech streams and drains live rooms.
-func serveUntilShutdown(srv *http.Server, hub *sfu.Hub, speech *service.Service) error {
+func serveUntilShutdown(srv *http.Server, hub *sfu.Hub, translation liveTranslation) error {
 	serverErr := make(chan error, 1)
 
 	go func() {
@@ -198,7 +231,10 @@ func serveUntilShutdown(srv *http.Server, hub *sfu.Hub, speech *service.Service)
 		return fmt.Errorf("shutdown: %w", err)
 	}
 
-	speech.Shutdown()
+	if translation.streams != nil {
+		translation.streams.Shutdown()
+	}
+
 	hub.CloseAll()
 
 	return nil
@@ -263,12 +299,14 @@ func reapOnce(database *store.Store, hub *sfu.Hub, ttl time.Duration) {
 
 // webUI serves the embedded frontend: the app page for client-side
 // routes, with preview URLs on the request's origin, and the built
-// files with immutable caching for hashed assets.
+// files with immutable caching for hashed assets and content tags for
+// the rest.
 type webUI struct {
 	cfg   *config.Config
 	dist  fs.FS
 	files http.Handler
 	pages map[string][]byte
+	etags map[string]string
 }
 
 func newWebUI(cfg *config.Config, dist fs.FS) (*webUI, error) {
@@ -286,7 +324,62 @@ func newWebUI(cfg *config.Config, dist fs.FS) (*webUI, error) {
 		}
 	}
 
-	return &webUI{cfg: cfg, dist: dist, files: http.FileServerFS(dist), pages: pages}, nil
+	etags, err := contentETags(dist)
+	if err != nil {
+		return nil, err
+	}
+
+	return &webUI{cfg: cfg, dist: dist, files: http.FileServerFS(dist), pages: pages, etags: etags}, nil
+}
+
+func fingerprinted(path string) bool {
+	return strings.HasPrefix(path, assetsDir) || strings.HasPrefix(path, visionDir)
+}
+
+func contentETags(dist fs.FS) (map[string]string, error) {
+	etags := map[string]string{}
+
+	err := fs.WalkDir(dist, ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if entry.IsDir() || fingerprinted(path) {
+			return nil
+		}
+
+		etag, err := contentETag(dist, path)
+		if err != nil {
+			return err
+		}
+
+		etags[path] = etag
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tag the built files: %w", err)
+	}
+
+	return etags, nil
+}
+
+func contentETag(dist fs.FS, path string) (string, error) {
+	file, err := dist.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", path, err)
+	}
+
+	defer func() { _ = file.Close() }()
+
+	digest := sha256.New()
+
+	_, err = io.Copy(digest, file)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+
+	return `"` + hex.EncodeToString(digest.Sum(nil)[:etagBytes]) + `"`, nil
 }
 
 func (ui *webUI) routes(mux *http.ServeMux) {
@@ -296,7 +389,7 @@ func (ui *webUI) routes(mux *http.ServeMux) {
 }
 
 func (ui *webUI) serveApp(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", revalidate)
 	http.ServeContent(w, r, indexPage, time.Time{}, bytes.NewReader(ui.pages[ui.cfg.OriginFor(r.Host)]))
 }
 
@@ -317,11 +410,22 @@ func (ui *webUI) serveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(path, assetsDir) {
+	if fingerprinted(path) {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", revalidate)
+		w.Header().Set("ETag", ui.etags[path])
 	}
 
 	ui.files.ServeHTTP(w, r)
+}
+
+func isolate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Embedder-Policy", "credentialless")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func logRequests(next http.Handler) http.Handler {

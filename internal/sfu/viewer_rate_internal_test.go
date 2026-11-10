@@ -5,68 +5,104 @@ import (
 	"time"
 )
 
-const testCeiling = 2_500_000
-
-func newTestViewerRate() viewerRate {
-	return newViewerRate(testCeiling)
-}
+const testDelivered = 2_500_000
 
 // lossReport applies one receiver report of the given fraction lost,
-// spaced a second apart the way a viewer reports.
-func lossReport(speed *viewerRate, fractionLost uint8) {
-	speed.updateLoss(fractionLost, rateGainPeriod)
+// spaced a second apart the way a viewer reports, while the viewer is
+// sent delivered bits per second.
+func lossReport(speed *viewerRate, fractionLost uint8, delivered uint64) {
+	speed.updateLoss(fractionLost, rateGainPeriod, delivered)
 }
 
-func TestViewerRateStartsAtTheCeiling(t *testing.T) {
+// probing applies clean reports while the viewer is sent all its estimate
+// allows, the way a single-layer stream held back by it is.
+func probing(speed *viewerRate, reports int, elapsed time.Duration) {
+	for range reports {
+		speed.updateLoss(0, elapsed, speed.limit().bps)
+	}
+}
+
+func TestViewerRateLimitsNothingBeforeLoss(t *testing.T) {
 	t.Parallel()
 
-	speed := newTestViewerRate()
+	speed := newViewerRate()
+	lossReport(&speed, 0, testDelivered)
 
-	if got := speed.max(); got != testCeiling {
-		t.Fatalf("rate %d before any report, want the ceiling %d", got, testCeiling)
+	if got := speed.limit(); got.bound {
+		t.Fatalf("limit %d before any loss or REMB, want none", got.bps)
+	}
+}
+
+// TestViewerRateIgnoresLossBeforeAnythingWasDelivered: a report that
+// arrives before the track was measured for a full period has no rate to
+// back off from, and must not throw the viewer to the floor.
+func TestViewerRateIgnoresLossBeforeAnythingWasDelivered(t *testing.T) {
+	t.Parallel()
+
+	speed := newViewerRate()
+	lossReport(&speed, 255, 0)
+
+	if got := speed.limit(); got.bound {
+		t.Fatalf("limit %d from loss before anything was delivered, want none", got.bps)
 	}
 }
 
 func TestViewerRateDropsOnLoss(t *testing.T) {
 	t.Parallel()
 
-	speed := newTestViewerRate()
-	lossReport(&speed, 64)
+	speed := newViewerRate()
+	lossReport(&speed, 64, testDelivered)
 
-	if got := speed.max(); got >= testCeiling {
-		t.Fatalf("rate %d after 25%% loss, want it below the ceiling", got)
+	if got := speed.limit(); !got.bound || got.bps >= testDelivered {
+		t.Fatalf("limit %+v after 25%% loss, want it below the %d delivered", got, testDelivered)
 	}
 
 	for range 10 {
-		lossReport(&speed, 255)
+		lossReport(&speed, 255, testDelivered)
 	}
 
-	if got := speed.max(); got > 100_000 {
-		t.Fatalf("rate %d after sustained total loss, want it near the floor", got)
+	if got := speed.limit(); got.bps > 100_000 {
+		t.Fatalf("limit %d after sustained total loss, want it near the floor", got.bps)
 	}
 }
 
 // TestViewerRateRecoversOnItsOwn is the upward half of the controller: a
 // viewer that lost packets and then reports a clean link must climb back
-// to the ceiling, or a screen share stays blurred by an old blip for the
-// rest of the call.
+// above what it was sent before, or a single-layer stream stays degraded
+// by an old blip for the rest of the call.
 func TestViewerRateRecoversOnItsOwn(t *testing.T) {
 	t.Parallel()
 
-	speed := newTestViewerRate()
-	lossReport(&speed, 64)
+	speed := newViewerRate()
+	lossReport(&speed, 64, testDelivered)
 
-	dropped := speed.max()
+	dropped := speed.limit().bps
 
-	for range 120 {
-		lossReport(&speed, 0)
+	probing(&speed, 30, rateGainPeriod)
 
-		if speed.max() == testCeiling {
-			return
-		}
+	if got := speed.limit().bps; got <= testDelivered {
+		t.Fatalf("limit %d after half a minute of clean reports, want it back above %d (was %d)", got, testDelivered, dropped)
+	}
+}
+
+// TestViewerRateGrowsOnlyWhileProbing: a viewer sent far less than its
+// estimate is not testing the link, so a clean report says nothing about
+// more room and must not walk the estimate away from what was delivered.
+func TestViewerRateGrowsOnlyWhileProbing(t *testing.T) {
+	t.Parallel()
+
+	speed := newViewerRate()
+	lossReport(&speed, 64, testDelivered)
+
+	held := speed.limit().bps
+
+	for range 60 {
+		lossReport(&speed, 0, held/4)
 	}
 
-	t.Fatalf("rate %d after two minutes of clean reports, want the ceiling %d (was %d)", speed.max(), testCeiling, dropped)
+	if got := speed.limit().bps; got != held {
+		t.Fatalf("limit %d after a minute of clean reports at a quarter of it, want it held at %d", got, held)
+	}
 }
 
 // TestViewerRateRecoveryIsPacedByTime: the same number of reports at the
@@ -76,65 +112,47 @@ func TestViewerRateRecoversOnItsOwn(t *testing.T) {
 func TestViewerRateRecoveryIsPacedByTime(t *testing.T) {
 	t.Parallel()
 
-	fast := newTestViewerRate()
-	slow := newTestViewerRate()
+	fast := newViewerRate()
+	slow := newViewerRate()
 
 	for _, speed := range []*viewerRate{&fast, &slow} {
-		lossReport(speed, 64)
+		lossReport(speed, 64, testDelivered)
 	}
 
-	base := fast.max()
+	base := fast.limit().bps
 
-	for range 10 {
-		fast.updateLoss(0, rateGainPeriod/5)
-		slow.updateLoss(0, rateGainPeriod)
+	probing(&fast, 10, rateGainPeriod/5)
+	probing(&slow, 10, rateGainPeriod)
+
+	got, want := fast.limit().bps, slow.limit().bps
+	if got <= base || want <= base {
+		t.Fatalf("limits %d and %d after clean reports, want both above %d", got, want, base)
 	}
 
-	if fast.max() <= base || slow.max() <= base {
-		t.Fatalf("rates %d and %d after clean reports, want both above %d", fast.max(), slow.max(), base)
-	}
-
-	if fast.max() > slow.max()*2 || slow.max() > fast.max()*2 {
-		t.Fatalf("rates %d (five reports a second) and %d (one a second) recovered at different paces", fast.max(), slow.max())
-	}
-}
-
-// TestViewerRateNeverExceedsTheCeiling guards the additive ramp: the room
-// ceiling is what the publisher may send, so a long clean call must not
-// talk the SFU into asking for more than that.
-func TestViewerRateNeverExceedsTheCeiling(t *testing.T) {
-	t.Parallel()
-
-	speed := newTestViewerRate()
-
-	for range 500 {
-		lossReport(&speed, 0)
-	}
-
-	if got := speed.max(); got != testCeiling {
-		t.Fatalf("rate %d after ten minutes of clean reports, want the ceiling %d", got, testCeiling)
+	if got > want*2 || want > got*2 {
+		t.Fatalf("limits %d (five reports a second) and %d (one a second) recovered at different paces", got, want)
 	}
 }
 
 // TestViewerRateFollowsARisingREMB is the fast path back up: once the
-// viewer says its downlink is healthy again, the publisher gets its
-// ceiling back on that report instead of creeping up at 5% a second.
+// viewer says its downlink is healthy again, the publisher gets that room
+// back on that report instead of creeping up at 5% a second.
 func TestViewerRateFollowsARisingREMB(t *testing.T) {
 	t.Parallel()
 
-	speed := newTestViewerRate()
-	lossReport(&speed, 64)
+	speed := newViewerRate()
+	lossReport(&speed, 64, testDelivered)
 	speed.setREMB(300_000)
 
-	if got := speed.max(); got > 300_000 {
-		t.Fatalf("rate %d after the viewer capped itself, want at most 300000", got)
+	if got := speed.limit().bps; got > 300_000 {
+		t.Fatalf("limit %d after the viewer capped itself, want at most 300000", got)
 	}
 
-	lossReport(&speed, 0)
-	speed.setREMB(testCeiling)
+	lossReport(&speed, 0, 300_000)
+	speed.setREMB(testDelivered)
 
-	if got := speed.max(); got != testCeiling {
-		t.Fatalf("rate %d after the viewer's REMB recovered, want the ceiling %d", got, testCeiling)
+	if got := speed.limit().bps; got != testDelivered {
+		t.Fatalf("limit %d after the viewer's REMB recovered, want its REMB %d", got, testDelivered)
 	}
 }
 
@@ -144,37 +162,34 @@ func TestViewerRateFollowsARisingREMB(t *testing.T) {
 func TestViewerRateDoesNotTrustARisingREMBWhileLosing(t *testing.T) {
 	t.Parallel()
 
-	speed := newTestViewerRate()
-	lossReport(&speed, 64)
+	speed := newViewerRate()
+	lossReport(&speed, 64, testDelivered)
 
-	lost := speed.max()
+	lost := speed.limit().bps
 
-	speed.setREMB(testCeiling)
+	speed.setREMB(testDelivered * 4)
 
-	if got := speed.max(); got > lost*2 {
-		t.Fatalf("rate %d after a rising REMB during loss, want it near the lossy estimate %d", got, lost)
+	if got := speed.limit().bps; got > lost*2 {
+		t.Fatalf("limit %d after a rising REMB during loss, want it near the lossy estimate %d", got, lost)
 	}
 }
 
 func TestViewerRateClimbsFromTheFloorEventually(t *testing.T) {
 	t.Parallel()
 
-	speed := newTestViewerRate()
+	speed := newViewerRate()
 
 	for range 20 {
-		lossReport(&speed, 255)
+		lossReport(&speed, 255, testDelivered)
 	}
 
-	floor := speed.max()
-	if floor != minViewerBitrate {
-		t.Fatalf("rate %d after sustained total loss, want the floor %d", floor, minViewerBitrate)
+	if floor := speed.limit().bps; floor != minViewerBitrate {
+		t.Fatalf("limit %d after sustained total loss, want the floor %d", floor, minViewerBitrate)
 	}
 
-	for range 300 {
-		speed.updateLoss(0, time.Minute)
-	}
+	probing(&speed, 300, time.Minute)
 
-	if got := speed.max(); got != testCeiling {
-		t.Fatalf("rate %d after five hours of clean reports, want the ceiling %d", got, testCeiling)
+	if got := speed.limit().bps; got < testDelivered {
+		t.Fatalf("limit %d after five hours of clean reports, want it back above %d", got, testDelivered)
 	}
 }

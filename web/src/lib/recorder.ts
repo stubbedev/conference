@@ -5,6 +5,11 @@
 // the SFU relays ciphertext it cannot decode, let alone record.
 
 import { audioContext, playMediaElement } from '@/hooks/media'
+import { ElementSource, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
+import { initials } from './names.ts'
+import { focusKey, gridRects, nextSpeakerFocus, speakingKeys, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
+import { SPEAKING_SAMPLE_MS } from './speaking.ts'
+import { VoiceMeter } from './voice-meter.ts'
 import { withDuration } from './webm.ts'
 
 export interface RecorderTile {
@@ -14,8 +19,13 @@ export interface RecorderTile {
   local: boolean
   /** Spotlights the tile, mirroring the recorder's pinned view. */
   pinned: boolean
-  /** Left out of the mix: live translation replaces this speaker's voice. */
-  audioMuted?: boolean
+  screen: boolean
+  /**
+   * The sound the tile is recorded with and its speaker spotlighted by:
+   * what the recording member hears, so a speaker's translated voice
+   * where it replaces their own.
+   */
+  heard: MediaStream | null
 }
 
 const CANVAS_WIDTH = 1280
@@ -41,8 +51,12 @@ const MIME_CANDIDATES = [
 export function recorderSupported(): boolean {
   return (
     typeof MediaRecorder !== 'undefined' &&
-    typeof HTMLCanvasElement.prototype.captureStream === 'function'
+    (frameApis() !== null || typeof HTMLCanvasElement.prototype.captureStream === 'function')
   )
+}
+
+export function recorderKeepsPaceHidden(): boolean {
+  return frameApis() !== null
 }
 
 export function saveFile(file: Blob, filename: string): void {
@@ -55,14 +69,15 @@ export function saveFile(file: Blob, filename: string): void {
 }
 
 interface RecorderEntry {
-  name: string
-  video: HTMLVideoElement
+  source: VideoSource
   track: MediaStreamTrack
-  pinned: boolean
 }
 
-// One track mixed into the recording. In WebKit browsers remote tracks
-// route through a detached <audio> element and a
+type Canvas2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
+
+// One track mixed into the recording and measured for the speaker
+// spotlight. In WebKit browsers remote tracks, a translated voice among
+// them, route through a detached <audio> element and a
 // MediaElementAudioSourceNode, because WebKit's MediaStreamAudioSourceNode
 // produces silence for WebRTC streams. Once an element is captured by the
 // graph its audio only flows through it, so the mix never leaks to the
@@ -72,20 +87,16 @@ interface RecorderEntry {
 // Every iOS browser is WebKit too; Chrome and Edge say "Chrome/" besides "AppleWebKit".
 const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\//.test(navigator.userAgent)
 
-interface MixedSource {
-  track: MediaStreamTrack
+interface MixedVoice {
   source: AudioNode
-  gain: GainNode
+  meter: VoiceMeter
   element?: HTMLAudioElement
 }
 
-// A translated voice in the recorder's language, so the file plays as
-// one conversation in that language. A remote (received) stream takes
-// the <audio> element path in WebKit; a stream made in this browser is local.
-interface TranslationAudio {
-  stream: MediaStream
-  local: boolean
-}
+const TILE_GAP = 8
+const TILE_RADIUS = 10
+const PLACEHOLDER_FILL = '#26262b'
+const INITIALS_FONT = '600 40px system-ui, sans-serif'
 
 // Chunked data streams into the origin-private file system where the
 // browser has it (Chrome, Firefox, Safari 16.4+), keeping memory flat
@@ -109,13 +120,15 @@ const MEMORY_SINK_LIMIT_BYTES = 1024 * 1024 * 1024
 export class CallRecorder {
   private slug: string
   private ended: ((reason: string) => void) | null
-  private canvas: HTMLCanvasElement
-  private ctx: CanvasRenderingContext2D
+  private readonly apis = frameApis()
+  private canvas: HTMLCanvasElement | OffscreenCanvas
+  private ctx: Canvas2D
+  private generator: TrackGenerator | null = null
+  private writer: FrameWriter | null = null
+  private writing = false
   private entries = new Map<string, RecorderEntry>()
   private latest: RecorderTile[] = []
-  private mixed = new Map<MediaStreamTrack, MixedSource>()
-  private translations: TranslationAudio[] = []
-  private translationsMixed: MixedSource[] = []
+  private mixed = new Map<MediaStreamTrack, MixedVoice>()
   private mixer: MediaStreamAudioDestinationNode | null = null
   private storageRoot: FileSystemDirectoryHandle | null = null
   private canvasStream: MediaStream | null = null
@@ -127,6 +140,8 @@ export class CallRecorder {
   private frame = 0
   private paintTimer = 0
   private lastPaint = 0
+  private lastListen = 0
+  private speaker: SpeakerFocus = null
   private endedReason = ''
   private startedAt = 0
   private finishing: Promise<void> | null = null
@@ -135,10 +150,14 @@ export class CallRecorder {
   constructor(slug: string, ended?: (reason: string) => void) {
     this.slug = slug
     this.ended = ended ?? null
-    this.canvas = document.createElement('canvas')
-    this.canvas.width = CANVAS_WIDTH
-    this.canvas.height = CANVAS_HEIGHT
-    const ctx = this.canvas.getContext('2d')
+    if (this.apis) {
+      this.canvas = new OffscreenCanvas(CANVAS_WIDTH, CANVAS_HEIGHT)
+    } else {
+      this.canvas = document.createElement('canvas')
+      this.canvas.width = CANVAS_WIDTH
+      this.canvas.height = CANVAS_HEIGHT
+    }
+    const ctx = this.canvas.getContext('2d') as Canvas2D | null
     if (!ctx) throw new Error('Canvas 2D is unavailable in this browser.')
     this.ctx = ctx
   }
@@ -158,32 +177,52 @@ export class CallRecorder {
 
       let entry = this.entries.get(tile.key)
       if (!entry) {
-        const video = document.createElement('video')
-        video.muted = true
-        video.playsInline = true
-        video.srcObject = new MediaStream([track])
-        void video.play().catch(() => {})
-        entry = { name: tile.name, video, track, pinned: tile.pinned }
+        entry = { source: this.sourceFor(track), track }
         this.entries.set(tile.key, entry)
       } else {
-        if (entry.name !== tile.name) entry.name = tile.name
-        if (entry.pinned !== tile.pinned) entry.pinned = tile.pinned
         // A device switch replaces the tile's track under the same key;
         // re-bind so the composite follows the live capture.
         if (entry.track !== track) {
+          entry.source.close()
           entry.track = track
-          entry.video.srcObject = new MediaStream([track])
+          entry.source = this.sourceFor(track)
         }
       }
     }
     for (const [key, entry] of this.entries) {
       if (seen.has(key)) continue
-      entry.video.pause()
-      entry.video.srcObject = null
+      entry.source.close()
       this.entries.delete(key)
     }
 
     this.connectAudio(tiles)
+  }
+
+  private sourceFor(track: MediaStreamTrack): VideoSource {
+    return this.apis ? new FrameSource(this.apis, track, this.frameArrived) : new ElementSource(track)
+  }
+
+  private frameArrived = (): void => {
+    if (!this.active || performance.now() - this.lastPaint < 1000 / CANVAS_FPS - 1) return
+    this.emitFrame()
+  }
+
+  private emitFrame(): void {
+    const writer = this.writer
+    if (!writer || !(this.canvas instanceof OffscreenCanvas) || this.writing) return
+    this.lastPaint = performance.now()
+    this.paint()
+    const frame = new VideoFrame(this.canvas, { timestamp: Math.round(this.lastPaint * 1000) })
+    this.writing = true
+    writer
+      .write(frame)
+      .catch((err: unknown) => {
+        frame.close()
+        this.endUnexpectedly(`the recording's picture could not be written: ${err instanceof Error ? err.message : String(err)}`)
+      })
+      .finally(() => {
+        this.writing = false
+      })
   }
 
   start(): Promise<void> {
@@ -194,16 +233,6 @@ export class CallRecorder {
     return this.starting
   }
 
-  /** Mixes these translated voices (one per other-language speaker) into the recording. */
-  setTranslations(translations: TranslationAudio[]): void {
-    const same =
-      translations.length === this.translations.length &&
-      translations.every((t, i) => t.stream === this.translations[i].stream && t.local === this.translations[i].local)
-    if (same) return
-    this.translations = translations
-    this.connectTranslations()
-  }
-
   private async doStart(): Promise<void> {
     if (this.active) return
 
@@ -211,12 +240,19 @@ export class CallRecorder {
     if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {})
     this.mixer = ctx ? ctx.createMediaStreamDestination() : null
     this.connectAudio(this.latest)
-    this.connectTranslations()
 
     const mime = MIME_CANDIDATES.find((candidate) => MediaRecorder.isTypeSupported(candidate))
 
-    this.canvasStream = this.canvas.captureStream(CANVAS_FPS)
-    const tracks: MediaStreamTrack[] = [...this.canvasStream.getVideoTracks()]
+    let video: MediaStreamTrack
+    if (this.apis) {
+      this.generator = new this.apis.MediaStreamTrackGenerator({ kind: 'video' })
+      this.writer = this.generator.writable.getWriter()
+      video = this.generator
+    } else {
+      this.canvasStream = (this.canvas as HTMLCanvasElement).captureStream(CANVAS_FPS)
+      video = this.canvasStream.getVideoTracks()[0]
+    }
+    const tracks: MediaStreamTrack[] = [video]
     if (this.mixer) tracks.push(...this.mixer.stream.getAudioTracks())
 
     this.recorder = new MediaRecorder(new MediaStream(tracks), mime ? { mimeType: mime } : undefined)
@@ -252,6 +288,13 @@ export class CallRecorder {
 
     this.recorder.start(CHUNK_MS)
     this.startedAt = performance.now()
+    if (this.apis) {
+      this.emitFrame()
+      this.paintTimer = window.setInterval(() => {
+        if (this.active && performance.now() - this.lastPaint >= 1000) this.emitFrame()
+      }, 1000)
+      return
+    }
     this.pumpFrames()
     // rAF stops entirely in hidden tabs, which would freeze the picture
     // in a background recording for as long as the tab stays hidden;
@@ -440,41 +483,25 @@ export class CallRecorder {
     const mixer = this.mixer
     if (!ctx || !mixer) return
 
-    for (const [track, mixed] of this.mixed) {
-      if (track.readyState !== 'ended') continue
-      this.disconnectMixed(mixed)
+    const heard = new Map<MediaStreamTrack, boolean>()
+    for (const tile of tiles) {
+      for (const track of tile.heard?.getAudioTracks() ?? []) {
+        if (track.readyState !== 'ended') heard.set(track, tile.local)
+      }
+    }
+
+    for (const [track, voice] of this.mixed) {
+      if (heard.has(track)) continue
+      this.disconnectVoice(voice)
       this.mixed.delete(track)
     }
 
-    for (const tile of tiles) {
-      const volume = tile.audioMuted ? 0 : 1
-      for (const track of tile.stream?.getAudioTracks() ?? []) {
-        const existing = this.mixed.get(track)
-        if (existing) {
-          existing.gain.gain.value = volume
-          continue
-        }
-        const mixedSource = this.mixSource(ctx, mixer, track, tile.local)
-        mixedSource.gain.gain.value = volume
-        this.mixed.set(track, mixedSource)
-      }
+    for (const [track, local] of heard) {
+      if (!this.mixed.has(track)) this.mixed.set(track, this.mixVoice(ctx, mixer, track, local))
     }
   }
 
-  private connectTranslations(): void {
-    for (const mixed of this.translationsMixed) this.disconnectMixed(mixed)
-    this.translationsMixed = []
-    const ctx = audioContext()
-    const mixer = this.mixer
-    if (!ctx || !mixer) return
-    for (const translation of this.translations) {
-      const track = translation.stream.getAudioTracks()[0]
-      if (track) this.translationsMixed.push(this.mixSource(ctx, mixer, track, translation.local))
-    }
-  }
-
-
-  private mixSource(ctx: AudioContext, mixer: MediaStreamAudioDestinationNode, track: MediaStreamTrack, local: boolean): MixedSource {
+  private mixVoice(ctx: AudioContext, mixer: MediaStreamAudioDestinationNode, track: MediaStreamTrack, local: boolean): MixedVoice {
     let source: AudioNode
     let element: HTMLAudioElement | undefined
     if (local || !WEBKIT) {
@@ -485,21 +512,18 @@ export class CallRecorder {
       playMediaElement(element)
       source = ctx.createMediaElementSource(element)
     }
-    const gain = ctx.createGain()
-    source.connect(gain).connect(mixer)
-    return { track, source, gain, element }
+    const meter = new VoiceMeter(ctx)
+    source.connect(mixer)
+    source.connect(meter.input)
+    return { source, meter, element }
   }
 
-  private disconnectMixed(mixed: MixedSource): void {
-    try {
-      mixed.source.disconnect()
-      mixed.gain.disconnect()
-    } catch {
-      // already detached
-    }
-    if (mixed.element) {
-      mixed.element.pause()
-      mixed.element.srcObject = null
+  private disconnectVoice(voice: MixedVoice): void {
+    voice.source.disconnect()
+    voice.meter.input.disconnect()
+    if (voice.element) {
+      voice.element.pause()
+      voice.element.srcObject = null
     }
   }
 
@@ -530,74 +554,76 @@ export class CallRecorder {
     const { ctx, canvas } = this
     ctx.fillStyle = '#000000'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
-    if (this.entries.size === 0) return
+    const tiles = this.latest
+    if (tiles.length === 0) return
 
-    // Mirror the recorder's view: a pinned tile gets the spotlight with
-    // the rest in a bottom strip, exactly like the room layout (which
-    // also auto-pins screen shares). No pin, uniform grid.
-    const pinned = [...this.entries.values()].find((entry) => entry.pinned)
-    if (pinned) {
-      this.paintSpotlight(pinned)
+    this.listen()
+    const area = { x: TILE_GAP, y: TILE_GAP, width: canvas.width - 2 * TILE_GAP, height: canvas.height - 2 * TILE_GAP }
+    const focus = focusKey(tiles, this.speaker?.key ?? null)
+    const featured = focus === null ? undefined : tiles.find((tile) => tile.key === focus)
+    if (!featured) {
+      gridRects(tiles.length, area, TILE_GAP).forEach((rect, index) => {
+        const tile = tiles[index]
+        if (tile) this.drawTile(tile, rect)
+      })
       return
     }
 
-    // A video without decoded frames yet would draw nothing and leave a
-    // black cell; skipping it keeps the grid packed instead.
-    const entries = [...this.entries.values()].filter(
-      (entry) => entry.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
-    )
-    if (entries.length === 0) return
-
-    const cols = Math.ceil(Math.sqrt(entries.length))
-    const rows = Math.ceil(entries.length / cols)
-    const cellWidth = canvas.width / cols
-    const cellHeight = canvas.height / rows
-
-    entries.forEach((entry, index) => {
-      const x = (index % cols) * cellWidth
-      const y = Math.floor(index / cols) * cellHeight
-      this.drawCover(entry.video, x, y, cellWidth, cellHeight)
-      this.drawLabel(entry.name, x, y, cellWidth, cellHeight)
+    const others = tiles.filter((tile) => tile !== featured)
+    const { main, strip } = spotlightRects(others.length, area, TILE_GAP)
+    this.drawTile(featured, main)
+    others.forEach((tile, index) => {
+      const rect = strip[index]
+      if (rect) this.drawTile(tile, rect)
     })
   }
 
-  private paintSpotlight(pinned: RecorderEntry): void {
-    const { canvas } = this
-    const gap = 8
-    const others = [...this.entries.values()].filter((entry) => entry !== pinned)
-    const stripHeight = others.length > 0 ? Math.round(canvas.height * 0.18) : 0
-    const mainHeight = canvas.height - (stripHeight > 0 ? stripHeight + gap : 0)
-
-    // The pinned cell stays black until frames arrive; the layout does
-    // not jump around while it decodes.
-    if (pinned.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-      this.drawCover(pinned.video, 0, 0, canvas.width, mainHeight)
-      this.drawLabel(pinned.name, 0, 0, canvas.width, mainHeight)
-    }
-
-    if (stripHeight === 0) return
-
-    const cellWidth = Math.round((stripHeight * 16) / 9)
-    let x = 0
-    for (const entry of others) {
-      // Overflow clips like the live strip's horizontal scroll.
-      if (x >= canvas.width) break
-      if (entry.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) continue
-      this.drawCover(entry.video, x, canvas.height - stripHeight, cellWidth, stripHeight)
-      this.drawLabel(entry.name, x, canvas.height - stripHeight, cellWidth, stripHeight)
-      x += cellWidth + gap
-    }
+  private listen(): void {
+    const now = performance.now()
+    if (now - this.lastListen < SPEAKING_SAMPLE_MS) return
+    this.lastListen = now
+    for (const voice of this.mixed.values()) voice.meter.sample(now)
+    const speaking = speakingKeys(this.latest, (heard) =>
+      heard.getAudioTracks().some((track) => this.mixed.get(track)?.meter.speaking(now) === true),
+    )
+    this.speaker = nextSpeakerFocus(this.speaker, speaking, now)
   }
 
-  private drawCover(video: HTMLVideoElement, x: number, y: number, w: number, h: number): void {
-    const videoWidth = video.videoWidth
-    const videoHeight = video.videoHeight
-    if (!videoWidth || !videoHeight) return
+  private drawTile(tile: RecorderTile, rect: Rect): void {
+    const ctx = this.ctx
+    const source = this.entries.get(tile.key)?.source
+    ctx.save()
+    ctx.beginPath()
+    ctx.roundRect(rect.x, rect.y, rect.width, rect.height, TILE_RADIUS)
+    ctx.clip()
+    ctx.fillStyle = PLACEHOLDER_FILL
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
+    if (source?.image) {
+      this.drawFitted(source, rect, tile.screen ? 'contain' : 'cover')
+    } else {
+      ctx.fillStyle = '#ffffff'
+      ctx.font = INITIALS_FONT
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(initials(tile.name), rect.x + rect.width / 2, rect.y + rect.height / 2)
+      ctx.textAlign = 'start'
+      ctx.textBaseline = 'alphabetic'
+    }
+    ctx.restore()
+    this.drawLabel(tile.name, rect.x, rect.y, rect.width, rect.height)
+  }
 
-    const scale = Math.max(w / videoWidth, h / videoHeight)
+  private drawFitted(source: VideoSource, rect: Rect, fit: 'cover' | 'contain'): void {
+    const image = source.image
+    const videoWidth = source.width
+    const videoHeight = source.height
+    if (!image || !videoWidth || !videoHeight) return
+
+    const pick = fit === 'cover' ? Math.max : Math.min
+    const scale = pick(rect.width / videoWidth, rect.height / videoHeight)
     const drawWidth = videoWidth * scale
     const drawHeight = videoHeight * scale
-    this.ctx.drawImage(video, x + (w - drawWidth) / 2, y + (h - drawHeight) / 2, drawWidth, drawHeight)
+    this.ctx.drawImage(image, rect.x + (rect.width - drawWidth) / 2, rect.y + (rect.height - drawHeight) / 2, drawWidth, drawHeight)
   }
 
   private drawLabel(name: string, x: number, y: number, w: number, h: number): void {
@@ -628,17 +654,15 @@ export class CallRecorder {
     this.sink = null
     this.starting = null
     this.storageRoot = null
-    for (const mixed of this.mixed.values()) this.disconnectMixed(mixed)
+    for (const voice of this.mixed.values()) this.disconnectVoice(voice)
     this.mixed.clear()
-    for (const mixed of this.translationsMixed) this.disconnectMixed(mixed)
-    this.translationsMixed = []
-    this.translations = []
     this.mixer = null
-    for (const entry of this.entries.values()) {
-      entry.video.pause()
-      entry.video.srcObject = null
-    }
+    for (const entry of this.entries.values()) entry.source.close()
     this.entries.clear()
+    void this.writer?.close().catch(() => {})
+    this.writer = null
+    this.generator?.stop()
+    this.generator = null
     this.latest = []
     for (const track of this.canvasStream?.getTracks() ?? []) track.stop()
     this.canvasStream = null

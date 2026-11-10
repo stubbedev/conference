@@ -2,6 +2,7 @@ package sfu_test
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,8 +44,8 @@ func newTranslateHub(t *testing.T) (*sfu.Hub, *sfu.Engine) {
 	}
 
 	return sfu.NewHub(sfu.HubConfig{
-		Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500,
-		Speech: roomTokens{},
+		Engine: engine, Relay: creds, MaxMembers: 8,
+		Speech: roomTokens{}, Translate: true,
 	}), engine
 }
 
@@ -100,9 +101,44 @@ func TestTranslationUnavailableWithoutSpeechEngines(t *testing.T) {
 	}
 }
 
-// TestTranslationMode checks the room mode: host-gated, announced to
-// everyone, a token for every member, replayed to joiners with a token
-// of their own, and a second switch-on changing nothing.
+// TestTranslationWithoutSpeechStreams checks the room mode where the
+// browsers run the engines: the switch works with no speech service to
+// stream to, and no member is handed a token for one.
+func TestTranslationWithoutSpeechStreams(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	creds, err := relay.NewCredentials(relay.Config{Port: testTURNPort, TLSHost: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hub := sfu.NewHub(sfu.HubConfig{
+		Engine: engine, Relay: creds, MaxMembers: 8,
+		Speech: nil, Translate: true,
+	})
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	host.member.Handle(sfu.Message{Type: translate, On: true})
+	expectTranslating(t, guest, host.member.ID, true)
+
+	joiner := newTestPeer(t, hub, engine, "joiner", false)
+	expectNo(t, host, msgToken)
+	expectNo(t, guest, msgToken)
+	expectNo(t, joiner, msgToken)
+}
+
+// TestTranslationMode checks the room mode: open to every member,
+// announced to everyone, a token for every member, replayed to joiners
+// with a token of their own, and a second switch-on changing nothing.
 func TestTranslationMode(t *testing.T) {
 	t.Parallel()
 
@@ -112,30 +148,25 @@ func TestTranslationMode(t *testing.T) {
 	guest := newTestPeer(t, hub, engine, "guest", false)
 
 	guest.member.Handle(sfu.Message{Type: translate, On: true})
+	expectTranslating(t, guest, guest.member.ID, true)
+	expectTranslating(t, host, guest.member.ID, true)
+	expectToken(t, guest)
+	expectToken(t, host)
 
-	if msg := guest.next(t, "error"); msg.Code != codeNotAllowed {
-		t.Fatalf("guest expected not-allowed, got %q", msg.Code)
+	joiner := newTestPeer(t, hub, engine, "joiner", false)
+	if msg := joiner.next(t, "welcome"); msg.TranslatingBy != guest.member.ID {
+		t.Fatalf("joiner expected translation started by %q, got %q", guest.member.ID, msg.TranslatingBy)
 	}
+
+	expectToken(t, joiner)
 
 	host.member.Handle(sfu.Message{Type: translate, On: true})
-	expectTranslating(t, host, host.member.ID, true)
-	expectTranslating(t, guest, host.member.ID, true)
-	expectToken(t, host)
-	expectToken(t, guest)
-
-	host2 := newTestPeer(t, hub, engine, "host2", true)
-	if msg := host2.next(t, "welcome"); msg.TranslatingBy != host.member.ID {
-		t.Fatalf("joiner expected translation started by %q, got %q", host.member.ID, msg.TranslatingBy)
-	}
-
-	expectToken(t, host2)
-
-	host2.member.Handle(sfu.Message{Type: translate, On: true})
 	expectNo(t, guest, msgTranslating)
 }
 
 // TestTranslationOutlivesItsStarter checks that translation keeps going
-// when the host who switched it on leaves, until a host switches it off.
+// when the member who switched it on leaves, until any member switches
+// it off.
 func TestTranslationOutlivesItsStarter(t *testing.T) {
 	t.Parallel()
 
@@ -143,7 +174,6 @@ func TestTranslationOutlivesItsStarter(t *testing.T) {
 
 	host := newTestPeer(t, hub, engine, "host", true)
 	guest := newTestPeer(t, hub, engine, "guest", false)
-	host2 := newTestPeer(t, hub, engine, "host2", true)
 
 	host.member.Handle(sfu.Message{Type: translate, On: true})
 	expectTranslating(t, guest, host.member.ID, true)
@@ -159,8 +189,8 @@ func TestTranslationOutlivesItsStarter(t *testing.T) {
 
 	expectToken(t, late)
 
-	host2.member.Handle(sfu.Message{Type: translate, On: false})
-	expectTranslating(t, guest, host2.member.ID, false)
+	late.member.Handle(sfu.Message{Type: translate, On: false})
+	expectTranslating(t, guest, late.member.ID, false)
 
 	late.member.Handle(sfu.Message{Type: msgTokenAsk})
 	expectNo(t, late, msgToken)
@@ -279,4 +309,98 @@ func TestResumeKeepsTranslation(t *testing.T) {
 
 	guest.next(t, "member-left")
 	expectNo(t, guest, msgTranslating)
+}
+
+func keepToggling(switcher *sfu.Member) func() {
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+
+		for on := true; ; on = !on {
+			select {
+			case <-stop:
+				return
+			default:
+				switcher.Handle(sfu.Message{Type: translate, On: on})
+			}
+		}
+	}()
+
+	return func() {
+		close(stop)
+		<-stopped
+	}
+}
+
+func firstMessageOfJoin(t *testing.T, hub *sfu.Hub, req sfu.JoinRequest, left <-chan string) string {
+	t.Helper()
+
+	var (
+		mu    sync.Mutex
+		first string
+	)
+
+	joiner, err := hub.JoinRoom(req, func(msg sfu.Message) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if first == "" {
+			first = msg.Type
+		}
+	})
+	if err != nil {
+		t.Fatalf("join: %v", err)
+	}
+
+	joiner.Leave()
+
+	select {
+	case id := <-left:
+		if id != joiner.ID {
+			t.Fatalf("member %s left, want %s", id, joiner.ID)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("the joiner never left")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	return first
+}
+
+func TestWelcomeComesFirstWhileTranslationToggles(t *testing.T) {
+	t.Parallel()
+
+	const joins = 300
+
+	hub, _ := newTranslateHub(t)
+	request := func(name string) sfu.JoinRequest {
+		return sfu.JoinRequest{
+			Slug: testSlug, RoomName: testRoomName, MemberName: name,
+			MaxMembers: 8, Priv: false, Host: testHost, Resume: "",
+		}
+	}
+
+	left := make(chan string, joins)
+
+	switcher, err := hub.JoinRoom(request("switcher"), func(msg sfu.Message) {
+		if msg.Type == "member-left" {
+			left <- msg.ID
+		}
+	})
+	if err != nil {
+		t.Fatalf("switcher join: %v", err)
+	}
+
+	defer switcher.Leave()
+	defer keepToggling(switcher)()
+
+	for join := range joins {
+		if first := firstMessageOfJoin(t, hub, request("joiner"), left); first != "welcome" {
+			t.Fatalf("join %d: first message %q, want the welcome", join, first)
+		}
+	}
 }

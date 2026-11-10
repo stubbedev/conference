@@ -41,7 +41,14 @@ export const ChatPanel = memo(function ChatPanel({ messages, onSend }: ChatPanel
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="relative min-h-0 flex-1">
-        <div ref={listRef} onScroll={onScroll} className="h-full space-y-3 overflow-y-auto px-3 py-3">
+        <div
+          ref={listRef}
+          onScroll={onScroll}
+          role="log"
+          aria-live="polite"
+          aria-label="Chat messages"
+          className="h-full space-y-3 overflow-y-auto px-3 py-3"
+        >
           {messages.map((message) => (
             <div
               key={message.id}
@@ -81,8 +88,7 @@ export const ChatPanel = memo(function ChatPanel({ messages, onSend }: ChatPanel
               onClick={() =>
                 listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' })
               }
-              aria-label="Jump to latest"
-              className="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 cursor-pointer place-items-center rounded-full border bg-background shadow-md"
+              className="absolute bottom-3 left-1/2 grid size-8 -translate-x-1/2 pointer-coarse:size-11 cursor-pointer place-items-center rounded-full border bg-background shadow-md"
             >
               <ArrowDown className="size-4" />
             </button>
@@ -101,16 +107,21 @@ export const ChatPanel = memo(function ChatPanel({ messages, onSend }: ChatPanel
           value={text}
           onChange={(event) => setText(event.target.value)}
           placeholder="Message…"
+          aria-label="Message everyone"
           autoComplete="off"
         />
-        {/* A disabled button swallows pointer events, so the trigger is
-            the span around it and the tooltip survives the empty state. */}
+        {/* A disabled button swallows pointer events and with them its
+            tooltip, so an empty message only marks the button as disabled;
+            send() is what ignores it. */}
         <Hint label="Send">
-          <span className="inline-flex">
-            <Button size="icon" type="submit" aria-label="Send" disabled={!text.trim()}>
-              <SendHorizonal />
-            </Button>
-          </span>
+          <Button
+            size="icon"
+            type="submit"
+            aria-disabled={!text.trim()}
+            className="aria-disabled:opacity-50 aria-disabled:hover:bg-primary"
+          >
+            <SendHorizonal />
+          </Button>
         </Hint>
       </form>
     </div>

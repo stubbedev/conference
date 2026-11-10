@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Live translation: while a host has it switched on, every member's
+// Live translation: while any member has it switched on, every member's
 // browser streams its own speech to the server's speech service and feeds
 // its own subtitles and translated voice back into the room. As with
 // recording, the SFU never sees plaintext — language choices and
@@ -22,8 +22,8 @@ const (
 	maxCaptionCiphertext = 4 << 10
 )
 
-// ErrTranslationUnavailable rejects translation when the speech engines
-// are not set up.
+// ErrTranslationUnavailable rejects translation when it cannot run, on
+// the server or in the browsers.
 var ErrTranslationUnavailable = errors.New("sfu: live translation is not available")
 
 // SpeechTokens admits a member of a room to the speech stream.
@@ -31,11 +31,11 @@ type SpeechTokens interface {
 	Token(room, member string) (string, error)
 }
 
-// isAudioKind reports whether a track kind carries audio. A share's
+// audio reports whether a track of this kind carries audio. A share's
 // audio is audio: it must not grow a simulcast ladder, be measured for
 // packet loss as video, or be sent for transcription.
-func isAudioKind(kind string) bool {
-	return kind == KindAudio || kind == KindScreenAudio || strings.HasPrefix(kind, KindTranslationPrefix)
+func (k Kind) audio() bool {
+	return k == KindAudio || k == KindScreenAudio || strings.HasPrefix(string(k), KindTranslationPrefix)
 }
 
 func sealed(msg Message, maxCiphertext int) bool {
@@ -73,17 +73,12 @@ func (m *Member) handleCaption(msg Message) {
 }
 
 // handleTranslate switches the room's live translation on or off. It is
-// a room mode, host-gated, replayed to late joiners and kept when the
-// host who started it leaves. While it is on every member, joiners
-// included, gets its own token for the speech service.
+// a room mode any member may switch, replayed to late joiners and kept
+// when the member who started it leaves. While it is on every member,
+// joiners included, gets its own token for the speech service, when the
+// server runs one.
 func (m *Member) handleTranslate(msg Message) {
-	if !m.priv {
-		m.fail("not-allowed", ErrForbidden)
-
-		return
-	}
-
-	if msg.On && m.room.cfg.Speech == nil {
+	if msg.On && !m.room.cfg.Translate {
 		m.fail("translate-unavailable", ErrTranslationUnavailable)
 
 		return

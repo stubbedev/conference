@@ -1,6 +1,7 @@
 package sfu_test
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -24,8 +25,12 @@ const (
 	testHost      = "127.0.0.1"
 	testRoomName  = "Integration"
 	msgRecording  = "recording"
+	msgOffer      = "offer"
 	testTURNPort  = 3478
 )
+
+// errNoTestConn reports a description for a connection the test never opened.
+var errNoTestConn = errors.New("test peer: set remote description: no connection")
 
 func newTestHub(t *testing.T, engine *sfu.Engine) *sfu.Hub {
 	t.Helper()
@@ -35,20 +40,28 @@ func newTestHub(t *testing.T, engine *sfu.Engine) *sfu.Hub {
 		t.Fatal(err)
 	}
 
-	return sfu.NewHub(sfu.HubConfig{Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500, Speech: nil})
+	return sfu.NewHub(sfu.HubConfig{
+		Engine: engine, Relay: creds, MaxMembers: 8, Speech: nil, Translate: false,
+	})
 }
 
-// testPeer wires one test-side peer connection to one hub member. The
+// testPeer wires the test-side peer connections of one hub member. The
 // pump goroutine applies the server's ICE candidates to the local peer
-// (buffering them until its remote description exists) and forwards
-// every other message to out for the test to inspect.
+// connection they name (buffering them until its remote description
+// exists) and forwards every other message to out for the test to inspect.
 type testPeer struct {
-	member  *sfu.Member
-	engine  *sfu.Engine
-	raw     chan sfu.Message
-	out     chan sfu.Message
-	local   *webrtc.PeerConnection
-	mu      sync.Mutex
+	member *sfu.Member
+	engine *sfu.Engine
+	raw    chan sfu.Message
+	out    chan sfu.Message
+	mu     sync.Mutex
+	conns  map[string]*testConn
+}
+
+// testConn is one local peer connection and the server candidates that
+// arrived before its remote description.
+type testConn struct {
+	pc      *webrtc.PeerConnection
 	pending []webrtc.ICECandidateInit
 }
 
@@ -70,13 +83,12 @@ func joinTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, req sfu.JoinRe
 	t.Helper()
 
 	peer := &testPeer{
-		member:  nil,
-		engine:  engine,
-		raw:     make(chan sfu.Message, 256),
-		out:     make(chan sfu.Message, 64),
-		local:   nil,
-		mu:      sync.Mutex{},
-		pending: nil,
+		member: nil,
+		engine: engine,
+		raw:    make(chan sfu.Message, 256),
+		out:    make(chan sfu.Message, 64),
+		mu:     sync.Mutex{},
+		conns:  map[string]*testConn{},
 	}
 
 	var err error
@@ -111,52 +123,69 @@ func (p *testPeer) addICE(msg sfu.Message) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.local == nil {
+	conn := p.conns[msg.PC]
+	if conn == nil {
 		return
 	}
 
-	if p.local.RemoteDescription() == nil {
-		p.pending = append(p.pending, *msg.Candidate)
+	if conn.pc.RemoteDescription() == nil {
+		conn.pending = append(conn.pending, *msg.Candidate)
 
 		return
 	}
 
-	_ = p.local.AddICECandidate(*msg.Candidate)
+	_ = conn.pc.AddICECandidate(*msg.Candidate)
 }
 
-// setLocal installs the peer connection; the pump goroutine's ICE
-// handling reads it under the same mutex, so writes and reads share one
-// synchronized pattern.
-func (p *testPeer) setLocal(pc *webrtc.PeerConnection) {
+// setLocal installs the peer connection the server names pcID; the pump
+// goroutine's ICE handling reads it under the same mutex, so writes and
+// reads share one synchronized pattern.
+func (p *testPeer) setLocal(pcID string, pc *webrtc.PeerConnection) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.local = pc
+	p.conns[pcID] = &testConn{pc: pc, pending: nil}
 }
 
-func (p *testPeer) localPC() *webrtc.PeerConnection {
+// localPC returns the peer connection the server names pcID, nil before
+// it exists.
+func (p *testPeer) localPC(pcID string) *webrtc.PeerConnection {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	return p.local
-}
-
-func (p *testPeer) setRemote(desc webrtc.SessionDescription) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	err := p.local.SetRemoteDescription(desc)
-	if err != nil {
-		return fmt.Errorf("test peer: set remote description: %w", err)
+	if conn := p.conns[pcID]; conn != nil {
+		return conn.pc
 	}
-
-	for _, candidate := range p.pending {
-		_ = p.local.AddICECandidate(candidate)
-	}
-
-	p.pending = nil
 
 	return nil
+}
+
+func (p *testPeer) setRemote(pcID string, desc webrtc.SessionDescription) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	conn := p.conns[pcID]
+	if conn == nil {
+		return fmt.Errorf("%w %q", errNoTestConn, pcID)
+	}
+
+	err := conn.pc.SetRemoteDescription(desc)
+	if err != nil {
+		return fmt.Errorf("test peer: set remote description on %q: %w", pcID, err)
+	}
+
+	for _, candidate := range conn.pending {
+		_ = conn.pc.AddICECandidate(candidate)
+	}
+
+	conn.pending = nil
+
+	return nil
+}
+
+// downID is the connection the server carries source's media to a viewer on.
+func downID(source *testPeer) string {
+	return "down-" + source.member.ID
 }
 
 // next returns the next non-ICE message, failing the test on timeout.
@@ -236,7 +265,26 @@ func addPublisherTracks(
 	return audio, video
 }
 
-func negotiateUp(t *testing.T, publisher *testPeer, peerConn *webrtc.PeerConnection) {
+// trackKind labels a published track the way the client does: what a
+// share's connection carries is the screen and its sound.
+func trackKind(which sfu.Upstream, codecType webrtc.RTPCodecType) sfu.Kind {
+	audio := codecType == webrtc.RTPCodecTypeAudio
+
+	switch {
+	case which == sfu.UpstreamScreen && audio:
+		return sfu.KindScreenAudio
+	case which == sfu.UpstreamScreen:
+		return sfu.KindScreen
+	case audio:
+		return sfu.KindAudio
+	default:
+		return sfu.KindCamera
+	}
+}
+
+// negotiateUp offers the publisher's upstream connection which to the
+// hub and applies its answer.
+func negotiateUp(t *testing.T, publisher *testPeer, which sfu.Upstream, peerConn *webrtc.PeerConnection) {
 	t.Helper()
 
 	offer, err := peerConn.CreateOffer(nil)
@@ -258,35 +306,51 @@ func negotiateUp(t *testing.T, publisher *testPeer, peerConn *webrtc.PeerConnect
 			continue
 		}
 
-		kind := "camera"
-		if sent.Kind() == webrtc.RTPCodecTypeAudio {
-			kind = "audio"
-		}
-
-		tracks = append(tracks, sfu.TrackInfo{Mid: transceiver.Mid(), Kind: kind})
+		tracks = append(tracks, sfu.TrackInfo{Mid: transceiver.Mid(), Kind: trackKind(which, sent.Kind())})
 	}
 
-	publisher.member.Handle(sfu.Message{Type: "offer", SDP: offer.SDP, Tracks: tracks})
+	publisher.member.Handle(sfu.Message{Type: msgOffer, PC: which.PCID(), SDP: offer.SDP, Tracks: tracks})
 
 	answer := publisher.next(t, "answer")
+	if answer.PC != which.PCID() {
+		t.Fatalf("answer for %q, want %q", answer.PC, which.PCID())
+	}
 
-	err = publisher.setRemote(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer.SDP})
+	err = publisher.setRemote(which.PCID(), webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer.SDP})
 	if err != nil {
 		t.Fatalf("publisher srd: %v", err)
 	}
 }
 
-// publisherPC creates the publisher's upstream peer connection.
+// publisherPC creates the publisher's camera-and-microphone connection.
 func publisherPC(t *testing.T, publisher *testPeer) *webrtc.PeerConnection {
 	t.Helper()
 
-	peerConn, err := publisher.engine.NewPeerConnection()
+	peerConn, err := publisher.engine.NewUpstreamPeerConnection(sfu.UpstreamMedia)
 	if err != nil {
 		t.Fatalf("publisher pc: %v", err)
 	}
 
-	publisher.setLocal(peerConn)
-	peerConn.OnICECandidate(onICECandidate(publisher.member, "up"))
+	attachUp(publisher, sfu.UpstreamMedia, peerConn)
+
+	return peerConn
+}
+
+// attachUp registers peerConn as the publisher's upstream which and
+// trickles its candidates to the hub.
+func attachUp(publisher *testPeer, which sfu.Upstream, peerConn *webrtc.PeerConnection) {
+	publisher.setLocal(which.PCID(), peerConn)
+	peerConn.OnICECandidate(onICECandidate(publisher.member, which.PCID()))
+}
+
+// mediaPC returns the publisher's camera-and-microphone connection.
+func mediaPC(t *testing.T, publisher *testPeer) *webrtc.PeerConnection {
+	t.Helper()
+
+	peerConn := publisher.localPC(sfu.UpstreamMedia.PCID())
+	if peerConn == nil {
+		t.Fatal("publisher has no upstream connection")
+	}
 
 	return peerConn
 }
@@ -301,7 +365,7 @@ func publisherOffer(
 
 	peerConn := publisherPC(t, publisher)
 	audio, video := addPublisherTracks(t, peerConn)
-	negotiateUp(t, publisher, peerConn)
+	negotiateUp(t, publisher, sfu.UpstreamMedia, peerConn)
 
 	return audio, video
 }
@@ -318,7 +382,7 @@ func publishAudioOnly(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStati
 		t.Fatalf("add audio track: %v", err)
 	}
 
-	negotiateUp(t, publisher, peerConn)
+	negotiateUp(t, publisher, sfu.UpstreamMedia, peerConn)
 
 	return audio
 }
@@ -328,11 +392,7 @@ func publishAudioOnly(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStati
 func addAudioTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSample {
 	t.Helper()
 
-	peerConn := publisher.localPC()
-	if peerConn == nil {
-		t.Fatal("publisher has no upstream connection")
-	}
-
+	peerConn := mediaPC(t, publisher)
 	audio := newSampleTrack(t, webrtc.MimeTypeOpus, "late-audio")
 
 	_, err := peerConn.AddTrack(audio)
@@ -340,7 +400,7 @@ func addAudioTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSa
 		t.Fatalf("add audio track: %v", err)
 	}
 
-	negotiateUp(t, publisher, peerConn)
+	negotiateUp(t, publisher, sfu.UpstreamMedia, peerConn)
 
 	return audio
 }
@@ -349,11 +409,7 @@ func addAudioTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSa
 func addVideoTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSample {
 	t.Helper()
 
-	peerConn := publisher.localPC()
-	if peerConn == nil {
-		t.Fatal("publisher has no upstream connection")
-	}
-
+	peerConn := mediaPC(t, publisher)
 	video := newSampleTrack(t, webrtc.MimeTypeVP8, "video")
 
 	_, err := peerConn.AddTrack(video)
@@ -361,7 +417,7 @@ func addVideoTrack(t *testing.T, publisher *testPeer) *webrtc.TrackLocalStaticSa
 		t.Fatalf("add video track: %v", err)
 	}
 
-	negotiateUp(t, publisher, peerConn)
+	negotiateUp(t, publisher, sfu.UpstreamMedia, peerConn)
 
 	return video
 }
@@ -385,7 +441,7 @@ func pumpMedia(track *webrtc.TrackLocalStaticSample) {
 func onDownOffer(t *testing.T, viewer *testPeer, peerConn *webrtc.PeerConnection, offer sfu.Message) {
 	t.Helper()
 
-	err := viewer.setRemote(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer.SDP})
+	err := viewer.setRemote(offer.PC, webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer.SDP})
 	if err != nil {
 		t.Fatalf("viewer srd: %v", err)
 	}
@@ -422,12 +478,12 @@ func viewerPC(
 		return existing
 	}
 
-	subscribed, err := engine.NewPeerConnection()
+	subscribed, err := engine.NewDownstreamPeerConnection()
 	if err != nil {
 		t.Fatalf("viewer pc: %v", err)
 	}
 
-	viewer.setLocal(subscribed)
+	viewer.setLocal(offer.PC, subscribed)
 	subscribed.OnICECandidate(onICECandidate(viewer.member, offer.PC))
 	subscribed.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		kinds <- track
@@ -437,7 +493,7 @@ func viewerPC(
 }
 
 func isDownOffer(offer sfu.Message) bool {
-	return offer.Type == "offer" && strings.HasPrefix(offer.PC, "down-")
+	return offer.Type == msgOffer && strings.HasPrefix(offer.PC, "down-")
 }
 
 // subscribeLoop answers every downstream offer on one peer connection
@@ -581,7 +637,7 @@ func TestLateAudioTrack(t *testing.T) {
 
 	// A second negotiation before the track's first packet, as when the
 	// next translation track is added, registers it from the SDP.
-	negotiateUp(t, publisher, publisher.localPC())
+	negotiateUp(t, publisher, sfu.UpstreamMedia, mediaPC(t, publisher))
 
 	go pumpMedia(lateTrack)
 
@@ -655,6 +711,46 @@ func TestLateVideoTrack(t *testing.T) {
 	_, _, err = video.ReadRTP()
 	if err != nil {
 		t.Fatalf("no RTP on late video track: %v", err)
+	}
+}
+
+func TestModerationSetsLanguage(t *testing.T) {
+	t.Parallel()
+
+	const (
+		moderate = "moderate"
+		sealedDE = "sealed-de"
+	)
+
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	defer closeEngine()
+
+	hub := newTestHub(t, engine)
+
+	host := newTestPeer(t, hub, engine, "host", true)
+	guest := newTestPeer(t, hub, engine, "guest", false)
+
+	guest.member.Handle(sfu.Message{Type: moderate, Target: host.member.ID, Action: sfu.ActionLang, IV: "iv", CT: sealedDE})
+
+	if msg := guest.next(t, "error"); msg.Code != codeNotAllowed {
+		t.Fatalf("a guest must not set languages, got %q", msg.Code)
+	}
+
+	// A host sets the guest's language, sealed; only the guest gets it.
+	host.member.Handle(sfu.Message{Type: moderate, Target: guest.member.ID, Action: sfu.ActionLang, IV: "iv", CT: sealedDE})
+
+	if msg := guest.next(t, "forced"); msg.Action != sfu.ActionLang || msg.CT != sealedDE || msg.From != host.member.ID {
+		t.Fatalf("guest expected a sealed language from the host, got %+v", msg)
+	}
+
+	host.member.Handle(sfu.Message{Type: moderate, Target: guest.member.ID, Action: sfu.ActionLang})
+
+	if msg := host.next(t, "error"); msg.Code != "bad-lang" {
+		t.Fatalf("an unsealed language must be refused, got %q", msg.Code)
 	}
 }
 
@@ -867,7 +963,7 @@ func TestKeyframeRequestForwarding(t *testing.T) {
 
 	keyframe := make(chan struct{})
 
-	for _, transceiver := range publisher.localPC().GetTransceivers() {
+	for _, transceiver := range mediaPC(t, publisher).GetTransceivers() {
 		sender := transceiver.Sender()
 		if sender == nil || sender.Track() == nil || sender.Track().Kind() != webrtc.RTPCodecTypeVideo {
 			continue
@@ -876,7 +972,7 @@ func TestKeyframeRequestForwarding(t *testing.T) {
 		watchKeyframeOnPublisher(sender, keyframe)
 	}
 
-	err = viewer.localPC().WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(video.SSRC())}})
+	err = viewer.localPC(downID(publisher)).WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(video.SSRC())}})
 	if err != nil {
 		t.Fatalf("viewer pli: %v", err)
 	}
@@ -921,7 +1017,7 @@ func watchRembOnPublisher(sender *webrtc.RTPSender) <-chan float64 {
 func publisherVideoSender(t *testing.T, publisher *testPeer) *webrtc.RTPSender {
 	t.Helper()
 
-	for _, transceiver := range publisher.localPC().GetTransceivers() {
+	for _, transceiver := range mediaPC(t, publisher).GetTransceivers() {
 		sender := transceiver.Sender()
 		if sender != nil && sender.Track() != nil && sender.Track().Kind() == webrtc.RTPCodecTypeVideo {
 			return sender
@@ -985,7 +1081,7 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 
 	rembs := watchRembOnPublisher(publisherVideoSender(t, publisher))
 
-	err = viewer.localPC().WriteRTCP([]rtcp.Packet{
+	err = viewer.localPC(downID(publisher)).WriteRTCP([]rtcp.Packet{
 		&rtcp.ReceiverEstimatedMaximumBitrate{
 			SenderSSRC: 1,
 			Bitrate:    rembCap,
@@ -999,60 +1095,81 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 	waitRemb(t, rembs, "a viewer-capped REMB", func(bitrate float64) bool { return bitrate <= rembCap*1.01 })
 }
 
-// TestScreenShareRembStartsAtCeiling asserts that a single-layer video
-// stream — a screen share, which has no simulcast layer to step down to —
-// is offered the whole uplink ceiling instead of the controller's low
-// starting guess, and is throttled only once loss shows up: a screen share
-// without that bitrate drops frames until it is a slideshow.
-func TestScreenShareRembStartsAtCeiling(t *testing.T) {
+// TestSingleLayerVideoIsLimitedOnlyOnceLossShows asserts that a
+// single-layer video stream, which has no simulcast layer to step down to,
+// is not held to any guess while its viewer's link is clean: on the
+// camera's connection the browser's own delay-based estimate measures the
+// uplink, and the hub only speaks up once the viewer loses packets.
+func TestSingleLayerVideoIsLimitedOnlyOnceLossShows(t *testing.T) {
 	t.Parallel()
 
-	call := newScreenShareCall(t)
+	call := newSingleLayerCall(t)
 
-	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its screen share", atCeiling)
+	noRemb(t, call.rembs, "a REMB before the viewer reported any loss", 3*rembPeriod)
 
 	call.report(t, 64)
 
-	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
+	waitRemb(t, call.rembs, "a REMB below the stream's rate after heavy loss", belowDelivered)
 }
 
-// TestScreenShareRembRecoversAfterCongestion asserts the other half of
+// TestSingleLayerVideoRembRecoversAfterCongestion asserts the other half of
 // the controller: once the viewer reports a clean link and says its own
-// downlink is healthy again, the publisher's ceiling comes back on that
-// report. A screen share that only adapts downwards stays blurred by one
-// bad minute for the rest of the call.
-func TestScreenShareRembRecoversAfterCongestion(t *testing.T) {
+// downlink is healthy again, the publisher gets that room back on that
+// report. A stream that only adapts downwards stays degraded by one bad
+// minute for the rest of the call.
+func TestSingleLayerVideoRembRecoversAfterCongestion(t *testing.T) {
 	t.Parallel()
 
-	call := newScreenShareCall(t)
+	call := newSingleLayerCall(t)
 
-	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its screen share", atCeiling)
+	noRemb(t, call.rembs, "a REMB before the viewer reported any loss", 2*rembPeriod)
 
 	call.report(t, 64)
 
-	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
+	waitRemb(t, call.rembs, "a REMB below the stream's rate after heavy loss", belowDelivered)
 
 	call.report(t, 0)
-	call.setREMB(t, screenShareCeiling)
+	call.setREMB(t, recoveredDownlink)
 
-	waitRemb(t, call.rembs, "the ceiling back once the viewer's link recovered", atCeiling)
+	waitRemb(t, call.rembs, "the viewer's own estimate back once its link recovered", func(bitrate float64) bool {
+		return bitrate >= recoveredDownlink*0.99
+	})
 }
 
-// screenShareCall is one member sharing a screen to one viewer, with the
-// publisher's RTCP watched for the bitrate the hub feeds it. A screen
-// share has no simulcast layers to move between, so it is the only video
-// stream the hub throttles with REMB.
-type screenShareCall struct {
+// noRemb asserts the publisher receives no REMB for a while.
+func noRemb(t *testing.T, rembs <-chan float64, what string, wait time.Duration) {
+	t.Helper()
+
+	select {
+	case bitrate := <-rembs:
+		t.Fatalf("publisher received %s: %.0f bps", what, bitrate)
+	case <-time.After(wait):
+	}
+}
+
+// singleLayerCall is one member publishing single-layer video to one
+// viewer, with the publisher's RTCP watched for the bitrate the hub feeds
+// it. Without simulcast layers to move between, it is the only kind of
+// video stream the hub throttles with REMB.
+type singleLayerCall struct {
 	viewer *testPeer
+	down   string
 	ssrc   uint32
 	rembs  <-chan float64
 }
 
-// screenShareCeiling is the room's default publish ceiling in bits per
-// second, which a single screen share may use in full.
-const screenShareCeiling = 2_500_000.0
+const (
+	// rembPeriod is how often the hub feeds publishers their REMB.
+	rembPeriod = time.Second
 
-func newScreenShareCall(t *testing.T) screenShareCall {
+	// deliveredRate is what pumpMedia publishes, in bits per second.
+	deliveredRate = frameBytes * 8 * float64(time.Second) / float64(frameInterval)
+
+	// recoveredDownlink is a viewer's own estimate of a healthy downlink.
+	recoveredDownlink = 2_500_000.0
+)
+
+func newSingleLayerCall(t *testing.T) singleLayerCall {
 	t.Helper()
 
 	engine, closeEngine, err := sfu.NewLoopbackEngine()
@@ -1065,23 +1182,24 @@ func newScreenShareCall(t *testing.T) screenShareCall {
 	hub := newTestHub(t, engine)
 
 	publisher := newTestPeer(t, hub, engine, "alice", false)
-	audio, screen := publisherOffer(t, publisher)
+	audio, video := publisherOffer(t, publisher)
 
 	go pumpMedia(audio)
-	go pumpMedia(screen)
+	go pumpMedia(video)
 
 	viewer := newTestPeer(t, hub, engine, "bob", false)
 	remote, _ := viewerSubscribe(t, viewer, engine)
 
-	return screenShareCall{
+	return singleLayerCall{
 		viewer: viewer,
+		down:   downID(publisher),
 		ssrc:   uint32(remote.SSRC()),
 		rembs:  watchRembOnPublisher(publisherVideoSender(t, publisher)),
 	}
 }
 
 // report sends one receiver report, the viewer's account of what it lost.
-func (c screenShareCall) report(t *testing.T, fractionLost uint8) {
+func (c singleLayerCall) report(t *testing.T, fractionLost uint8) {
 	t.Helper()
 
 	packet := &rtcp.ReceiverReport{
@@ -1089,14 +1207,14 @@ func (c screenShareCall) report(t *testing.T, fractionLost uint8) {
 		Reports: []rtcp.ReceptionReport{{SSRC: c.ssrc, FractionLost: fractionLost}},
 	}
 
-	err := c.viewer.localPC().WriteRTCP([]rtcp.Packet{packet})
+	err := c.viewer.localPC(c.down).WriteRTCP([]rtcp.Packet{packet})
 	if err != nil {
 		t.Fatalf("viewer receiver report: %v", err)
 	}
 }
 
 // setREMB sends the viewer's own estimate of its downlink.
-func (c screenShareCall) setREMB(t *testing.T, bitrate float64) {
+func (c singleLayerCall) setREMB(t *testing.T, bitrate float64) {
 	t.Helper()
 
 	packet := &rtcp.ReceiverEstimatedMaximumBitrate{
@@ -1105,15 +1223,13 @@ func (c screenShareCall) setREMB(t *testing.T, bitrate float64) {
 		SSRCs:      []uint32{c.ssrc},
 	}
 
-	err := c.viewer.localPC().WriteRTCP([]rtcp.Packet{packet})
+	err := c.viewer.localPC(c.down).WriteRTCP([]rtcp.Packet{packet})
 	if err != nil {
 		t.Fatalf("viewer remb: %v", err)
 	}
 }
 
-func atCeiling(bitrate float64) bool { return bitrate >= screenShareCeiling*0.99 }
-
-func belowCeiling(bitrate float64) bool { return !atCeiling(bitrate) }
+func belowDelivered(bitrate float64) bool { return bitrate < deliveredRate }
 
 // TestWelcomeCarriesRelayCredentials checks that a member is handed
 // TURN credentials for the host it signaled on, and that the hub

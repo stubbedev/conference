@@ -10,20 +10,48 @@ export type Layer = 'l' | 'm' | 'h'
 
 const LAYERS: readonly Layer[] = ['l', 'm', 'h']
 
-/** Dropped decoder frames in one sample that mean the stream is too big. */
-const DROPPED_FRAMES_LIMIT = 3
+const TOP_LAYER: Layer = 'h'
 
-/** Packets lost in one sample that mean the same. */
+const DROPPED_FRAMES_LIMIT = 3
+const DROPPED_FRAMES_SHARE = 0.1
+
 const LOST_PACKETS_LIMIT = 20
+const LOST_PACKETS_SHARE = 0.05
 
 /** Clean samples in a row before one layer is added back. */
 const RECOVER_SAMPLES = 3
 
+const MAX_RECOVER_SAMPLES = 24
+
+const FAILED_RECOVERY_SAMPLES = 5
+
+const SETTLED_SAMPLES = 30
+
 export interface InboundCounters {
- /** Frames this viewer's decoder dropped, cumulatively. */
- droppedFrames: number
- /** Video packets lost, cumulatively. */
- lostPackets: number
+  droppedFrames: number
+  decodedFrames: number
+  lostPackets: number
+  receivedPackets: number
+}
+
+export function noCounts(): InboundCounters {
+  return { droppedFrames: 0, decodedFrames: 0, lostPackets: 0, receivedPackets: 0 }
+}
+
+export function addCounts(into: InboundCounters, more: InboundCounters): void {
+  into.droppedFrames += more.droppedFrames
+  into.decodedFrames += more.decodedFrames
+  into.lostPackets += more.lostPackets
+  into.receivedPackets += more.receivedPackets
+}
+
+export function countsSince(previous: InboundCounters, current: InboundCounters): InboundCounters {
+  return {
+    droppedFrames: since(previous.droppedFrames, current.droppedFrames),
+    decodedFrames: since(previous.decodedFrames, current.decodedFrames),
+    lostPackets: since(previous.lostPackets, current.lostPackets),
+    receivedPackets: since(previous.receivedPackets, current.receivedPackets),
+  }
 }
 
 export interface QualityState {
@@ -31,10 +59,12 @@ export interface QualityState {
   ceiling: Layer
   /** Consecutive samples without trouble, towards adding a layer back. */
   clean: number
+  wait: number
+  sinceUp: number
 }
 
-export function newQualityState(layout: Layer): QualityState {
-  return { ceiling: layout, clean: 0 }
+export function newQualityState(): QualityState {
+  return { ceiling: TOP_LAYER, clean: 0, wait: RECOVER_SAMPLES, sinceUp: SETTLED_SAMPLES }
 }
 
 export function layerIndex(layer: Layer): number {
@@ -51,8 +81,15 @@ function step(layer: Layer, by: number): Layer {
   return LAYERS[index] ?? 'l'
 }
 
+function significant(bad: number, good: number, limit: number, share: number): boolean {
+  return bad >= limit && bad > (bad + good) * share
+}
+
 function troubled(health: InboundCounters): boolean {
-  return health.droppedFrames >= DROPPED_FRAMES_LIMIT || health.lostPackets >= LOST_PACKETS_LIMIT
+  return (
+    significant(health.droppedFrames, health.decodedFrames, DROPPED_FRAMES_LIMIT, DROPPED_FRAMES_SHARE) ||
+    significant(health.lostPackets, health.receivedPackets, LOST_PACKETS_LIMIT, LOST_PACKETS_SHARE)
+  )
 }
 
 /**
@@ -62,20 +99,29 @@ function troubled(health: InboundCounters): boolean {
  * sharpness rather than the rest of the call.
  */
 export function nextQuality(state: QualityState, layout: Layer, health: InboundCounters): QualityState {
- if (troubled(health)) {
-  return { ceiling: step(lowerLayer(state.ceiling, layout), -1), clean: 0 }
- }
+  const sinceUp = Math.min(state.sinceUp + 1, SETTLED_SAMPLES)
+  const settledWait = sinceUp >= SETTLED_SAMPLES ? RECOVER_SAMPLES : state.wait
 
- if (layerIndex(state.ceiling) >= layerIndex(layout)) {
-  return { ceiling: layout, clean: 0 }
- }
+  if (troubled(health)) {
+    const failed = state.sinceUp < FAILED_RECOVERY_SAMPLES
+    return {
+      ceiling: step(lowerLayer(state.ceiling, layout), -1),
+      clean: 0,
+      wait: failed ? Math.min(state.wait * 2, MAX_RECOVER_SAMPLES) : settledWait,
+      sinceUp,
+    }
+  }
 
- const clean = state.clean + 1
- if (clean < RECOVER_SAMPLES) {
-  return { ceiling: state.ceiling, clean: clean }
- }
+  if (layerIndex(state.ceiling) >= layerIndex(layout)) {
+    return { ceiling: state.ceiling, clean: 0, wait: settledWait, sinceUp }
+  }
 
- return { ceiling: step(state.ceiling, 1), clean: 0 }
+  const clean = state.clean + 1
+  if (clean < settledWait) {
+    return { ceiling: state.ceiling, clean, wait: settledWait, sinceUp }
+  }
+
+  return { ceiling: step(state.ceiling, 1), clean: 0, wait: settledWait, sinceUp: 0 }
 }
 
 /** The layer to ask for: what the layout wants, no more than the viewer can carry. */

@@ -1,6 +1,10 @@
 /web/node_modules/
 /web/dist/*
 !/web/dist/.gitkeep
+/web/public/vision/
+/web/public/ort/
+/web/public/piper/
+/web/public/vad/
 *.db
 *.db-shm
 *.db-wal

@@ -1,7 +1,7 @@
-// Translator: one member's bridge between its own speech and our speech
-// service. While a host has live translation switched on, every member's
-// browser runs one, because only that browser holds its speaker's
-// microphone before encryption:
+// ServerTranslator: one member's bridge to the speech service on the
+// conference server. While a member has live translation switched on,
+// every member's browser runs one, because only that browser holds its
+// speaker's microphone before encryption:
 //
 //   own mic ──16 kHz PCM──► speech service (our own server)
 //   subtitles ◄── JSON ── speech service ──► sealed `caption` messages
@@ -9,14 +9,16 @@
 //
 // The SFU only ever relays the sealed captions and encrypted tracks.
 // Each speaker's voice stays its own track, which is also where a
-// speaker's own (cloned) voice would come in.
+// speaker's own voice comes in: their recording goes to the speech
+// service, which makes the translated voice from it.
 
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
-import type { CaptionLine, LangPrefs, RoomCaption, TranslatorStatus } from '@/lib/translate/types'
+import { MicCapture } from '@/lib/translate/capture'
 import type { OwnVoiceSample } from '@/lib/translate/own-voice'
-import captureWorkletUrl from '@/lib/translate/pcm-capture.worklet.ts?worker&url'
+import type { CaptionLine, LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
+import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
+import { VoicePlayer } from '@/lib/translate/voice'
 
-const CAPTURE_RATE = 16_000
 const HEADER_BYTES = 2
 const MAX_REFUSED_CONNECTS = 3
 const RECONNECT_DELAY_MS = 2_000
@@ -30,26 +32,9 @@ const MAX_VOICE_LAG_S = 10
 // A recorded voice sample goes out in frames well under the stream's message limit.
 const SAMPLE_FRAME = 8_000
 
-interface Voice {
-  output: MediaStreamAudioDestinationNode
-  nextStart: number
-}
-
 interface VoiceHeader {
-  speaker: string
-  segId: string
   lang: string
   rate: number
-  cloned?: boolean
-}
-
-export interface TranslatorEvents {
-  /** This member's own captions and voice cues, as the room gets them. */
-  onCaption: (caption: RoomCaption) => void
-  /** The speech connection failed; this member's speech is not translated. */
-  onFailure: (reason: string) => void
-  /** The bridge's state and anything that keeps speech from being translated. */
-  onStatus?: (status: TranslatorStatus) => void
 }
 
 function pack(header: object, pcm: ArrayBuffer): ArrayBuffer {
@@ -61,24 +46,24 @@ function pack(header: object, pcm: ArrayBuffer): ArrayBuffer {
   return frame.buffer
 }
 
-function unpack(frame: ArrayBuffer): { header: VoiceHeader; pcm: Int16Array<ArrayBuffer> } {
+function unpack(frame: ArrayBuffer): { header: VoiceHeader; pcm: Float32Array } {
   const size = new DataView(frame).getUint16(0)
   const header = JSON.parse(new TextDecoder().decode(new Uint8Array(frame, HEADER_BYTES, size))) as VoiceHeader
-  return { header, pcm: new Int16Array(frame.slice(HEADER_BYTES + size)) }
+  const samples = new Int16Array(frame.slice(HEADER_BYTES + size))
+  const pcm = new Float32Array(samples.length)
+  for (let i = 0; i < samples.length; i++) pcm[i] = samples[i] / 0x8000
+  return { header, pcm }
 }
 
-export class Translator {
+export class ServerTranslator implements Translator {
   private client: RoomClient | null = null
   private unsubscribe: (() => void)[] = []
   private speech: WebSocket | null = null
-  private captureContext: AudioContext | null = null
+  private capture: MicCapture
   private playbackContext: AudioContext | null = null
-  private workletReady: Promise<void> | null = null
-  private capture: { source: MediaStreamAudioSourceNode; node: AudioWorkletNode } | null = null
+  private player: VoicePlayer | null = null
   /** The other members' announced languages, and whether they listen to a translated voice. */
   private others = new Map<string, { lang: string; voice: boolean }>()
-  private voices = new Map<string, Voice>()
-  private localMic: MediaStreamTrack | null = null
   /** The speaker's own voice, recorded before the call, and whether this connection has it. */
   private ownSample: OwnVoiceSample | null = null
   private sampleSent = false
@@ -88,6 +73,7 @@ export class Translator {
     detail: '',
     sameLanguage: false,
     failedTranslations: 0,
+    loading: null,
     ownVoice: 'off',
     droppedVoices: 0,
   }
@@ -98,6 +84,10 @@ export class Translator {
   constructor(selfPrefs: LangPrefs, events: TranslatorEvents) {
     this.selfPrefs = selfPrefs
     this.events = events
+    this.capture = new MicCapture({
+      onAudio: (pcm) => this.sendAudio(pcm),
+      onStop: () => this.endSpeech(),
+    })
   }
 
   /**
@@ -107,9 +97,10 @@ export class Translator {
   attach(client: RoomClient): void {
     this.detach()
     this.client = client
-    this.captureContext ??= new AudioContext({ sampleRate: CAPTURE_RATE })
     this.playbackContext ??= new AudioContext()
-    this.workletReady ??= this.captureContext.audioWorklet.addModule(captureWorkletUrl)
+    this.player ??= new VoicePlayer(this.playbackContext, this.publishTrack)
+    // Until a segment arrives there is no track to publish.
+    if (this.playbackContext.state === 'suspended') void this.playbackContext.resume()
 
     // Members announce their language once, on joining, so the ones that
     // arrived before this bridge started come from the client's record.
@@ -143,10 +134,7 @@ export class Translator {
   start(localMic: MediaStreamTrack | null): void {
     const client = this.client
     if (!client) return
-    void this.captureContext?.resume()
-    void this.playbackContext?.resume()
-    this.localMic = localMic
-    void this.connectMic()
+    void this.capture.start(localMic)
     this.setStatus({ state: 'claiming', detail: '' })
     // The server sends a token when translation turns on, but a joiner's
     // may have come before its bridge existed: ask if none arrives.
@@ -156,15 +144,14 @@ export class Translator {
   }
 
   setLocalMic(track: MediaStreamTrack | null): void {
-    this.localMic = track
-    void this.connectMic()
+    this.capture.setTrack(track)
   }
 
   setSelfPrefs(prefs: LangPrefs): void {
     const droppedOwn = this.selfPrefs.voiceChoice === 'own' && prefs.voiceChoice !== 'own'
     this.selfPrefs = prefs
-    this.sendTargets()
     if (droppedOwn) this.forgetVoice()
+    this.sendTargets()
     this.sendSample()
   }
 
@@ -187,16 +174,21 @@ export class Translator {
     this.speech.send(JSON.stringify({ type: 'forget-voice', speaker }))
   }
 
+  /** The speech service already translated what it relays: nothing to do. */
+  receive(caption: RoomMessage): void {
+    if (caption.k === 'caption') this.events.onCaption(caption)
+  }
+
   /** Stops translating this member's speech and removes its voice tracks. */
   async stop(): Promise<void> {
     this.stopped = true
     const client = this.client
     this.detach()
     await client?.removeTranslationTracks()
-    await this.captureContext?.close()
+    await this.capture.close()
     await this.playbackContext?.close()
-    this.captureContext = null
     this.playbackContext = null
+    this.player = null
   }
 
   private detach(): void {
@@ -204,10 +196,14 @@ export class Translator {
     this.unsubscribe = []
     this.speech?.close()
     this.speech = null
-    this.disconnectMic()
+    this.capture.stop()
     // The tracks belonged to the old connection; the next client publishes afresh.
-    this.voices.clear()
+    this.player = this.playbackContext ? new VoicePlayer(this.playbackContext, this.publishTrack) : null
     this.client = null
+  }
+
+  private readonly publishTrack = (lang: string, track: MediaStreamTrack): void => {
+    void this.client?.addTranslationTrack(lang, track)
   }
 
   private openSpeech(token: string): void {
@@ -220,14 +216,15 @@ export class Translator {
     speech.onopen = () => {
       opened = true
       this.refusedConnects = 0
-      this.sampleSent = false
       this.setStatus({ state: 'live', detail: '' })
       this.sendTargets()
+      // The service keeps a sample per connection, so each new one gets it again.
+      this.sampleSent = false
       this.sendSample()
     }
-    speech.onmessage = (ev: MessageEvent<string | ArrayBuffer>) => {
-      if (typeof ev.data === 'string') this.onSpeechText(ev.data)
-      else this.onVoice(ev.data)
+    speech.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
+      if (typeof event.data === 'string') this.onSpeechText(event.data)
+      else this.onVoice(event.data)
     }
     speech.onclose = () => {
       if (this.speech !== speech || this.stopped) return
@@ -272,12 +269,9 @@ export class Translator {
     const sameLanguage = this.targets().length < 2
     if (sameLanguage !== this.status.sameLanguage) this.setStatus({ sameLanguage })
     if (this.speech?.readyState !== WebSocket.OPEN) return
-    const targets = this.targets()
-    this.speech.send(JSON.stringify({ type: 'hello', targets, voiceTargets: this.voiceTargets() }))
-    for (const lang of targets) if (lang !== this.selfPrefs.lang) void this.ensureVoice(lang)
+    this.speech.send(JSON.stringify({ type: 'hello', targets: this.targets(), voiceTargets: this.voiceTargets() }))
   }
 
-  // The service keeps a sample per connection, so each new one gets it again.
   private sendSample(): void {
     const sample = this.ownSample
     const speaker = this.client?.memberId
@@ -291,32 +285,7 @@ export class Translator {
     this.speech.send(JSON.stringify({ type: 'voice-sample', speaker, lang: sample.lang }))
   }
 
-  private async connectMic(): Promise<void> {
-    this.disconnectMic()
-    const context = this.captureContext
-    const track = this.localMic
-    if (!context || !track || !this.workletReady) return
-    await this.workletReady
-    if (this.localMic !== track || this.captureContext !== context) return
-
-    const source = context.createMediaStreamSource(new MediaStream([track]))
-    const node = new AudioWorkletNode(context, 'pcm-capture')
-    node.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => this.sendAudio(ev.data)
-    // A worklet only runs while the graph pulls it, so it feeds a muted
-    // gain into the destination.
-    const mute = context.createGain()
-    mute.gain.value = 0
-    source.connect(node).connect(mute).connect(context.destination)
-    this.capture = { source, node }
-  }
-
-  private disconnectMic(): void {
-    const capture = this.capture
-    if (!capture) return
-    capture.node.port.onmessage = null
-    capture.source.disconnect()
-    capture.node.disconnect()
-    this.capture = null
+  private endSpeech(): void {
     const speaker = this.client?.memberId
     if (speaker && this.speech?.readyState === WebSocket.OPEN) {
       this.speech.send(JSON.stringify({ type: 'end', speaker }))
@@ -362,56 +331,20 @@ export class Translator {
       text: message.text ?? '',
       final: message.final ?? false,
     }
-    this.publish(caption)
-  }
-
-  private onVoice(frame: ArrayBuffer): void {
-    const context = this.playbackContext
-    if (!context) return
-    const { header, pcm } = unpack(frame)
-    const voice = this.voices.get(header.lang)
-    if (!voice || pcm.length === 0) return
-
-    const buffer = context.createBuffer(1, pcm.length, header.rate)
-    const channel = buffer.getChannelData(0)
-    for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 0x8000
-
-    if (voice.nextStart - context.currentTime > MAX_VOICE_LAG_S) {
-      this.setStatus({ droppedVoices: this.status.droppedVoices + 1 })
-      return
-    }
-
-    const start = Math.max(context.currentTime, voice.nextStart)
-    voice.nextStart = start + buffer.duration
-    const node = context.createBufferSource()
-    node.buffer = buffer
-    node.connect(voice.output)
-    node.start(start)
-
-    this.publish({
-      k: 'voice',
-      speaker: header.speaker,
-      segId: header.segId,
-      lang: header.lang,
-      startInMs: Math.round((start - context.currentTime) * 1000),
-      durationMs: Math.round(buffer.duration * 1000),
-      cloned: header.cloned === true,
-    })
-  }
-
-  private publish(caption: RoomCaption): void {
     void this.client?.sendCaption(caption)
     this.events.onCaption(caption)
   }
 
-  private async ensureVoice(lang: string): Promise<void> {
-    const context = this.playbackContext
-    const client = this.client
-    if (!context || !client || this.voices.has(lang)) return
+  private onVoice(frame: ArrayBuffer): void {
+    const player = this.player
+    if (!player) return
+    const { header, pcm } = unpack(frame)
+    if (pcm.length === 0) return
+    if (player.backlog(header.lang) > MAX_VOICE_LAG_S) {
+      this.setStatus({ droppedVoices: this.status.droppedVoices + 1 })
+      return
+    }
 
-    const output = context.createMediaStreamDestination()
-    this.voices.set(lang, { output, nextStart: 0 })
-    const track = output.stream.getAudioTracks()[0]
-    if (track) await client.addTranslationTrack(lang, track)
+    player.play(header.lang, pcm, header.rate)
   }
 }

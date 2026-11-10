@@ -1,18 +1,31 @@
+import type { SpeechModels } from '@/lib/speech/models'
 import type { Language } from '@/lib/translate/languages'
 
 export interface ServerConfig {
   createAuthRequired: boolean
   sessionLifetimeDays: number
   joinOnly: boolean
-  /** Live translation: shown either way, and greyed out with the reason while unavailable. */
+  /** Live translation: its settings only appear once the server can do it. */
   translation: TranslationConfig
 }
 
+/** The machine that runs the speech engines. */
+export type SpeechRuntime = 'server' | 'browser'
+
 export interface TranslationConfig {
-  /** All the speech engines are set up. */
+  /** All the speech engines are set up, or the browsers have their models. */
   available: boolean
-  /** What has to be set up first, while unavailable. */
+  /**
+   * What is missing before it can translate. For whoever runs it to read, in
+   * /api/config: the app shows nothing about translation until this is empty.
+   */
   reason?: string
+  /** Whether this server transcribes, or every member's browser does. */
+  mode: SpeechRuntime
+  /** The stand-in engines, which answer without a model or a GPU. */
+  fake?: boolean
+  /** The models the browsers load, when they run the engines. */
+  models?: SpeechModels
   /** The languages the speech service speaks. */
   languages: Language[]
   /** Speech or text goes to a service outside the server's network. */

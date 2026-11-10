@@ -7,24 +7,38 @@ export const SPEAKING_SAMPLE_MS = 250
 /** RMS below which a frame counts as silence, from 0 to 1. */
 const SILENT_RMS = 0.04
 
-/** How fast the level rises towards a loud frame and falls away after one. */
-const ATTACK = 0.7
-const DECAY = 0.5
-
-/** The smoothed level an indicator needs to show someone as speaking. */
-const SPEAKING_LEVEL = 0.35
-
 /**
- * nextLevel is the smoothed loudness of one more frame, where rms is that
- * frame's root-mean-square amplitude. The rise is fast and the fall slow,
- * so a voice does not flicker the ring between syllables.
+ * How long someone still counts as speaking after the last voiced
+ * moment, in milliseconds: long enough to bridge the pause between words,
+ * short enough that a single click does not leave them speaking.
  */
-export function nextLevel(level: number, rms: number): number {
-  const target = rms > SILENT_RMS ? 1 : 0
+export const SPEAKING_HOLD_MS = 700
 
-  return target > level ? level + (1 - level) * ATTACK : level * DECAY
+/** isVoiced is whether a frame of samples, each from -1 to 1, carries sound. */
+export function isVoiced(frame: Float32Array): boolean {
+  let sum = 0
+  for (const sample of frame) sum += sample * sample
+
+  return Math.sqrt(sum / frame.length) > SILENT_RMS
 }
 
-export function isSpeaking(level: number): boolean {
-  return level > SPEAKING_LEVEL
+/** When a voice was last heard, in milliseconds, or null if it never was. */
+export type LastVoiced = number | null
+
+/** heard is lastVoiced after observing whether a voice is on at now. */
+export function heard(lastVoiced: LastVoiced, voiced: boolean, now: number): LastVoiced {
+  return voiced ? now : lastVoiced
+}
+
+/**
+ * holdLeft is how many milliseconds someone still counts as speaking from
+ * now, where lastVoiced is when a voice was last heard; 0 means they are
+ * not. Every speaking signal goes through this one rule, so a voice heard
+ * directly, one heard through its translation and the recording's
+ * spotlight all behave the same.
+ */
+export function holdLeft(lastVoiced: LastVoiced, now: number): number {
+  if (lastVoiced === null) return 0
+
+  return Math.max(0, lastVoiced + SPEAKING_HOLD_MS - now)
 }
