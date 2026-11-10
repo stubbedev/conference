@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { DownloadFailed, fallbackToWasm, firstThatRuns, message, needsHalves, rungsFor, type Capabilities, type Rung } from './runtime.ts'
+import { DownloadFailed, fallbackToWasm, firstThatRuns, needsHalves, rungsFor, type Capabilities, type Rung } from './runtime.ts'
 
 const FULL: Capabilities = { gpu: true, halves: true }
 const NO_HALVES: Capabilities = { gpu: true, halves: false }
@@ -97,11 +97,6 @@ test('a device that cannot run the export is a fallback', () => {
 test('any other failure is not a fallback', () => {
   assert.equal(fallbackToWasm(new Error('no such file: encoder_model_q8.onnx')), false)
   assert.equal(fallbackToWasm('out of memory'), false)
-})
-
-test('a failure reads as its message', () => {
-  assert.equal(message(new Error('bad model')), 'bad model')
-  assert.equal(message('bad model'), 'bad model')
 })
 
 test('only an export with 16-bit floats needs a GPU that has them', () => {

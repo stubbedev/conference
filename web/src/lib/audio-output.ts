@@ -8,7 +8,7 @@
 //   system:   no setSinkId, so every element plays through the system
 //             output (Safari).
 
-import { errorName, errorText } from './media-errors.ts'
+import { errorName, errorText } from './errors.ts'
 
 interface OutputPicker {
   selectAudioOutput(options: { deviceId?: string }): Promise<MediaDeviceInfo>

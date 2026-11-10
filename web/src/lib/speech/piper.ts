@@ -19,7 +19,8 @@ import { readBody } from './fetching'
 import { attemptingGpu, fetchRetrying, reportLoading, reportWarning } from './loading'
 import { ort } from './ort'
 import { phonemeIds, phonemes, readVoiceConfig, speakerId, voiceInputs, type VoiceConfig } from './piper-voice'
-import { fallbackToWasm, message } from './runtime'
+import { errorMessage } from '../errors'
+import { fallbackToWasm } from './runtime'
 import { modelURL } from './urls'
 import type { VoiceChoice } from '../translate/types'
 
@@ -135,7 +136,7 @@ async function download(url: string): Promise<Uint8Array> {
 
   if (!cached) {
     await cache.put(url, new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } })).catch((err: unknown) => {
-      reportWarning(`The voice model ${url} could not be kept on this device, so it will be downloaded again next time: ${message(err)}`)
+      reportWarning(`The voice model ${url} could not be kept on this device, so it will be downloaded again next time: ${errorMessage(err)}`)
     })
   }
   return bytes
@@ -149,15 +150,15 @@ async function session(url: string, model: Uint8Array, gpu: boolean): Promise<or
   try {
     return await attemptingGpu(() => ort.InferenceSession.create(model, { executionProviders: ['webgpu', 'wasm'] }))
   } catch (err) {
-    if (!fallbackToWasm(err)) throw new Error(`the voice model ${url} could not start: ${message(err)}`)
-    refusal = message(err)
+    if (!fallbackToWasm(err)) throw new Error(`the voice model ${url} could not start: ${errorMessage(err)}`)
+    refusal = errorMessage(err)
   }
 
   console.warn(`tts: ${url} cannot run on this browser's WebGPU (${refusal}); speaking on the CPU instead`)
   try {
     return await ort.InferenceSession.create(model, { executionProviders: ['wasm'] })
   } catch (err) {
-    throw new Error(`the voice model ${url} could not start on the GPU (${refusal}) or on the CPU (${message(err)})`)
+    throw new Error(`the voice model ${url} could not start on the GPU (${refusal}) or on the CPU (${errorMessage(err)})`)
   }
 }
 

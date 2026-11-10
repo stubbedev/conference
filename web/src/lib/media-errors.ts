@@ -1,10 +1,4 @@
-export function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : ''
-}
-
-export function errorText(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-}
+import { errorName, errorText } from './errors.ts'
 
 export function describeTrackOpenError(device: string, error: unknown): string {
   switch (errorName(error)) {

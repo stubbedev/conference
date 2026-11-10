@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { describeTrackOpenError, errorName, errorText } from './media-errors.ts'
+import { describeTrackOpenError } from './media-errors.ts'
 
 test('a denied permission names the blocked device and how to allow it', () => {
   const message = describeTrackOpenError('microphone', new DOMException('Permission denied', 'NotAllowedError'))
@@ -20,12 +20,4 @@ test('an unrecognised failure keeps its own name and message', () => {
     'The microphone could not be opened (TypeError: mediaDevices is undefined).',
   )
   assert.equal(describeTrackOpenError('camera', 'gone'), 'The camera could not be opened (gone).')
-})
-
-test('an error gives its name and its name with its message, anything else no name and its own text', () => {
-  const denied = new DOMException('Permission denied', 'NotAllowedError')
-  assert.equal(errorName(denied), 'NotAllowedError')
-  assert.equal(errorText(denied), 'NotAllowedError: Permission denied')
-  assert.equal(errorName('gone'), '')
-  assert.equal(errorText('gone'), 'gone')
 })

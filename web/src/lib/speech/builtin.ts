@@ -1,4 +1,4 @@
-import { message } from './runtime.ts'
+import { errorMessage } from '../errors.ts'
 
 interface BuiltinTranslator {
   translate(text: string): Promise<string>
@@ -76,6 +76,6 @@ async function create(sourceLanguage: string, targetLanguage: string): Promise<O
     }
     return { kind: 'ready', translator: await translators.create({ sourceLanguage, targetLanguage }) }
   } catch (err) {
-    return refused(sourceLanguage, targetLanguage, message(err), false)
+    return refused(sourceLanguage, targetLanguage, errorMessage(err), false)
   }
 }

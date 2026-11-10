@@ -5,6 +5,7 @@
 // the SFU relays ciphertext it cannot decode, let alone record.
 
 import { audioContext, playMediaElement } from '@/hooks/media'
+import { errorMessage } from './errors.ts'
 import { ElementSource, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
 import { initials } from './names.ts'
 import { focusKey, gridRects, nextSpeakerFocus, speakingKeys, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
@@ -218,7 +219,7 @@ export class CallRecorder {
       .write(frame)
       .catch((err: unknown) => {
         frame.close()
-        this.endUnexpectedly(`the recording's picture could not be written: ${err instanceof Error ? err.message : String(err)}`)
+        this.endUnexpectedly(`the recording's picture could not be written: ${errorMessage(err)}`)
       })
       .finally(() => {
         this.writing = false

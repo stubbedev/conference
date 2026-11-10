@@ -1,4 +1,4 @@
-import { message } from './runtime.ts'
+import { errorMessage } from '../errors.ts'
 
 export const FETCH_ATTEMPTS = 5
 
@@ -195,7 +195,7 @@ class Download {
   }
 
   private unresumable(err: unknown, delivered: number): Error {
-    const reason = `${message(err)}, and it cannot be resumed without an ETag or Last-Modified to match`
+    const reason = `${errorMessage(err)}, and it cannot be resumed without an ETag or Last-Modified to match`
     return new Error(`fetching ${this.url} broke off after ${delivered} bytes: ${reason}`, { cause: err })
   }
 
@@ -234,14 +234,14 @@ class Download {
 
   private async recover(err: unknown, delivered: number): Promise<void> {
     const at = delivered > 0 ? ` after ${delivered} bytes` : ''
-    if (errorVerdict(err) === 'permanent') throw new Error(`fetching ${this.url} failed${at}: ${message(err)}`, { cause: err })
+    if (errorVerdict(err) === 'permanent') throw new Error(`fetching ${this.url} failed${at}: ${errorMessage(err)}`, { cause: err })
 
     this.failures += 1
     const delayMs = retryDelay(this.failures)
     if (delayMs === null) {
-      throw new Error(`fetching ${this.url} failed${at}, ${this.failures} times in a row: ${message(err)}`, { cause: err })
+      throw new Error(`fetching ${this.url} failed${at}, ${this.failures} times in a row: ${errorMessage(err)}`, { cause: err })
     }
-    this.deps.onRetry({ url: this.url, attempt: this.failures + 1, attempts: FETCH_ATTEMPTS, delayMs, reason: message(err) })
+    this.deps.onRetry({ url: this.url, attempt: this.failures + 1, attempts: FETCH_ATTEMPTS, delayMs, reason: errorMessage(err) })
     await this.deps.sleep(delayMs)
   }
 }

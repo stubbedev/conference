@@ -1,3 +1,4 @@
+import { errorMessage } from '@/lib/errors'
 import type { AsrEngine, Engines, MtEngine, Prepared, PrepareEvents, Segmenter, SegmenterEvents, Sentence, TtsEngine } from '@/lib/speech/engines'
 import { BuiltinTranslators } from '@/lib/speech/builtin'
 import { browserFetchDeps } from '@/lib/speech/fetching'
@@ -5,7 +6,6 @@ import { asrExport, bytesFor, exportKey, loadsUpFront, renderPrompt, voiceKey, t
 import { budgetFor, fingerprint, parseHistory, withUnusable, withQuiet, type GpuHistory } from '@/lib/speech/gpu-history'
 import { GpuWatch } from '@/lib/speech/gpu-watch'
 import { Progress } from '@/lib/speech/progress'
-import { message } from '@/lib/speech/runtime'
 import { Serial } from '@/lib/speech/serial'
 import { fetchRuntime, type Runtime } from '@/lib/speech/wasm'
 import { WorkerRpc, type WorkerEvent, type WorkerReply } from '@/lib/speech/worker'
@@ -133,7 +133,7 @@ class BrowserEngines implements Engines {
       settle(this.models.voices[lang] ? this.loadTts(lang) : Promise.resolve(null)),
     ])
 
-    const problems = new Set([vad, asr, mt, tts].flatMap((result) => (result.status === 'rejected' ? [message(result.reason)] : [])))
+    const problems = new Set([vad, asr, mt, tts].flatMap((result) => (result.status === 'rejected' ? [errorMessage(result.reason)] : [])))
     return {
       transcribes: vad.status === 'fulfilled' && asr.status === 'fulfilled',
       translates: mt.status === 'fulfilled' ? (mt.value as LevelReply).level : 'none',
@@ -222,7 +222,7 @@ class BrowserEngines implements Engines {
       const done = await attempt()
       if (!switched) {
         this.remember(withUnusable(this.gpuHistory, purpose))
-        this.warn(`The GPU failed with the ${PARTS[purpose]} models (${message(err)}), so they run on the CPU until this browser is updated.`)
+        this.warn(`The GPU failed with the ${PARTS[purpose]} models (${errorMessage(err)}), so they run on the CPU until this browser is updated.`)
       }
       return done
     }
@@ -306,7 +306,7 @@ class BrowserEngines implements Engines {
     try {
       await storage.persist?.()
     } catch (err) {
-      this.warn(`This browser could not be asked to keep the speech models (${message(err)}), so it may delete them when it runs short of space and they would be downloaded again.`)
+      this.warn(`This browser could not be asked to keep the speech models (${errorMessage(err)}), so it may delete them when it runs short of space and they would be downloaded again.`)
     }
   }
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { toast } from 'sonner'
 
+import { errorMessage } from '@/lib/errors'
 import { CallRecorder, recorderKeepsPaceHidden, recorderSupported, type RecorderTile } from '@/lib/recorder'
 import type { RoomClient } from '@/lib/sfu'
 
@@ -47,7 +48,7 @@ export function useRecording(slug: string, clientRef: RefObject<RoomClient | nul
         toast.error(`Recording stopped: ${reason}. Everything captured until then has been saved.`)
       })
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Recording is unavailable.')
+      toast.error(errorMessage(err))
       return
     }
     recorderRef.current = instance
@@ -55,7 +56,7 @@ export function useRecording(slug: string, clientRef: RefObject<RoomClient | nul
     instance.start().catch((err: unknown) => {
       recorderRef.current = null
       setRecording(false)
-      toast.error(err instanceof Error ? err.message : 'Recording failed to start.')
+      toast.error(errorMessage(err))
       clientRef.current?.announceRecording(false)
     })
     clientRef.current?.announceRecording(true)

@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { api, type ServerConfig } from '@/lib/api'
+import { errorMessage } from '@/lib/errors'
 import { Logo } from '@/components/Logo'
 import { HudBackdrop, HudTitle } from '@/components/HudBackdrop'
 import { ThemeToggle } from '@/components/ThemeToggle'
@@ -59,7 +60,7 @@ export default function Home() {
       const room = await api.createRoom({ name, password, maxMembers: Number(maxMembers) || 0 }, apiKey)
       navigate(`/r/${room.slug}?p=${room.privToken}#k=${room.roomKey}`, { state: { created: true } })
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not start the meeting.')
+      toast.error(errorMessage(err))
       setBusy(false)
     }
   }

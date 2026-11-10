@@ -4,6 +4,8 @@
 // with no length and cannot seek. This module patches the header after
 // the fact, touching nothing but the Info element.
 
+import { errorMessage } from './errors.ts'
+
 const EBML_HEADER = 0x1a45dfa3
 const SEGMENT = 0x18538067
 const INFO = 0x1549a966
@@ -221,7 +223,7 @@ export function withDuration(bytes: Uint8Array, durationMs: number): Uint8Array<
   try {
     return rewrite(bytes, durationMs)
   } catch (err) {
-    throw new Error(`cannot write a duration into this WebM file: ${err instanceof Error ? err.message : String(err)}`, {
+    throw new Error(`cannot write a duration into this WebM file: ${errorMessage(err)}`, {
       cause: err,
     })
   }

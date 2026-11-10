@@ -1,3 +1,5 @@
+import { errorMessage } from '../errors.ts'
+
 export type Device = 'webgpu' | 'wasm'
 
 export interface Capabilities {
@@ -49,9 +51,7 @@ export async function firstThatRuns<R, T>(rungs: readonly R[], attempt: (rung: R
 }
 
 export function fallbackToWasm(err: unknown): boolean {
-  return REFUSED_ON_DEVICE.test(message(err))
+  return REFUSED_ON_DEVICE.test(errorMessage(err))
 }
 
-export function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
+export { errorMessage as message } from '../errors.ts'

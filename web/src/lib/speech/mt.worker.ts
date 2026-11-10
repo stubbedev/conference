@@ -4,7 +4,8 @@ import type { DataType } from '@huggingface/transformers'
 import { configureTransformers, loadingModel } from './hf'
 import { attempting, expectLoading, gpuCapabilities, reportLoading, reportRefused, reportWarning } from './loading'
 import { exportKey, hostedIn, loadsUpFront, pairFor, type Export, type MtChoice, type MtKind, type Sizes } from './models'
-import { firstThatRuns, message, rungsFor, type Capabilities, type Rung } from './runtime'
+import { errorMessage } from '../errors'
+import { firstThatRuns, rungsFor, type Capabilities, type Rung } from './runtime'
 import { serve } from './serve'
 import type { TranslationLevel } from '../translate/types'
 import { parseRuntime } from './wasm'
@@ -75,7 +76,7 @@ async function load(wanted: Export, kind: MtKind): Promise<Model> {
       (rung, err) => reportRefused('translation', wanted.model, rung, err),
     )
   } catch (err) {
-    throw new Error(`the translation model ${wanted.model} could not start: ${message(err)}`, { cause: err })
+    throw new Error(`the translation model ${wanted.model} could not start: ${errorMessage(err)}`, { cause: err })
   }
 }
 
@@ -113,7 +114,7 @@ async function sharedModel(): Promise<Model> {
     return primary
   } catch (err) {
     if (!mt.fallback) throw err
-    reportWarning(`${message(err)}, so translation uses ${mt.fallback.model} instead`)
+    reportWarning(`${errorMessage(err)}, so translation uses ${mt.fallback.model} instead`)
     fallback = await modelFor(mt.fallback, 'seq2seq')
     return fallback
   }

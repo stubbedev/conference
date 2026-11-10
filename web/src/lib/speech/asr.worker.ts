@@ -5,7 +5,8 @@ import { configureTransformers, loadingModel } from './hf'
 import { attempting, expectLoading, gpuCapabilities, reportLoading, reportRefused } from './loading'
 import { asrRungs, exportKey, type AsrChoice, type AsrRung, type AsrTier, type Sizes } from './models'
 import { toFloat32 } from './pcm'
-import { firstThatRuns, message, type Capabilities } from './runtime'
+import { errorMessage } from '../errors'
+import { firstThatRuns, type Capabilities } from './runtime'
 import { serve } from './serve'
 import { RATE } from './vad'
 import { parseRuntime } from './wasm'
@@ -59,7 +60,7 @@ async function ensureLoaded(lang: string): Promise<Loaded> {
     )
     return loaded
   } catch (err) {
-    throw new Error(`transcribing ${lang} could not start: ${message(err)}`, { cause: err })
+    throw new Error(`transcribing ${lang} could not start: ${errorMessage(err)}`, { cause: err })
   }
 }
 
