@@ -3,6 +3,7 @@ import { Lock, MessageSquare, Users, X } from 'lucide-react'
 
 import { Hint } from '@/components/Hint'
 import { Button } from '@/components/ui/button'
+import { unreadBadge } from '@/hooks/side-panel'
 import { cn } from '@/lib/utils'
 
 export type SidePanelTab = 'people' | 'chat'
@@ -120,7 +121,7 @@ export function SidePanel({ tab, peopleCount, unread, onTab, onClose, people, ch
                 className="grid min-w-4 place-items-center rounded-full bg-destructive px-1 text-[10px] leading-4 font-semibold text-white"
                 aria-label={`${unread} unread`}
               >
-                {unread > 9 ? '9+' : unread}
+                {unreadBadge(unread)}
               </span>
             )}
           </TabButton>

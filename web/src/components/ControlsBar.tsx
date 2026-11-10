@@ -19,6 +19,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Hint } from '@/components/Hint'
 import { MeetingClock } from '@/components/MeetingClock'
 import { blurToggleLabel } from '@/hooks/media'
+import { unreadBadge } from '@/hooks/side-panel'
 import { cn } from '@/lib/utils'
 
 interface ControlsBarProps {
@@ -223,7 +224,7 @@ export const ControlsBar = memo(function ControlsBar({
             </DropdownMenuItem>
             <DropdownMenuItem className="sm:hidden" onSelect={onToggleChat} aria-label={chatName}>
               <MessageSquare />
-              Chat{unread > 0 ? ` (${unread > 9 ? '9+' : unread} new)` : ''}
+              Chat{unread > 0 ? ` (${unreadBadge(unread)} new)` : ''}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -260,7 +261,7 @@ export const ControlsBar = memo(function ControlsBar({
             <MessageSquare />
             {unread > 0 && (
               <span className="absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-4 text-primary-foreground">
-                {unread > 9 ? '9+' : unread}
+                {unreadBadge(unread)}
               </span>
             )}
           </Button>

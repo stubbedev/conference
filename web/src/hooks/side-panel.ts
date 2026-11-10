@@ -9,6 +9,11 @@ function parseSidebar(stored: unknown): SidePanelTab | null {
   return stored === 'people' || stored === 'chat' ? stored : null
 }
 
+// An unread count as its badge shows it.
+export function unreadBadge(unread: number): string {
+  return unread > 9 ? '9+' : String(unread)
+}
+
 export function useSidePanel(clientRef: RefObject<RoomClient | null>) {
   const [sidebar, setSidebar] = usePersistentState('conference:sidebar', { parse: parseSidebar })
   const [unread, setUnread] = useState(0)
