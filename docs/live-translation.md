@@ -109,10 +109,11 @@ mistakes it for the person speaking that language.
 
 **Recorded by the speaker.** With My own voice chosen, the join screen
 (and the settings during the call) offers **Record my voice**: the
-speaker reads a short, meeting-like text in their language (15 s; English,
-German, Swedish and Danish have texts written to cover each language's
-sounds and a question's intonation, other languages get a prompt to talk
-freely). When live translation starts, their browser sends the recording
+speaker reads a short, meeting-like text in their speaking language (15 s,
+with a question and a livelier sentence for intonation). Every language
+the service ships has one, shown before recording so it can be read
+through first; a language added in a languages file gets a prompt to talk
+freely instead. When live translation starts, their browser sends the recording
 to the speech service, which transcribes it and uses it from their first
 sentence. Without a recording, or with one under 6 s or without speech,
 they are heard in the female voice and asked to record. The voice is

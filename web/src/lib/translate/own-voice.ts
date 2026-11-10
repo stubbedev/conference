@@ -18,29 +18,6 @@ export interface OwnVoiceSample {
   lang: string
 }
 
-// What to read aloud, by language: meeting-like, with a question and a
-// livelier sentence for intonation, and the language's typical sounds,
-// about 15 s at a normal pace. Any language works; the speech service
-// transcribes what was actually said.
-const READING: Record<string, string> = {
-  en: 'Good morning, everyone, and thanks for joining. This week we finally finished the new search feature, and the first results look really promising! What do you think about showing it to our customers next Thursday?',
-  de: 'Guten Morgen zusammen, schön, dass Sie dabei sind. Diese Woche haben wir die neue Suchfunktion endlich fertiggestellt, und die ersten Ergebnisse für unsere Kunden sehen wirklich großartig aus! Wollen wir sie nächsten Donnerstag zeigen?',
-  sv: 'God morgon, och tack för att du är med. Den här veckan blev den nya sökfunktionen äntligen klar efter sju veckor, och de första resultaten ser riktigt lovande ut! Vad tycker du om att visa den för kunderna på torsdag den tjugonde?',
-  da: 'Godmorgen, og tak fordi du er med. I denne uge blev den nye søgefunktion endelig færdig, og de første resultater ser virkelig lovende ud! Hvad synes du om at vise den til kunderne på torsdag?',
-}
-
-export const READING_TIPS = "Read it naturally, as you'd say it in a meeting. A quiet room, a normal distance from the microphone."
-
-/** The text to read, or for other languages a prompt to talk freely; read reports which. */
-export function readingText(lang: string): { text: string; read: boolean } {
-  const text = READING[lang]
-  if (text) return { text, read: true }
-  return {
-    text: "Tell us, in your own language, what you're working on this week and what comes next, as you would in a meeting.",
-    read: false,
-  }
-}
-
 /** Records the microphone until stop() or SAMPLE_SECONDS, at 16 kHz. */
 export class SampleRecorder {
   private context: AudioContext | null = null

@@ -4,15 +4,8 @@ import { Mic, Square, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import {
-  MIN_SAMPLE_SECONDS,
-  SAMPLE_RATE,
-  SAMPLE_SECONDS,
-  SampleRecorder,
-  READING_TIPS,
-  readingText,
-  type OwnVoiceSample,
-} from '@/lib/translate/own-voice'
+import { MIN_SAMPLE_SECONDS, SAMPLE_RATE, SAMPLE_SECONDS, SampleRecorder, type OwnVoiceSample } from '@/lib/translate/own-voice'
+import { READING_TIPS, readingText } from '@/lib/translate/reading-texts'
 
 export interface OwnVoiceControls {
   sample: OwnVoiceSample | null
@@ -46,6 +39,7 @@ export function OwnVoiceRecorder({
   const [seconds, setSeconds] = useState(0)
   const [tooShort, setTooShort] = useState(false)
   const recordingRef = useRef(recording)
+  const reading = readingText(lang)
 
   useEffect(() => {
     recordingRef.current = recording
@@ -86,9 +80,8 @@ export function OwnVoiceRecorder({
       </p>
       {recording ? (
         <>
-          <p className="text-xs text-muted-foreground">{READING_TIPS}</p>
-          <p className="text-xs text-muted-foreground">{readingText(lang).read ? 'Read this aloud:' : 'Talk freely:'}</p>
-          <p className="text-sm">{readingText(lang).text}</p>
+          <p className="text-xs text-muted-foreground">{reading.read ? 'Read this aloud:' : 'Talk freely:'}</p>
+          <p className="text-sm">{reading.text}</p>
           <Button size="sm" variant="secondary" onClick={() => recording.stop()}>
             <Square className="fill-current" /> Done ({Math.floor(seconds)} of {SAMPLE_SECONDS} s)
           </Button>
@@ -110,9 +103,13 @@ export function OwnVoiceRecorder({
       ) : (
         <>
           <p className="text-xs text-muted-foreground">
-            Record yourself reading a few sentences ({SAMPLE_SECONDS} s), and others hear your voice from your first
-            sentence. Without a recording, they hear the female voice.
+            {reading.read
+              ? `Record yourself reading this aloud (${SAMPLE_SECONDS} s), and others hear your voice from your first sentence.`
+              : `Record yourself talking for ${SAMPLE_SECONDS} s, and others hear your voice from your first sentence.`}{' '}
+            Without a recording, they hear the female voice.
           </p>
+          <p className="border-l-2 pl-2 text-sm">{reading.text}</p>
+          <p className="text-xs text-muted-foreground">{READING_TIPS}</p>
           <Button size="sm" variant="secondary" onClick={record} disabled={!micTrack || !serverConsent}>
             <Mic /> Record my voice
           </Button>
