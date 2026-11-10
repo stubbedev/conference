@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 
+function refused(attempt: string): (err: unknown) => void {
+  return (err) => console.warn(`fullscreen: ${attempt}`, err)
+}
+
 export function useFullscreen() {
   const [fullscreen, setFullscreen] = useState(false)
 
@@ -11,12 +15,12 @@ export function useFullscreen() {
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) {
-      void document.exitFullscreen()
+      void document.exitFullscreen().catch(refused('leaving full screen'))
       return
     }
     const root = document.documentElement
     if (typeof root.requestFullscreen === 'function') {
-      void root.requestFullscreen().catch(() => {})
+      void root.requestFullscreen().catch(refused('entering full screen'))
     }
   }, [])
 

@@ -14,7 +14,7 @@ export function useRecording(slug: string, clientRef: RefObject<RoomClient | nul
 
   useEffect(() => {
     return () => {
-      recorderRef.current?.stop().catch(() => {})
+      recorderRef.current?.stop().catch((err: unknown) => console.error('recording: saving the recording as the call is left', err))
     }
   }, [])
 
@@ -25,7 +25,8 @@ export function useRecording(slug: string, clientRef: RefObject<RoomClient | nul
     setRecording(false)
     try {
       await active.stop()
-    } catch {
+    } catch (err) {
+      console.error('recording: saving the recording', err)
       toast.error('The recording could not be saved.')
     }
     clientRef.current?.announceRecording(false)

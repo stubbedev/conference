@@ -1,5 +1,6 @@
 import { useEffect, useState, type RefObject } from 'react'
 
+import { errorText } from '@/lib/errors'
 import type { RoomClient } from '@/lib/sfu'
 
 interface DiagnosticsPanelProps {
@@ -16,7 +17,7 @@ export function DiagnosticsPanel({ clientRef, errorsRef }: DiagnosticsPanelProps
     const sample = async () => {
       const client = clientRef.current
       const report = client
-        ? await client.debugStats().catch(() => 'stats unavailable')
+        ? await client.debugStats().catch((err: unknown) => `stats unavailable: ${errorText(err)}`)
         : 'not joined yet'
 
       if (!alive) return

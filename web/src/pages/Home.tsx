@@ -44,7 +44,7 @@ export default function Home() {
     api
       .config()
       .then(setConfig)
-      .catch(() => setConfig(null))
+      .catch((err: unknown) => console.error('home: reading the server configuration, without which a meeting cannot be started here', err))
   }, [])
 
   const needsKey = Boolean(config?.createAuthRequired) && !apiKey
