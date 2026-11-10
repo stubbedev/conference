@@ -78,6 +78,15 @@ jobs:
         env:
           CHROME: google-chrome
           FIREFOX: firefox
+      # Every start of a share must be sent and decoded. The start that
+      # failed once in dozens under load is made to fail every time by
+      # forcing its garbage collection, so the test needs no load and no
+      # luck.
+      - name: share starts
+        run: node web/e2e/share-start.mjs
+        env:
+          CHROME: google-chrome
+          FIREFOX: firefox
 
   # Live translation end to end: the server's speech engines are stand-ins
   # (no downloads, no translation service), everything else is real.
