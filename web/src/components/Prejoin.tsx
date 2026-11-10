@@ -114,7 +114,7 @@ export function Prejoin({
                   onToggle={onToggleCam}
                   className="size-12 rounded-full [&_svg]:size-5"
                 />
-                {canBlur && onToggleBlur && (
+                {canBlur && (
                   <Hint label={blurToggleLabel(blur)}>
                     <Button
                       variant={blur ? 'default' : 'secondary'}

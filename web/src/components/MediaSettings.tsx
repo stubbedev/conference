@@ -182,7 +182,7 @@ function SpeakerSelect({ devices, selected, onChange }: SpeakerSelectProps) {
 interface DeviceSettingsProps {
   devices: DeviceGroups
   selected: DevicePrefs
-  hasMic?: boolean
+  hasMic: boolean
   onChange: OnDeviceChange
   onResolutionChange: (resolution: CameraResolution) => void
   onVolumeChange: (volume: number) => void

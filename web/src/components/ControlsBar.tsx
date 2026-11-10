@@ -29,25 +29,24 @@ interface ControlsBarProps {
   camAvailable: boolean
   sharing: boolean
   blur: boolean
-  canBlur?: boolean
-  blurUnavailable?: string
-  onBlur?: () => void
+  canBlur: boolean
+  onBlur: () => void
   peopleCount: number
   peopleOpen: boolean
   onTogglePeople: () => void
   chatOpen: boolean
   unread: number
   fullscreen: boolean
-  canShare?: boolean
-  canRecord?: boolean
-  recording?: boolean
-  canTranslate?: boolean
-  translating?: boolean
-  onTranslate?: () => void
+  canShare: boolean
+  canRecord: boolean
+  recording: boolean
+  canTranslate: boolean
+  translating: boolean
+  onTranslate: () => void
   onMic: () => void
   onCam: () => void
   onShare: () => void
-  onRecord?: () => void
+  onRecord: () => void
   onLeave: () => void
   onToggleChat: () => void
   onToggleFullscreen: () => void
@@ -65,9 +64,8 @@ export const ControlsBar = memo(function ControlsBar({
   micAvailable,
   camAvailable,
   sharing,
-  blur = false,
-  canBlur = false,
-  blurUnavailable,
+  blur,
+  canBlur,
   onBlur,
   peopleCount,
   peopleOpen,
@@ -75,11 +73,11 @@ export const ControlsBar = memo(function ControlsBar({
   chatOpen,
   unread,
   fullscreen,
-  canShare = true,
-  canRecord = false,
-  recording = false,
-  canTranslate = false,
-  translating = false,
+  canShare,
+  canRecord,
+  recording,
+  canTranslate,
+  translating,
   onTranslate,
   onMic,
   onCam,
@@ -139,7 +137,7 @@ export const ControlsBar = memo(function ControlsBar({
         </span>
         <span className="hidden h-4 w-px shrink-0 bg-border sm:inline" />
         <span className="hidden min-w-0 truncate font-medium md:inline">{roomName}</span>
-        {canRecord && onRecord && (
+        {canRecord && (
           <Hint label={recordLabel}>
             <Button
               variant={recording ? 'destructive' : 'ghost'}
@@ -180,7 +178,7 @@ export const ControlsBar = memo(function ControlsBar({
             </Button>
           </Hint>
         )}
-        {canTranslate && onTranslate && (
+        {canTranslate && (
           <Hint label={translateLabel}>
             <Button
               variant={translating ? 'default' : 'secondary'}
@@ -208,14 +206,10 @@ export const ControlsBar = memo(function ControlsBar({
                 {shareLabel}
               </DropdownMenuItem>
             )}
-            {canBlur && onBlur && (
-              <DropdownMenuItem
-                onSelect={onBlur}
-                disabled={!cam || Boolean(blurUnavailable)}
-                aria-label={blurLabel}
-              >
+            {canBlur && (
+              <DropdownMenuItem onSelect={onBlur} disabled={!cam} aria-label={blurLabel}>
                 <Contrast />
-                {blurUnavailable || blurLabel}
+                {blurLabel}
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onSelect={onToggleFullscreen} aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
