@@ -84,18 +84,67 @@ export interface TranslatorStatus {
   loading: Loading | null
 }
 
-function isTranslationLine(value: Record<string, unknown>): boolean {
-  return (
-    ['by', 'speaker', 'segId', 'sourceLang', 'lang', 'text'].every((key) => typeof value[key] === 'string') &&
-    typeof value.final === 'boolean'
-  )
+/** A member id, a segment id or a language code: a name, never prose. */
+export const LABEL_MAX = 128
+
+/**
+ * The longest text a line carries, in UTF-16 units. A tile shows three
+ * lines of it and an utterance is cut after twelve seconds, so nothing
+ * said comes near, and anything longer would only be work for the
+ * translator and the voice.
+ */
+export const LINE_TEXT_MAX = 1000
+
+/** Why something that arrived as a room message is not handed on. */
+export interface Refused {
+  refused: string
 }
 
-export function isRoomMessage(value: unknown): value is RoomMessage {
-  if (typeof value !== 'object' || value === null) return false
-  const message = value as Record<string, unknown>
-  if (message.k === 'translation') return isTranslationLine(message)
-  return message.k === 'caption'
+function isLabel(value: unknown): value is string {
+  return typeof value === 'string' && value !== '' && value.length <= LABEL_MAX
+}
+
+function noLabel(field: string): Refused {
+  return { refused: `its ${field} is not a name of 1 to ${LABEL_MAX} characters` }
+}
+
+function parseLine(fields: Record<string, unknown>): Omit<CaptionLine, 'k'> | Refused {
+  const { speaker, segId, sourceLang, lang, text, final } = fields
+  if (!isLabel(speaker)) return noLabel('speaker')
+  if (!isLabel(segId)) return noLabel('segId')
+  if (!isLabel(sourceLang)) return noLabel('sourceLang')
+  if (!isLabel(lang)) return noLabel('lang')
+  if (typeof text !== 'string') return { refused: 'its text is not a string' }
+  if (text.length > LINE_TEXT_MAX) return { refused: `its text is longer than ${LINE_TEXT_MAX} characters` }
+  if (typeof final !== 'boolean') return { refused: 'its final is not a boolean' }
+
+  return { speaker, segId, sourceLang, lang, text, final }
+}
+
+/**
+ * parseRoomMessage reads what another member sealed for the room: every
+ * field checked and nothing else kept, or the reason it is refused.
+ * Everyone captions their own speech and a translation names its
+ * translator, so a line claiming to come from anyone but its sender is
+ * refused, and so is a translation of someone who is not in the call.
+ */
+export function parseRoomMessage(value: unknown, sender: string, inCall: (member: string) => boolean): RoomMessage | Refused {
+  if (typeof value !== 'object' || value === null) return { refused: 'it is not an object' }
+
+  const fields = value as Record<string, unknown>
+  if (fields.k !== 'caption' && fields.k !== 'translation') return { refused: 'it is neither a caption nor a translation' }
+
+  const line = parseLine(fields)
+  if ('refused' in line) return line
+
+  if (fields.k === 'caption') {
+    if (line.speaker !== sender) return { refused: 'it captions someone other than its sender' }
+    return { k: 'caption', ...line }
+  }
+
+  if (fields.by !== sender) return { refused: 'it names someone other than its sender as its translator' }
+  if (!inCall(line.speaker)) return { refused: 'it translates someone who is not in the call' }
+  return { k: 'translation', by: sender, ...line }
 }
 
 export function isLangPrefs(value: unknown): value is LangPrefs {

@@ -46,7 +46,7 @@ import {
   type TileKind,
   type TrackKind,
 } from '@/lib/track-kind'
-import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
+import { announcement, parseRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -324,6 +324,7 @@ export class RoomClient {
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
   private memberLangs = new Map<string, LangAnnouncement>()
+  private refusedLines = new Set<string>()
   private translates: TranslationLevel = 'none'
   private transformed = new WeakSet<object>()
   private selfId = ''
@@ -966,12 +967,13 @@ export class RoomClient {
         return
       }
       case 'caption': {
-        const caption = await this.openSealed(msg)
-        // Everyone captions their own speech, and a translation names its
-        // translator: anything claiming to come from another member is dropped.
-        if (msg.from && isRoomMessage(caption) && (caption.k === 'translation' ? caption.by : caption.speaker) === msg.from) {
-          this.emit('caption', { from: msg.from, caption })
-        }
+        const from = msg.from
+        const sealed = await this.openSealed(msg)
+        if (!from || sealed === undefined) return
+
+        const caption = parseRoomMessage(sealed, from, (member) => member === this.selfId || this.members.has(member))
+        if ('refused' in caption) this.reportRefused(caption.refused, from)
+        else this.emit('caption', { from, caption })
         return
       }
       case 'translating':
@@ -1108,6 +1110,14 @@ export class RoomClient {
     } catch (err) {
       console.warn('chat: undecryptable message', err)
     }
+  }
+
+  // A member whose build or intent sends one line that is refused sends
+  // many, so each reason is logged once, with the first member it came from.
+  private reportRefused(reason: string, from: string): void {
+    if (this.refusedLines.has(reason)) return
+    this.refusedLines.add(reason)
+    console.warn(`sfu: dropping a caption or translation from ${from}, and every later one like it: ${reason}`)
   }
 
   /** Decrypts a sealed JSON message; undefined when it cannot be opened. */
