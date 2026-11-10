@@ -16,11 +16,12 @@ export interface TranslatorEvents {
   /** The bridge's state and anything that keeps speech from being translated. */
   onStatus?: (status: TranslatorStatus) => void
   /**
-   * A translated voice this member plays on its own machine, which no
-   * other member needs: the browser's own engines make one per speaker,
-   * in this member's language.
+   * The translated voice this member's own engines give a speaker, in
+   * this member's language and played on this machine only. It is null
+   * when the speaker's last sentence got no voice here: until the next
+   * one has, the speaker's own voice is what there is to hear.
    */
-  onStream?: (speaker: string, track: MediaStreamTrack) => void
+  onVoice?: (speaker: string, track: MediaStreamTrack | null) => void
 }
 
 export interface Translator {

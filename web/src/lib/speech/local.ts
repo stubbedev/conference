@@ -76,6 +76,8 @@ export class LocalTranslator implements Translator {
   private readonly translations = new Recent<string>(REMEMBERED_TRANSLATIONS)
   private interimTranscriptionAfter = 0
   private readonly spoken = new Set<string>()
+  private readonly voices = new Map<string, MediaStreamTrack>()
+  private readonly unvoiced = new Set<string>()
   private readonly voiceless = new Set<string>()
   private readonly notes = new Set<string>()
   private warmUps: WarmUps | null = null
@@ -99,7 +101,10 @@ export class LocalTranslator implements Translator {
     this.client = client
     this.announce()
     this.playbackContext ??= new AudioContext()
-    this.player ??= new VoicePlayer(this.playbackContext, this.events.onStream)
+    this.player ??= new VoicePlayer(this.playbackContext, (speaker, track) => {
+      this.voices.set(speaker, track)
+      this.events.onVoice?.(speaker, track)
+    })
 
     this.unsubscribe = [
       client.on('lang', () => {
@@ -109,6 +114,8 @@ export class LocalTranslator implements Translator {
       }),
       client.on('member-gone', ({ id }) => {
         this.player?.forget(id)
+        this.voices.delete(id)
+        this.unvoiced.delete(id)
         this.earlier.delete(id)
         this.awaited.forget(id)
         this.setSameLanguage()
@@ -421,7 +428,21 @@ export class LocalTranslator implements Translator {
   private translateOwn(caption: CaptionLine, earlier: readonly string[]): void {
     const mine = this.selfPrefs.lang
     if (this.translates !== 'none') this.translateFor(caption, mine, earlier, false)
-    else this.events.onCaption({ ...caption, lang: mine })
+    else this.untranslated(caption)
+  }
+
+  private untranslated(caption: CaptionLine): void {
+    this.events.onCaption({ ...caption, lang: this.selfPrefs.lang })
+    if (caption.final) this.setVoiced(caption.speaker, false)
+  }
+
+  private setVoiced(speaker: string, voiced: boolean): void {
+    const track = this.voices.get(speaker)
+    if (!track || voiced === !this.unvoiced.has(speaker)) return
+
+    if (voiced) this.unvoiced.delete(speaker)
+    else this.unvoiced.add(speaker)
+    this.events.onVoice?.(speaker, voiced ? track : null)
   }
 
   private translated(line: TranslationLine): void {
@@ -502,9 +523,11 @@ export class LocalTranslator implements Translator {
         const { pcm, rate } = await voiced
         if (this.stopped || !this.player) return
         this.player.play(speaker, pcm, rate)
+        this.setVoiced(speaker, true)
       }
     } catch (error) {
       console.warn('live translation has no voice for', prefs.lang, error)
+      this.setVoiced(speaker, false)
       if (this.voiceless.has(prefs.lang)) return
       this.voiceless.add(prefs.lang)
       this.note(`Translations are shown but not spoken: ${errorMessage(error)}`)
@@ -525,7 +548,7 @@ export class LocalTranslator implements Translator {
 
   private failed(error: unknown, caption: CaptionLine, target: string): void {
     if (this.stopped) return
-    if (target === this.selfPrefs.lang) this.events.onCaption({ ...caption, lang: target })
+    if (target === this.selfPrefs.lang) this.untranslated(caption)
     this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
     console.warn('live translation:', error)
   }

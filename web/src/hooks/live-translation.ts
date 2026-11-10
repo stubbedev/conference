@@ -187,7 +187,8 @@ export function useLiveTranslation(
           void stopTranslation()
         },
         onStatus: setTranslatorStatus,
-        onStream: (speaker, track) => setLocalVoices((prev) => ({ ...prev, [speaker]: new MediaStream([track]) })),
+        onVoice: (speaker, track) =>
+          setLocalVoices(({ [speaker]: _before, ...others }) => (track ? { ...others, [speaker]: new MediaStream([track]) } : others)),
       }
 
       const translator = buildTranslator(translation, langPrefsRef.current, events)
