@@ -1,6 +1,8 @@
 // What members exchange about live translation. Both travel sealed with
 // the room's chat key, so the SFU only relays ciphertext.
 
+import type { Refused } from '../sealed.ts'
+
 export type VoiceChoice = 'female' | 'male'
 
 export const VOICE_CHOICES: readonly VoiceChoice[] = ['female', 'male']
@@ -94,11 +96,6 @@ export const LABEL_MAX = 128
  * translator and the voice.
  */
 export const LINE_TEXT_MAX = 1000
-
-/** Why something that arrived as a room message is not handed on. */
-export interface Refused {
-  refused: string
-}
 
 function isLabel(value: unknown): value is string {
   return typeof value === 'string' && value !== '' && value.length <= LABEL_MAX

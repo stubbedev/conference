@@ -8,6 +8,7 @@
 import { errorText } from '@/lib/errors'
 import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
+import { parseChatText, Refusals, type Refused } from '@/lib/sealed'
 import { settled } from '@/lib/settled'
 import { Serial } from '@/lib/speech/serial'
 import {
@@ -347,7 +348,7 @@ export class RoomClient {
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
   private memberLangs = new Map<string, LangAnnouncement>()
-  private refusedLines = new Set<string>()
+  private refusals = new Refusals((line, ...detail) => console.warn(`sfu: ${line}`, ...detail))
   private sealing = new Serial()
   private opening = new Serial()
   private translates: TranslationLevel = 'none'
@@ -986,28 +987,40 @@ export class RoomClient {
           })
         }
         return
-      case 'chat':
-        await this.handleChat(msg)
+      case 'chat': {
+        const what = 'a chat message'
+        const opened = await this.openSealed(msg, what)
+        if (!opened) return
+
+        const chat = this.read(what, opened.from, parseChatText(opened.text))
+        if (!chat) return
+        if (msg.ts === undefined) {
+          this.refusals.report(what, opened.from, 'the server gave it no time')
+          return
+        }
+        this.emit('chat', { id: `${opened.from}:${msg.ts}`, name: this.memberName(opened.from), text: chat.text, ts: msg.ts, mine: false })
         return
+      }
       case 'recording':
         if (msg.from) this.emit('recording', { from: msg.from, on: msg.on ?? false })
         return
       case 'lang': {
-        const prefs = announcement(await this.openSealed(msg))
-        if (msg.from && prefs) {
-          this.memberLangs.set(msg.from, prefs)
-          this.emit('lang', { from: msg.from, prefs })
+        const opened = await this.openSealedJSON(msg, 'a language announcement')
+        const prefs = announcement(opened?.value)
+        if (opened && prefs) {
+          this.memberLangs.set(opened.from, prefs)
+          this.emit('lang', { from: opened.from, prefs })
         }
         return
       }
       case 'caption': {
-        const from = msg.from
-        const sealed = await this.openSealed(msg)
-        if (!from || sealed === undefined) return
+        const what = 'a caption or translation'
+        const opened = await this.openSealedJSON(msg, what)
+        if (!opened) return
 
-        const caption = parseRoomMessage(sealed, from, (member) => member === this.selfId || this.members.has(member))
-        if ('refused' in caption) this.reportRefused(caption.refused, from)
-        else this.emit('caption', { from, caption })
+        const { from } = opened
+        const caption = this.read(what, from, parseRoomMessage(opened.value, from, (member) => member === this.selfId || this.members.has(member)))
+        if (caption) this.emit('caption', { from, caption })
         return
       }
       case 'translating':
@@ -1021,9 +1034,9 @@ export class RoomClient {
         if (action === 'mute' || action === 'cam' || action === 'screen') {
           this.emit('forced', { action })
         } else if (action === 'lang') {
-          const sealed = await this.openSealed(msg)
-          const lang = (sealed as { lang?: unknown } | undefined)?.lang
-          if (msg.from && typeof lang === 'string') this.emit('lang-set', { from: msg.from, lang })
+          const opened = await this.openSealedJSON(msg, 'a language set by a host')
+          const lang = (opened?.value as { lang?: unknown } | undefined)?.lang
+          if (opened && typeof lang === 'string') this.emit('lang-set', { from: opened.from, lang })
         }
         return
       }
@@ -1153,38 +1166,43 @@ export class RoomClient {
     }
   }
 
-  private async handleChat(msg: ReceivedMessage): Promise<void> {
-    if (!msg.iv || !msg.ct) return
+  /** What a parser read, or nothing once the reason it refused is logged. */
+  private read<T extends object>(what: string, from: string, parsed: T | Refused): T | undefined {
+    if (!('refused' in parsed)) return parsed
+    this.refusals.report(what, from, parsed.refused)
+    return undefined
+  }
 
+  /**
+   * The text a member of the call sealed in msg, and who that member is.
+   * Nothing, with the reason logged, when msg names no member of the
+   * call or cannot be opened with the room's key.
+   */
+  private async openSealed(msg: ReceivedMessage, what: string): Promise<{ from: string; text: string } | undefined> {
+    const { from, iv, ct } = msg
+    if (!from || !this.members.has(from)) {
+      this.refusals.report(what, from || 'nobody', 'its sender is not in the call')
+      return undefined
+    }
+    if (!iv || !ct) {
+      this.refusals.report(what, from, 'it carries nothing sealed')
+      return undefined
+    }
     try {
-      const text = await decryptChat(this.opts.chatKey, { iv: msg.iv, ct: msg.ct })
-      this.emit('chat', {
-        id: `${msg.from ?? 'unknown'}:${msg.ts ?? 0}`,
-        name: this.memberName(msg.from ?? ''),
-        text,
-        ts: msg.ts ?? Date.now(),
-        mine: msg.from === this.selfId,
-      })
+      return { from, text: await decryptChat(this.opts.chatKey, { iv, ct }) }
     } catch (err) {
-      console.warn('chat: undecryptable message', err)
+      this.refusals.report(what, from, 'it cannot be opened with the room key', err)
+      return undefined
     }
   }
 
-  // A member whose build or intent sends one line that is refused sends
-  // many, so each reason is logged once, with the first member it came from.
-  private reportRefused(reason: string, from: string): void {
-    if (this.refusedLines.has(reason)) return
-    this.refusedLines.add(reason)
-    console.warn(`sfu: dropping a caption or translation from ${from}, and every later one like it: ${reason}`)
-  }
-
-  /** Decrypts a sealed JSON message; undefined when it cannot be opened. */
-  private async openSealed(msg: ReceivedMessage): Promise<unknown> {
-    if (!msg.iv || !msg.ct) return undefined
+  private async openSealedJSON(msg: ReceivedMessage, what: string): Promise<{ from: string; value: unknown } | undefined> {
+    const opened = await this.openSealed(msg, what)
+    if (!opened) return undefined
     try {
-      return JSON.parse(await decryptChat(this.opts.chatKey, { iv: msg.iv, ct: msg.ct })) as unknown
+      return { from: opened.from, value: JSON.parse(opened.text) as unknown }
     } catch (err) {
-      console.warn('undecryptable message:', msg.type, err)
+      this.refusals.report(what, opened.from, 'it is not JSON', err)
       return undefined
     }
   }
