@@ -30,10 +30,6 @@ export function fromB64(text: string): Bytes {
   return out
 }
 
-export function randomRoomKey(): Bytes {
-  return crypto.getRandomValues(new Uint8Array(32))
-}
-
 export function importPassword(password: string): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', textEncoder.encode(password), 'PBKDF2', false, ['deriveBits', 'deriveKey'])
 }
