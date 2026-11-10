@@ -1,0 +1,3 @@
+# The web code is formatted by hand, in a style no Prettier configuration
+# reproduces: the closest one rewrites more than a third of its files.
+/web/
