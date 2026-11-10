@@ -33,10 +33,15 @@
 import { createHash } from 'node:crypto'
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import { CPU_DTYPE, GPU_LADDER } from '../src/lib/speech/runtime.ts'
 
 const HUB = 'https://huggingface.co'
+const HUB_ATTEMPTS = 4
+const DEFAULT_RETRY_AFTER_S = 60
+const MAX_RETRY_AFTER_S = 330
+const LISTING_PAGE = 1000
 
 const PINNED = {
   'onnx-community/whisper-large-v3-turbo': '360ebcde2559d60bb474678be3c1de9ef347d01a',
@@ -195,8 +200,25 @@ function pairsFrom(named, languages, dtype) {
   return languages.length === 1 && languages[0] !== 'all' ? null : { languages, dtype }
 }
 
+export function retryAfterSeconds(header) {
+  const seconds = Number.parseInt(header ?? '', 10)
+  return Math.min(Number.isFinite(seconds) && seconds > 0 ? seconds : DEFAULT_RETRY_AFTER_S, MAX_RETRY_AFTER_S)
+}
+
+async function hubFetch(url, init = {}) {
+  for (let attempt = 1; ; attempt++) {
+    const response = await fetch(url, init)
+    if (response.status !== 429 || attempt === HUB_ATTEMPTS) return response
+
+    const seconds = retryAfterSeconds(response.headers.get('retry-after'))
+    await response.body?.cancel()
+    process.stderr.write(`${url} is rate limited; waiting ${seconds} s before attempt ${attempt + 1} of ${HUB_ATTEMPTS}\n`)
+    await sleep(seconds * 1000)
+  }
+}
+
 async function getJSON(url) {
-  const response = await fetch(url)
+  const response = await hubFetch(url)
   if (!response.ok) throw new Error(`cannot read ${url}: ${response.status} ${response.statusText}`)
 
   return response.json()
@@ -225,7 +247,7 @@ async function revisionOf(model) {
 }
 
 async function modelExists(model) {
-  const response = await fetch(`${HUB}/api/models/${model}`, { method: 'HEAD' })
+  const response = await hubFetch(`${HUB}/api/models/${model}`, { method: 'HEAD' })
   if (response.status === 404 || response.status === 401) return false
   if (!response.ok) throw new Error(`cannot look up ${model}: ${response.status} ${response.statusText}`)
 
@@ -291,6 +313,21 @@ function moonshineCandidates(code) {
   return [`onnx-community/moonshine-base-${code}-ONNX`, `onnx-community/moonshine-tiny-${code}-ONNX`]
 }
 
+async function listedModels(owner, search) {
+  const ids = []
+  let url = `${HUB}/api/models?author=${encodeURIComponent(owner)}&search=${encodeURIComponent(search)}&limit=${LISTING_PAGE}`
+
+  while (url) {
+    const response = await hubFetch(url)
+    if (!response.ok) throw new Error(`cannot list the ${search} models of ${owner}: ${response.status} ${response.statusText} from ${url}`)
+
+    ids.push(...(await response.json()).map((entry) => entry.id))
+    url = /<([^>]+)>;\s*rel="next"/.exec(response.headers.get('link') ?? '')?.[1] ?? null
+  }
+
+  return ids
+}
+
 async function moonshineFor(dir, code, dtypes) {
   for (const model of moonshineCandidates(code)) {
     if (!(await modelExists(model))) continue
@@ -309,7 +346,7 @@ async function moonshineFor(dir, code, dtypes) {
 const ROMANCE_MODEL = 'Xenova/opus-mt-ROMANCE-en'
 const ROMANCE_INTO_ENGLISH = ['ca', 'pt', 'ro']
 
-export async function planPairs(languages, exists) {
+export function planPairs(languages, hosted) {
   const found = []
   const skipped = []
 
@@ -319,16 +356,9 @@ export async function planPairs(languages, exists) {
 
       const pair = `${source}-${target}`
       const candidates = [...PAIR_OWNERS.map((owner) => `${owner}/opus-mt-${pair}`), ...(target === 'en' && ROMANCE_INTO_ENGLISH.includes(source) ? [ROMANCE_MODEL] : [])]
-      let model = null
+      const model = candidates.find((candidate) => hosted.has(candidate))
 
-      for (const candidate of candidates) {
-        if (!(await exists(candidate))) continue
-
-        model = candidate
-        break
-      }
-
-      if (model === null) {
+      if (model === undefined) {
         skipped.push({ pair, reason: `none of ${candidates.join(', ')} is on the hub` })
         continue
       }
@@ -341,7 +371,8 @@ export async function planPairs(languages, exists) {
 }
 
 async function pairModels(dir, languages, dtype) {
-  const { found, skipped } = await planPairs(languages, modelExists)
+  const listings = await Promise.all(PAIR_OWNERS.map((owner) => listedModels(owner, 'opus-mt-')))
+  const { found, skipped } = planPairs(languages, new Set(listings.flat()))
   const pairs = []
   const files = []
 
@@ -435,7 +466,7 @@ async function download(file) {
 
   await mkdir(path.dirname(file.out), { recursive: true })
 
-  const response = await fetch(file.url)
+  const response = await hubFetch(file.url)
   if (!response.ok) throw new Error(`cannot download ${file.out}: ${response.status} from ${file.url}, wanted ${size}`)
 
   const partial = `${file.out}.part`

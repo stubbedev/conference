@@ -1,17 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { parseArgs, planPairs } from './fetch-speech-models.mjs'
-
-function hub(models) {
-  const asked = []
-  const exists = async (model) => {
-    asked.push(model)
-    return models.includes(model)
-  }
-
-  return { asked, exists }
-}
+import { parseArgs, planPairs, retryAfterSeconds } from './fetch-speech-models.mjs'
 
 test('pair languages are their own list beside every language', () => {
   const options = parseArgs(['/srv/models', '--languages=all', '--pair-languages=en, de,da,en', '--pair-dtype=q4'])
@@ -35,34 +25,34 @@ test('the old pairs flag and an empty pair list are refused', () => {
   assert.throws(() => parseArgs(['/srv/models', '--pair-languages=,']), /--pair-languages names no language/)
 })
 
-test('Portuguese into English uses the Romance model when it has no pair of its own', async () => {
-  const { exists } = hub(['Xenova/opus-mt-ROMANCE-en'])
+test('Portuguese into English uses the Romance model when it has no pair of its own', () => {
+  const hosted = new Set(['Xenova/opus-mt-ROMANCE-en'])
 
-  const { found } = await planPairs(['pt', 'en'], exists)
+  const { found } = planPairs(['pt', 'en'], hosted)
 
   assert.deepEqual(found, [{ pair: 'pt-en', model: 'Xenova/opus-mt-ROMANCE-en' }])
 })
 
-test('a pair of its own wins over the Romance model', async () => {
-  const { exists } = hub(['Xenova/opus-mt-pt-en', 'Xenova/opus-mt-ROMANCE-en'])
+test('a pair of its own wins over the Romance model', () => {
+  const hosted = new Set(['Xenova/opus-mt-pt-en', 'Xenova/opus-mt-ROMANCE-en'])
 
-  const { found } = await planPairs(['pt', 'en'], exists)
+  const { found } = planPairs(['pt', 'en'], hosted)
 
   assert.deepEqual(found, [{ pair: 'pt-en', model: 'Xenova/opus-mt-pt-en' }])
 })
 
-test('the Romance model only translates into English', async () => {
-  const { exists } = hub(['Xenova/opus-mt-ROMANCE-en'])
+test('the Romance model only translates into English', () => {
+  const hosted = new Set(['Xenova/opus-mt-ROMANCE-en'])
 
-  const { found } = await planPairs(['pt', 'de'], exists)
+  const { found } = planPairs(['pt', 'de'], hosted)
 
   assert.deepEqual(found, [])
 })
 
-test('a pair takes the first owner with an export', async () => {
-  const { exists } = hub(['Xenova/opus-mt-en-de', 'onnx-community/opus-mt-de-en'])
+test('a pair takes the first owner with an export', () => {
+  const hosted = new Set(['Xenova/opus-mt-en-de', 'onnx-community/opus-mt-de-en'])
 
-  const { found, skipped } = await planPairs(['en', 'de'], exists)
+  const { found, skipped } = planPairs(['en', 'de'], hosted)
 
   assert.deepEqual(found, [
     { pair: 'en-de', model: 'Xenova/opus-mt-en-de' },
@@ -71,12 +61,18 @@ test('a pair takes the first owner with an export', async () => {
   assert.deepEqual(skipped, [])
 })
 
-test('a pair without an export is skipped by name, in a stable order', async () => {
-  const { asked, exists } = hub(['Xenova/opus-mt-de-da'])
+test('a pair without an export is skipped by name, in a stable order', () => {
+  const hosted = new Set(['Xenova/opus-mt-de-da'])
 
-  const { found, skipped } = await planPairs(['de', 'da'], exists)
+  const { found, skipped } = planPairs(['de', 'da'], hosted)
 
   assert.deepEqual(found.map((entry) => entry.pair), ['de-da'])
   assert.deepEqual(skipped, [{ pair: 'da-de', reason: 'none of Xenova/opus-mt-da-de, onnx-community/opus-mt-da-de is on the hub' }])
-  assert.deepEqual(asked, ['Xenova/opus-mt-de-da', 'Xenova/opus-mt-da-de', 'onnx-community/opus-mt-da-de'])
+})
+
+test('a rate-limited hub call waits as long as the hub asks, within bounds', () => {
+  assert.equal(retryAfterSeconds('155'), 155)
+  assert.equal(retryAfterSeconds('86400'), 330)
+  assert.equal(retryAfterSeconds(null), 60)
+  assert.equal(retryAfterSeconds('Wed, 21 Oct 2026 07:28:00 GMT'), 60)
 })
