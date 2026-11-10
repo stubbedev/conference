@@ -293,6 +293,62 @@ func TestShareConnectionKeepsItsOwnRemb(t *testing.T) {
 	})
 }
 
+// firstRembDelay bounds how long after its first packet a share may wait
+// for its first REMB: well inside the two seconds libwebrtc starts its
+// estimate from one, and well short of the REMB ticker's period, so a
+// REMB that waits for the next tick fails.
+const firstRembDelay = 250 * time.Millisecond
+
+// waitPublisherConnected waits until the publisher's connection can send
+// media: its DTLS handshake, which the server finishes first, is done.
+func waitPublisherConnected(t *testing.T, peerConn *webrtc.PeerConnection) {
+	t.Helper()
+
+	deadline := time.Now().Add(testTimeout)
+
+	for peerConn.ConnectionState() != webrtc.PeerConnectionStateConnected {
+		if time.Now().After(deadline) {
+			t.Fatalf("the publisher's connection never connected: %s", peerConn.ConnectionState())
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestShareGetsItsFirstRembWithItsFirstPacket starts a share on a still
+// screen, one frame and nothing after, and checks that the REMB lifting
+// its estimate arrives right after that frame instead of at the next tick.
+func TestShareGetsItsFirstRembWithItsFirstPacket(t *testing.T) {
+	t.Parallel()
+
+	engine, closeEngine, err := sfu.NewLoopbackEngine()
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+
+	t.Cleanup(closeEngine)
+
+	publisher := newTestPeer(t, newTestHub(t, engine), engine, "alice", false)
+	sent := publishOn(t, publisher, sfu.UpstreamScreen, screenAudioID, screenID)
+	rembs := watchRembOnPublisher(sent[screenID].sender)
+
+	waitPublisherConnected(t, publisher.localPC(sfu.UpstreamScreen.PCID()))
+
+	frame := media.Sample{Data: bytes.Repeat([]byte{markerOf(screenID)}, frameBytes), Duration: frameInterval}
+	start := time.Now()
+
+	err = sent[screenID].track.WriteSample(frame)
+	if err != nil {
+		t.Fatalf("first frame: %v", err)
+	}
+
+	waitRemb(t, rembs, "an unlimited REMB on the share", func(bitrate float64) bool { return bitrate >= sfu.BrowserMaxBitrate*0.99 })
+
+	if waited := time.Since(start); waited > firstRembDelay {
+		t.Fatalf("the share's first REMB came %v after its first frame, want within %v", waited, firstRembDelay)
+	}
+}
+
 // watchPLI counts the keyframe requests a publisher's sender receives.
 func watchPLI(sender *webrtc.RTPSender) <-chan struct{} {
 	plis := make(chan struct{}, 64)

@@ -647,6 +647,25 @@ func (up *UpPeer) sendRemb(now time.Time) {
 
 	up.rembCapped = limit.bound
 
+	up.writeRemb(bitrate, ssrcs)
+}
+
+// openUplink sends a connection's first REMB the moment its first video
+// packet arrives, not at the next tick: libwebrtc only starts its
+// estimate from a REMB that lands within two seconds of its first
+// receiver report, and a share whose first REMB missed that window
+// climbs 8% a second from where it started instead. Nothing has been
+// measured on the connection yet, so nothing limits it.
+func (up *UpPeer) openUplink(ssrc webrtc.SSRC) {
+	up.opened.Do(func() {
+		bitrate, send := rembFor(up.which.feedback(), unlimited, false)
+		if send {
+			up.writeRemb(bitrate, []uint32{uint32(ssrc)})
+		}
+	})
+}
+
+func (up *UpPeer) writeRemb(bitrate uint64, ssrcs []uint32) {
 	packet := &rtcp.ReceiverEstimatedMaximumBitrate{
 		SenderSSRC: 1,
 		Bitrate:    float32(bitrate),
@@ -1197,6 +1216,7 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		sampledAt:  time.Now(),
 		uplink:     uplinkEstimate{limit: unlimited, peak: 0},
 		rembCapped: false,
+		opened:     sync.Once{},
 	}
 
 	m.setUpstream(which, upPeer)
@@ -1207,6 +1227,10 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		// arrives; registration is idempotent per mid. Late-arriving
 		// tracks must reach members that joined before the publisher
 		// sent media.
+		if track.Kind() == webrtc.RTPCodecTypeVideo {
+			upPeer.openUplink(track.SSRC())
+		}
+
 		m.enqueue(func() {
 			if m.upstream(which) != upPeer {
 				return
@@ -1522,6 +1546,10 @@ type UpPeer struct {
 	sampledAt  time.Time
 	uplink     uplinkEstimate
 	rembCapped bool
+
+	// opened sends the connection's first REMB once, on its first video
+	// packet; see openUplink.
+	opened sync.Once
 }
 
 // UpTrack is one forwarded upstream track, keyed by its connection and
