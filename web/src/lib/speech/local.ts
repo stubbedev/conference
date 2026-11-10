@@ -207,13 +207,12 @@ export class LocalTranslator implements Translator {
     const segmenter = await this.segmenter.fill(() =>
       this.engines.segmenter({
         onSegment: (segment) => this.segmented(segment),
-        onError: (error) => this.fail(error),
+        onError: (error) => this.untranscribed(error),
       }),
     )
     if (!segmenter) return
 
-    this.captioning = true
-    this.announce()
+    this.setCaptioning(true)
     this.warmUps = new WarmUps()
     this.warmUpMembers()
   }
@@ -243,6 +242,17 @@ export class LocalTranslator implements Translator {
   private announce(): void {
     this.client?.setProvides({ captions: this.captioning, translates: this.translates, voices: [] })
     this.reassign()
+  }
+
+  private setCaptioning(captioning: boolean): void {
+    if (this.captioning === captioning) return
+    this.captioning = captioning
+    this.announce()
+  }
+
+  private untranscribed(error: unknown): void {
+    this.setCaptioning(false)
+    this.fail(error)
   }
 
   private setSameLanguage(): void {
@@ -276,6 +286,7 @@ export class LocalTranslator implements Translator {
       .then(async () => {
         const started = performance.now()
         const text = await this.transcribe(audio, utterance)
+        this.setCaptioning(true)
         if (!utterance) {
           const finished = performance.now()
           this.interimTranscriptionAfter = nextRunAt(finished, finished - started, INTERIM_TRANSCRIPTION_GAP_MS)
@@ -285,7 +296,7 @@ export class LocalTranslator implements Translator {
         if (said) this.publish(said)
         if (utterance && this.sentences.holding) this.holdTimer = setTimeout(() => this.expire(), HOLD_MS)
       })
-      .catch((error: unknown) => this.fail(error))
+      .catch((error: unknown) => this.untranscribed(error))
       .finally(() => {
         this.queued -= 1
       })
