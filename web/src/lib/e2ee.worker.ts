@@ -46,8 +46,9 @@ let cryptoKeyPromise: Promise<CryptoKey> | null = null
 
 const stats: Omit<E2EEStats, 'transforms'> = { type: 'e2ee-stats', send: 0, recv: 0, dropSend: 0, dropRecv: 0, lastError: '' }
 
-/** One transform being piped: its counters, and the way to end its pipe. */
+/** One transform being piped: its transformer, its counters, and the way to end its pipe. */
 interface Piped {
+  transformer: RTCRtpScriptTransformer
   counts: TransformCounts
   closing: AbortController
 }
@@ -55,6 +56,12 @@ interface Piped {
 // The transforms being piped right now, by id. One leaves when its pipe
 // ends, which the page brings about when it closes the connection, so a
 // long call's report stays as long as what it is sending and receiving.
+//
+// Each holds on to its transformer for as long as it is piped. Chrome
+// connects a transformer to its sender or receiver in a task of its own,
+// after the rtctransform event, and reaches it through a weak reference:
+// a transformer the script has let go of can be collected in between, and
+// then no frame ever arrives on its streams, with nothing reported.
 const piping = new Map<number, Piped>()
 
 // A transform whose connection closed before its rtctransform event
@@ -152,7 +159,7 @@ function pipe(transformer: RTCRtpScriptTransformer, options: TransformOptions): 
   }
   const counts: TransformCounts = { ...options, openedAt: Date.now(), read: 0, written: 0, dropped: 0 }
   const closing = new AbortController()
-  piping.set(options.id, { counts, closing })
+  piping.set(options.id, { transformer, counts, closing })
 
   const transform = new TransformStream<EncodedFrame, EncodedFrame>({
     async transform(frame, controller) {
