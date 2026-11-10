@@ -12,6 +12,7 @@ import (
 
 	"github.com/pion/turn/v5"
 
+	"github.com/stubbe/conference/internal/recvbuf"
 	"github.com/stubbe/conference/internal/relay"
 )
 
@@ -76,10 +77,18 @@ func freeTURNPort(t *testing.T) int {
 const relayBindAttempts = 10
 
 // startRelay runs a TURN server for media and returns credentials for
-// the always-live member. The port is reserved over TCP, so its UDP
-// twin can still be taken by a parallel test; the start is retried on
-// a fresh port then.
+// the always-live member.
 func startRelay(t *testing.T, media []relay.MediaAddr) (int, relay.ICEServer) {
+	t.Helper()
+
+	return startRelayFor(t, media, func(id string) bool { return id == member })
+}
+
+// startRelayFor runs a TURN server for media and the members live
+// reports, and returns credentials for member. The port is reserved over
+// TCP, so its UDP twin can still be taken by a parallel test; the start
+// is retried on a fresh port then.
+func startRelayFor(t *testing.T, media []relay.MediaAddr, live func(id string) bool) (int, relay.ICEServer) {
 	t.Helper()
 
 	for range relayBindAttempts {
@@ -90,7 +99,7 @@ func startRelay(t *testing.T, media []relay.MediaAddr) (int, relay.ICEServer) {
 			t.Fatal(err)
 		}
 
-		server, err := relay.Start(t.Context(), creds, media, func(id string) bool { return id == member })
+		server, err := relay.Start(t.Context(), creds, media, recvbuf.NewSizer(), live)
 		if errors.Is(err, syscall.EADDRINUSE) {
 			continue
 		}
@@ -109,7 +118,9 @@ func startRelay(t *testing.T, media []relay.MediaAddr) (int, relay.ICEServer) {
 	return 0, relay.ICEServer{URLs: nil, Username: "", Credential: ""}
 }
 
-func allocate(t *testing.T, port int, username, password string) (net.PacketConn, error) {
+// turnClient is a TURN client of the relay on port, listening for its
+// answers.
+func turnClient(t *testing.T, port int, username, password string) *turn.Client {
 	t.Helper()
 
 	server := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(port)).String() //nolint:gosec // a bound port.
@@ -132,7 +143,13 @@ func allocate(t *testing.T, port int, username, password string) (net.PacketConn
 		t.Fatalf("turn client listen: %v", err)
 	}
 
-	conn, err := client.Allocate()
+	return client
+}
+
+func allocate(t *testing.T, port int, username, password string) (net.PacketConn, error) {
+	t.Helper()
+
+	conn, err := turnClient(t, port, username, password).Allocate()
 	if err != nil {
 		return nil, err //nolint:wrapcheck // the caller asserts on the TURN error itself.
 	}
@@ -335,7 +352,7 @@ func TestStartRequiresMediaAddrs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = relay.Start(t.Context(), creds, nil, func(string) bool { return true })
+	_, err = relay.Start(t.Context(), creds, nil, recvbuf.NewSizer(), func(string) bool { return true })
 	if err == nil {
 		t.Fatal("started a relay with nothing to relay to")
 	}

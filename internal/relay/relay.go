@@ -7,6 +7,12 @@
 // address to its local socket in-process (no hairpin through NAT or
 // Docker port publishing) and drop every other peer. Credentials are
 // bound to a live call member and stop working when the member leaves.
+//
+// The relay's UDP sockets carry the same bursts of video as the SFU's
+// and are sized like them: the listening socket, which every member
+// relaying over UDP sends to, and the relay socket of each allocation,
+// which the SFU sends that member's video to. TURN over TCP needs none
+// of it: a full buffer there holds the sender back and drops nothing.
 package relay
 
 import (
@@ -22,6 +28,8 @@ import (
 	"strconv"
 
 	"github.com/pion/turn/v5"
+
+	"github.com/stubbe/conference/internal/recvbuf"
 )
 
 const (
@@ -114,22 +122,29 @@ type Server struct {
 }
 
 // Start listens on cfg.Port (UDP and TCP, dual-stack) and relays to
-// media only. live reports whether a member ID belongs to a member
-// currently in a call; every TURN request re-checks it.
-func Start(ctx context.Context, creds *Credentials, media []MediaAddr, live func(memberID string) bool) (*Server, error) {
-	relays, err := newSFURelay(media)
+// media only. Its UDP sockets are sized by sockets. live reports whether
+// a member ID belongs to a member currently in a call; every TURN
+// request re-checks it.
+func Start(
+	ctx context.Context,
+	creds *Credentials,
+	media []MediaAddr,
+	sockets *recvbuf.Sizer,
+	live func(memberID string) bool,
+) (*Server, error) {
+	relays, err := newSFURelay(media, sockets)
 	if err != nil {
 		return nil, err
 	}
 
 	addr := net.JoinHostPort("", strconv.Itoa(creds.cfg.Port))
 
-	var listenConfig net.ListenConfig
-
-	packetConn, err := listenConfig.ListenPacket(ctx, "udp", addr)
+	packetConn, err := listenMedia(ctx, sockets, "udp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("relay: listen udp %s: %w", addr, err)
+		return nil, err
 	}
+
+	var listenConfig net.ListenConfig
 
 	listener, err := listenConfig.Listen(ctx, "tcp", addr)
 	if err != nil {
@@ -180,20 +195,42 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// listenMedia opens a UDP socket media arrives on, sized for a burst of
+// it.
+func listenMedia(ctx context.Context, sockets *recvbuf.Sizer, network, addr string) (net.PacketConn, error) {
+	var listenConfig net.ListenConfig
+
+	conn, err := listenConfig.ListenPacket(ctx, network, addr)
+	if err != nil {
+		return nil, fmt.Errorf("relay: listen %s %s: %w", network, addr, err)
+	}
+
+	err = sockets.Size(conn)
+	if err != nil {
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("relay: %w", err)
+	}
+
+	return conn, nil
+}
+
 // sfuRelay allocates relay sockets that can only talk to the SFU.
 type sfuRelay struct {
+	sockets     *recvbuf.Sizer
 	toLocal     map[netip.AddrPort]netip.AddrPort
 	toAnnounced map[netip.AddrPort]netip.AddrPort
 	announced   map[netip.Addr]bool
 	bind        map[string]netip.Addr
 }
 
-func newSFURelay(media []MediaAddr) (*sfuRelay, error) {
+func newSFURelay(media []MediaAddr, sockets *recvbuf.Sizer) (*sfuRelay, error) {
 	if len(media) == 0 {
 		return nil, errNoMediaAddrs
 	}
 
 	relays := &sfuRelay{
+		sockets:     sockets,
 		toLocal:     make(map[netip.AddrPort]netip.AddrPort, len(media)),
 		toAnnounced: make(map[netip.AddrPort]netip.AddrPort, len(media)),
 		announced:   make(map[netip.Addr]bool, len(media)),
@@ -238,11 +275,9 @@ func (r *sfuRelay) AllocatePacketConn(conf turn.AllocateListenerConfig) (net.Pac
 
 	addr := netip.AddrPortFrom(bind, uint16(conf.RequestedPort)) //nolint:gosec // pion validates the requested port.
 
-	var listenConfig net.ListenConfig
-
-	conn, err := listenConfig.ListenPacket(context.Background(), conf.Network, addr.String())
+	conn, err := listenMedia(context.Background(), r.sockets, conf.Network, addr.String())
 	if err != nil {
-		return nil, nil, fmt.Errorf("relay: bind %s: %w", addr, err)
+		return nil, nil, err
 	}
 
 	return &sfuConn{PacketConn: conn, relays: r}, conn.LocalAddr(), nil

@@ -91,7 +91,7 @@ func run() error {
 
 	hub := newHub(cfg, engine, creds, speech)
 
-	turnServer, err := relay.Start(context.Background(), creds, engine.MediaAddrs(), hub.MemberLive)
+	turnServer, err := relay.Start(context.Background(), creds, engine.MediaAddrs(), sockets, hub.MemberLive)
 	if err != nil {
 		return fmt.Errorf("relay: %w", err)
 	}
