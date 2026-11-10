@@ -63,10 +63,17 @@ test('the service captions the member it was opened for and nobody else', () => 
   assert.match(refused(parseSpeechMessage(JSON.stringify(caption), 'bob')), /captions someone other than its sender/)
 })
 
-test('a failed translation and the service being ready are read, and nothing unknown is', () => {
+test('a sentence without a voice is read with its language and whether it was translated', () => {
+  assert.deepEqual(parseSpeechMessage('{"type":"notice","code":"translation-failed","lang":"en"}', 'anna'), { type: 'unvoiced', lang: 'en', translated: false })
+  assert.deepEqual(parseSpeechMessage('{"type":"notice","code":"voice-failed","lang":"en"}', 'anna'), { type: 'unvoiced', lang: 'en', translated: true })
+  for (const lang of [undefined, '', 7, 'x'.repeat(LABEL_MAX + 1)]) {
+    assert.match(refused(parseSpeechMessage(JSON.stringify({ type: 'notice', code: 'voice-failed', lang }), 'anna')), /its lang is not a name/)
+  }
+})
+
+test('the service being ready is read, and nothing unknown is', () => {
   assert.deepEqual(parseSpeechMessage('{"type":"ready"}', 'anna'), { type: 'ready' })
-  assert.deepEqual(parseSpeechMessage('{"type":"notice","code":"translation-failed"}', 'anna'), { type: 'translation-failed' })
-  assert.match(refused(parseSpeechMessage('{"type":"notice","code":"on-fire"}', 'anna')), /code this build does not know/)
+  assert.match(refused(parseSpeechMessage('{"type":"notice","code":"on-fire","lang":"en"}', 'anna')), /code this build does not know/)
   assert.match(refused(parseSpeechMessage('{"type":"voice"}', 'anna')), /type this build does not know/)
   assert.match(refused(parseSpeechMessage('caption', 'anna')), /not JSON/)
   assert.match(refused(parseSpeechMessage('"caption"', 'anna')), /not an object/)

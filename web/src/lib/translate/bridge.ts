@@ -191,8 +191,10 @@ export class ServerTranslator implements Translator {
     this.speech.send(JSON.stringify({ type: 'hello', targets }))
   }
 
-  // While the connection is open this member's speech is captioned, and
-  // a language is voiced once a sentence has come back spoken in it.
+  // While the connection is open this member's speech is captioned. A
+  // language is voiced from the sentence that comes back spoken in it to
+  // the sentence that comes back without a voice, so a listener hears
+  // this member's own voice from then until the next sentence is spoken.
   private announce(): void {
     this.client?.setProvides({
       captions: this.speech?.readyState === WebSocket.OPEN,
@@ -231,8 +233,9 @@ export class ServerTranslator implements Translator {
     switch (message.type) {
       case 'ready':
         return
-      case 'translation-failed':
-        this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
+      case 'unvoiced':
+        if (!message.translated) this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
+        if (this.voiced.delete(message.lang)) this.announce()
         return
       case 'caption':
         void client.sendCaption(message.caption)

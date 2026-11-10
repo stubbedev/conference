@@ -63,11 +63,15 @@ export function parseVoice(frame: ArrayBuffer): Voice | Refused {
   return { lang, rate, pcm }
 }
 
+/** Why a sentence has no voice in a language, by the code of the service's notice. */
+const UNVOICED = { 'translation-failed': { translated: false }, 'voice-failed': { translated: true } } as const
+
 /** What the speech service says in text. */
 export type SpeechMessage =
   | { type: 'ready' }
   | { type: 'caption'; caption: CaptionLine }
-  | { type: 'translation-failed' }
+  /** A sentence went out without a voice in lang; translated tells whether its caption there is a translation. */
+  | { type: 'unvoiced'; lang: string; translated: boolean }
 
 /**
  * parseSpeechMessage reads a text frame of the speech service that
@@ -88,9 +92,12 @@ export function parseSpeechMessage(data: string, speaker: string): SpeechMessage
       const caption = parseCaption(fields, speaker)
       return 'refused' in caption ? caption : { type: 'caption', caption }
     }
-    case 'notice':
-      if (fields.code !== 'translation-failed') return { refused: 'it is a notice with a code this build does not know' }
-      return { type: 'translation-failed' }
+    case 'notice': {
+      const { code, lang } = fields
+      if (code !== 'translation-failed' && code !== 'voice-failed') return { refused: 'it is a notice with a code this build does not know' }
+      if (!isLabel(lang)) return noLabel('lang')
+      return { type: 'unvoiced', lang, ...UNVOICED[code] }
+    }
     default:
       return { refused: 'it is of a type this build does not know' }
   }
