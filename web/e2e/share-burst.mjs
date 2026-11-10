@@ -44,10 +44,21 @@ const WARMUP_SECONDS = 5
 
 const [, FLUID] = SCREEN_LAYER_RIDS
 
-// A scrolling burst is fluid when the presenter sends and the viewer
-// decodes at least this many frames a second across it, and the viewer
-// does not freeze once it has started.
+// The presenter's fastest burst must reach this many frames a second:
+// it is the fluid encoding that is sent, not the slow one. How fast each
+// burst runs beyond that follows the machine's free CPU from one second
+// to the next (40 and 18 frames a second in one run, 14 to 44 between
+// runs), so it is not judged: what holds a burst back for our reasons
+// shows in the estimate and in the encoder's own account below.
 const BURST_MIN_FPS = 15
+
+// What a browser's encoder says when the bandwidth it is given, not the
+// CPU, limits what it sends. Chrome says; Firefox does not report it.
+const LIMITED_BY_BANDWIDTH = 'bandwidth'
+
+// A viewer watching the fluid encoding plays at least this share of the
+// frames a burst was sent with, and does not freeze once it has started.
+const MIN_PLAYED_SHARE = 0.8
 const MAX_FROZEN_MS = 500
 
 // The frames of a burst the presenter sent that must reach a viewer
@@ -71,6 +82,11 @@ const START_SECONDS = 3
 const START_SAMPLE_MS = 250
 const START_WINDOW_MS = 2000
 const START_MIN_ESTIMATE = SCREEN_SHARE_FLUID_MAX_BITRATE
+
+// The estimate must then stay there through every burst and every still
+// stretch: one that sinks while the screen is still is what starves the
+// next burst.
+const HELD_MIN_ESTIMATE = SCREEN_SHARE_FLUID_MAX_BITRATE
 
 const phaseAt = (second) => (Math.floor(second / PHASE_SECONDS) % 2 === 0 ? 'scrolling' : 'still')
 
@@ -184,6 +200,7 @@ function summarize({ rows, end }) {
     scrollEstimates: estimates(scrolling),
     stillEstimates: estimates(still),
     keyframes: total(rows.filter((row) => row.fluid), 'keyframes'),
+    limitedSeconds: rows.filter((row) => row.limit === LIMITED_BY_BANDWIDTH).map((row) => row.second),
     steppedDown: end.asks.some((ask) => ask.layer !== FLUID),
     viewer: end,
   }
@@ -231,8 +248,12 @@ const fpsList = (bursts, field) => bursts.map((burst) => burst[field].toFixed(0)
 function failuresOf(label, s) {
   const failures = []
   const fluid = s.bursts.filter((burst) => burst.fluid)
-  const slowestSent = Math.min(...s.bursts.map((burst) => burst.sentFps))
-  if (slowestSent < BURST_MIN_FPS) failures.push(`${label}: a scrolling burst was sent at ${slowestSent.toFixed(1)} fps, want at least ${BURST_MIN_FPS}`)
+  const fastestSent = Math.max(...s.bursts.map((burst) => burst.sentFps))
+  const held = [...s.scrollEstimates, ...s.stillEstimates]
+  if (fastestSent < BURST_MIN_FPS) failures.push(`${label}: the fastest scrolling burst was sent at ${fastestSent.toFixed(1)} fps, want at least ${BURST_MIN_FPS}`)
+  if (s.limitedSeconds.length > 0) failures.push(`${label}: the encoder of the fluid encoding was limited by bandwidth at t=${s.limitedSeconds.join(', ')}s`)
+  if (held.length === 0) failures.push(`${label}: the share's estimate could not be read while it was presented`)
+  else if (Math.min(...held) < HELD_MIN_ESTIMATE) failures.push(`${label}: the share's estimate sank to ${mbps(Math.min(...held))} Mbps while it was presented, want at least ${mbps(HELD_MIN_ESTIMATE)}`)
   if (s.startEstimate < START_MIN_ESTIMATE) failures.push(`${label}: a share started on a still screen estimated ${mbps(s.startEstimate)} Mbps within ${START_WINDOW_MS} ms, want at least ${mbps(START_MIN_ESTIMATE)}`)
   if (s.viewer.asks.length === 0) failures.push(`${label}: the viewer never asked the SFU for a layer of the share`)
   if (s.steppedDown && s.viewer.dropped < DROPPED_FRAMES_LIMIT) failures.push(`${label}: the viewer asked for less than the fluid encoding having dropped ${s.viewer.dropped} frames: its decoder does not explain it`)
@@ -240,10 +261,10 @@ function failuresOf(label, s) {
   if (fluid.length === 0) return failures
 
   const leastDelivered = Math.min(...fluid.map((burst) => burst.delivered))
-  const slowestDecoded = Math.min(...fluid.map((burst) => burst.decodedFps))
+  const leastPlayed = Math.min(...fluid.map((burst) => (burst.sentFps > 0 ? burst.decodedFps / burst.sentFps : 0)))
   const longestFrozen = Math.max(...fluid.map((burst) => burst.frozenMs))
   if (leastDelivered < MIN_DELIVERED_SHARE) failures.push(`${label}: ${(leastDelivered * 100).toFixed(0)}% of the frames sent in a scrolling burst reached a viewer watching the fluid encoding, want at least ${MIN_DELIVERED_SHARE * 100}%`)
-  if (slowestDecoded < BURST_MIN_FPS) failures.push(`${label}: a scrolling burst played at ${slowestDecoded.toFixed(1)} fps, want at least ${BURST_MIN_FPS}`)
+  if (leastPlayed < MIN_PLAYED_SHARE) failures.push(`${label}: a viewer watching the fluid encoding played ${(leastPlayed * 100).toFixed(0)}% of the frames a scrolling burst was sent with, want at least ${MIN_PLAYED_SHARE * 100}%`)
   if (longestFrozen > MAX_FROZEN_MS) failures.push(`${label}: the share froze for ${longestFrozen} ms in the middle of a scrolling burst`)
   if (s.keyframes > MAX_KEYFRAMES) failures.push(`${label}: a viewer watching the fluid encoding decoded ${s.keyframes} keyframes over ${cycles} bursts, want at most ${MAX_KEYFRAMES}`)
   return failures
@@ -311,7 +332,7 @@ async function main() {
       console.error('\nserver log tail:\n' + server.log().split('\n').slice(-20).join('\n'))
       process.exitCode = 1
     } else {
-      console.log('\nSHARE BURST OK: the share starts fast, scrolling bursts are sent fluidly, and the ones a viewer watched on the fluid encoding played fluidly and needed no keyframe after the screen sat still')
+      console.log('\nSHARE BURST OK: the share starts with the estimate a scroll needs and keeps it while the screen sits still, its encoder is never limited by bandwidth, and the bursts a viewer watched on the fluid encoding arrived, played without freezing and needed no keyframe')
     }
   } finally {
     await Promise.all(procs.map((p) => stopProcess(p, 'SIGKILL')))
