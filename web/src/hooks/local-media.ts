@@ -298,7 +298,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     replaceRawCam(camTrack)
     const outboundCam = camTrack ? cameraTrackFor(camTrack, blurIntentRef.current) : null
 
-    const stream = new MediaStream([outboundMic, outboundCam].filter(Boolean) as MediaStreamTrack[])
+    const stream = new MediaStream([outboundMic, outboundCam].filter((track) => track !== null))
     for (const old of localStreamRef.current?.getTracks() ?? []) if (!stream.getTracks().includes(old)) old.stop()
     localStreamRef.current = stream
     for (const kind of TRACK_KINDS) applyEnabled(kind, controlsRef.current[kind])
