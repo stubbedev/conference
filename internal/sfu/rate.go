@@ -227,9 +227,33 @@ func (s linkSample) fractionLost() (uint8, bool) {
 	return uint8(min(lost*fractionScale/expected, math.MaxUint8)), true
 }
 
+// A publisher that sends less than this share of its limit is held by
+// what it has to send, not by the limit: libwebrtc calls a sender
+// application-limited below 65% of its estimate
+// (AlrDetectorConfig.bandwidth_usage_ratio).
+const (
+	limitUseNum = 13
+	limitUseDen = 20
+)
+
+// applicationLimited reports whether the publisher sent less in the
+// period than limit lets it. What it sent is what arrived, scaled up by
+// the packets that did not. A period nothing arrived in cannot tell how
+// much was sent, and does not count.
+func (s linkSample) applicationLimited(limit bitrateLimit) bool {
+	if !limit.bound {
+		return true
+	}
+
+	expected := s.arrived.expected
+	received := min(s.arrived.received, expected)
+
+	return s.bitrate()*expected*limitUseDen < limit.bps*received*limitUseNum
+}
+
 // throughputHeadroom bounds the publisher's estimate once loss has
-// limited it: at most half again what the connection has delivered
-// cleanly, the bound libwebrtc's delay-based controller puts on its own
+// limited it: at most half again the most the connection has delivered,
+// the bound libwebrtc's delay-based controller puts on its own
 // estimate (1.5 times the measured throughput).
 const (
 	throughputHeadroomNum = 3
@@ -243,13 +267,15 @@ const (
 // what actually got through, moderate loss holds it, a clean link grows
 // it. It does not follow the send rate: a still screen sends almost
 // nothing, and an estimate that settled there would hold the next burst
-// to a trickle.
+// to a trickle. Loss while the publisher sends little is the same trap:
+// what got through then is little because little was sent, so the
+// back-off starts from the most the connection has delivered.
 type uplinkEstimate struct {
 	// limit is none until the connection loses packets heavily: before
 	// that nothing measured says the uplink cannot carry more.
 	limit bitrateLimit
 
-	// peak is the highest rate the connection delivered without loss.
+	// peak is the highest rate the connection has delivered.
 	peak uint64
 }
 
@@ -260,17 +286,19 @@ func (e uplinkEstimate) next(sample linkSample) uplinkEstimate {
 	}
 
 	rate := sample.bitrate()
+	e.peak = max(e.peak, rate)
 
 	switch {
 	case fraction > highLossFraction:
-		e.limit = capAt(max(backOff(e.limit.clamp(rate), fraction), minPublisherBitrate))
-	case fraction < lowLossFraction:
-		e.peak = max(e.peak, rate)
-
-		if e.limit.bound {
-			ceiling := e.peak * throughputHeadroomNum / throughputHeadroomDen
-			e.limit = capAt(max(e.limit.bps, min(senderGain.grow(e.limit.bps, sample.elapsed), ceiling)))
+		through := rate
+		if sample.applicationLimited(e.limit) {
+			through = e.peak
 		}
+
+		e.limit = capAt(max(backOff(e.limit.clamp(through), fraction), minPublisherBitrate))
+	case fraction < lowLossFraction && e.limit.bound:
+		ceiling := e.peak * throughputHeadroomNum / throughputHeadroomDen
+		e.limit = capAt(max(e.limit.bps, min(senderGain.grow(e.limit.bps, sample.elapsed), ceiling)))
 	}
 
 	return e

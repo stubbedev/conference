@@ -103,6 +103,111 @@ func TestUplinkEstimateBacksOffUnderHeavyLoss(t *testing.T) {
 	}
 }
 
+// idleLoss is a period in which the publisher sent little and most of
+// it was lost, as a still screen's few frames are when the server drops
+// packets: 120 of 176, half a megabit getting through.
+func idleLoss() linkSample {
+	return second(500_000, 176, 120)
+}
+
+// TestLossWhileIdleBacksOffFromWhatTheConnectionDelivered: what gets
+// through a lossy period in which little was sent is little, and says
+// nothing about the link. One such period must not set the limit near
+// what idling sends, far below what the connection delivered before.
+func TestLossWhileIdleBacksOffFromWhatTheConnectionDelivered(t *testing.T) {
+	t.Parallel()
+
+	lossy := idleLoss()
+
+	fraction, known := lossy.fractionLost()
+	if !known || fraction <= highLossFraction {
+		t.Fatalf("loss %d/256 (known %v) in the idle period, want it heavy; the test proves nothing", fraction, known)
+	}
+
+	estimate := estimateAfter(append(repeat(second(burstRate, burstPackets, 0), 3), lossy)...)
+
+	want := backOff(burstRate, fraction)
+	if estimate.limit != capAt(want) {
+		t.Fatalf("limit %+v after one lossy idle period on a connection that delivered %d, want %d, the back-off from that",
+			estimate.limit, burstRate, want)
+	}
+
+	const recovery = 6
+
+	for range recovery {
+		estimate = estimate.next(second(typingRate, typingPackets, 0))
+	}
+
+	if estimate.limit.bps < burstRate {
+		t.Fatalf("limit %d after %d clean seconds, want it back at the %d the connection delivered before the loss",
+			estimate.limit.bps, recovery, burstRate)
+	}
+}
+
+// TestLossWhileIdleBacksOffFromTheLimit: with a limit in place, loss in a
+// period that used little of it lowers that limit, and does not replace
+// it with the little that got through.
+func TestLossWhileIdleBacksOffFromTheLimit(t *testing.T) {
+	t.Parallel()
+
+	lossy := idleLoss()
+	fraction, _ := lossy.fractionLost()
+
+	limited := estimateAfter(second(burstRate, burstPackets, burstPackets/4))
+
+	want := backOff(limited.limit.bps, fraction)
+	if got := limited.next(lossy).limit; got != capAt(want) {
+		t.Fatalf("limit %+v after a lossy idle period under a limit of %d, want %d, the back-off from the limit", got, limited.limit.bps, want)
+	}
+}
+
+// TestLossAtTheLimitBacksOffToWhatGotThrough: a publisher that sends all
+// its limit allows and loses half of it has found what the link carries.
+func TestLossAtTheLimitBacksOffToWhatGotThrough(t *testing.T) {
+	t.Parallel()
+
+	limited := estimateAfter(second(burstRate, burstPackets, burstPackets/4))
+	through := limited.limit.bps / 2
+
+	want := backOff(through, fractionScale/2)
+	if got := limited.next(second(through, burstPackets, burstPackets/2)).limit; got != capAt(want) {
+		t.Fatalf("limit %+v after losing half of what a limit of %d allows, want %d, the back-off from the %d that got through",
+			got, limited.limit.bps, want, through)
+	}
+}
+
+func TestApplicationLimited(t *testing.T) {
+	t.Parallel()
+
+	const (
+		limit = 8_000_000
+		used  = limit * limitUseNum / limitUseDen
+	)
+
+	for _, tc := range []struct {
+		name   string
+		sample linkSample
+		limit  bitrateLimit
+		want   bool
+	}{
+		{name: "sending the limit", sample: second(limit, burstPackets, 0), limit: capAt(limit), want: false},
+		{name: "sending 65% of the limit", sample: second(used, burstPackets, 0), limit: capAt(limit), want: false},
+		{name: "sending just under 65%", sample: second(used-bitsPerByte, burstPackets, 0), limit: capAt(limit), want: true},
+		{name: "sending the limit and losing half", sample: second(limit/2, burstPackets, burstPackets/2), limit: capAt(limit), want: false},
+		{name: "sending little and losing most", sample: idleLoss(), limit: capAt(limit), want: true},
+		{name: "nothing arrived", sample: second(0, burstPackets, burstPackets), limit: capAt(limit), want: false},
+		{name: "no limit", sample: second(limit, burstPackets, 0), limit: unlimited, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.sample.applicationLimited(tc.limit); got != tc.want {
+				t.Fatalf("application-limited %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestUplinkEstimateHoldsUnderModerateLoss(t *testing.T) {
 	t.Parallel()
 
