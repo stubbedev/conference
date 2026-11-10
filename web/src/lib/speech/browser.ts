@@ -2,7 +2,7 @@ import type { AsrEngine, Engines, MtEngine, Prepared, PrepareEvents, Segmenter, 
 import { BuiltinTranslators } from '@/lib/speech/builtin'
 import { browserFetchDeps } from '@/lib/speech/fetching'
 import { asrExport, bytesFor, exportKey, loadsUpFront, renderPrompt, voiceKey, type SpeechModels } from '@/lib/speech/models'
-import { budgetFor, fingerprint, parseHistory, withHang, withQuiet, type GpuHistory } from '@/lib/speech/gpu-history'
+import { budgetFor, fingerprint, parseHistory, withUnusable, withQuiet, type GpuHistory } from '@/lib/speech/gpu-history'
 import { GpuWatch } from '@/lib/speech/gpu-watch'
 import { Progress } from '@/lib/speech/progress'
 import { message } from '@/lib/speech/runtime'
@@ -99,6 +99,7 @@ class BrowserEngines implements Engines {
   private readonly workers = new Workers<Purpose, Channel>((purpose) => new Channel(start(purpose), (event) => this.event(purpose, event)))
   private readonly progress = new Progress()
   private readonly noGpu = new Set<Purpose>()
+  private readonly gpuRefused = new Set<Purpose>()
   private readonly watches = new Map<Purpose, GpuWatch>()
   private gpuHistory: GpuHistory<Purpose>
   private runtime: Promise<Runtime> | null = null
@@ -112,13 +113,13 @@ class BrowserEngines implements Engines {
     this.languages = languages
     this.requiresWebGpu = !models.asr.fallback
     this.gpuHistory = readGpuHistory(`${navigator.userAgent}\n${fingerprint(JSON.stringify(models))}`)
-    for (const purpose of this.gpuHistory.hung) this.noGpu.add(purpose)
+    for (const purpose of this.gpuHistory.unusable) this.noGpu.add(purpose)
   }
 
   async prepare(lang: string, events: PrepareEvents): Promise<Prepared> {
     this.events = events
-    for (const purpose of this.gpuHistory.hung) {
-      this.warn(`The GPU stopped responding while loading the ${PARTS[purpose]} models on an earlier visit, so they run on the CPU until this browser is updated.`)
+    for (const purpose of this.gpuHistory.unusable) {
+      this.warn(`The GPU failed or stopped responding with the ${PARTS[purpose]} models on an earlier visit, so they run on the CPU until this browser is updated.`)
     }
     this.builtin.startPreparation()
     const room = await this.storageProblem(lang)
@@ -199,15 +200,30 @@ class BrowserEngines implements Engines {
     this.workers.closeAll()
   }
 
-  private async onWorker<T>(purpose: Purpose, load: () => Promise<WorkerReply>, call: () => Promise<T>): Promise<T> {
-    const hadGpu = !this.noGpu.has(purpose)
-    try {
-      await load()
-      return await call()
-    } catch (err) {
-      if (!hadGpu || !this.noGpu.has(purpose)) throw err
+  private onWorker<T>(purpose: Purpose, load: () => Promise<WorkerReply>, call: () => Promise<T>): Promise<T> {
+    return this.cpuAfterGpu(purpose, async () => {
       await load()
       return call()
+    })
+  }
+
+  private async cpuAfterGpu<T>(purpose: Purpose, attempt: () => Promise<T>): Promise<T> {
+    if (purpose === 'vad' || this.noGpu.has(purpose)) return attempt()
+    try {
+      return await attempt()
+    } catch (err) {
+      const switched = this.noGpu.has(purpose)
+      if (!switched && !this.gpuRefused.has(purpose)) throw err
+      if (!switched) {
+        this.noGpu.add(purpose)
+        this.workers.close(purpose)
+      }
+      const done = await attempt()
+      if (!switched) {
+        this.remember(withUnusable(this.gpuHistory, purpose))
+        this.warn(`The GPU failed with the ${PARTS[purpose]} models (${message(err)}), so they run on the CPU until this browser is updated.`)
+      }
+      return done
     }
   }
 
@@ -223,7 +239,7 @@ class BrowserEngines implements Engines {
   private gpuStalled(purpose: Purpose): void {
     const budget = budgetFor(this.gpuHistory, purpose)
     this.noGpu.add(purpose)
-    this.remember(withHang(this.gpuHistory, purpose))
+    this.remember(withUnusable(this.gpuHistory, purpose))
     this.warn(`The GPU stopped responding for ${Math.round(budget / 1000)} s while loading the ${PARTS[purpose]} models, so they run on the CPU until this browser is updated.`)
     this.workers.close(purpose)
   }
@@ -317,6 +333,9 @@ class BrowserEngines implements Engines {
         return
       case 'gpu-settled':
         this.gpuSettled(purpose)
+        return
+      case 'gpu-refused':
+        this.gpuRefused.add(purpose)
         return
       case 'expect':
         this.progress.expect(PARTS[purpose], this.models.sizes[String(event.key)] ?? 0)
@@ -415,11 +434,7 @@ class BrowserEngines implements Engines {
   }
 
   private load(purpose: Purpose, settings: Record<string, unknown>, expected: string | null): Promise<WorkerReply> {
-    const hadGpu = !this.noGpu.has(purpose)
-    return this.init(purpose, settings, expected).catch((err: unknown) => {
-      if (!hadGpu || !this.noGpu.has(purpose)) throw err
-      return this.init(purpose, settings, expected)
-    })
+    return this.cpuAfterGpu(purpose, () => this.init(purpose, settings, expected))
   }
 
   private init(purpose: Purpose, settings: Record<string, unknown>, expected: string | null): Promise<WorkerReply> {

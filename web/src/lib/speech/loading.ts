@@ -53,6 +53,7 @@ export function gpuCapabilities(what: string): Promise<Capabilities> {
 }
 
 export function reportRefused(what: string, model: string, rung: Rung, err: unknown): void {
+  if (rung.device === 'webgpu') notify('gpu-refused', {})
   reportWarning(`The ${what} model ${model} could not run as ${rung.dtype} on the ${rung.device === 'webgpu' ? 'GPU' : 'CPU'}: ${message(err)}`)
 }
 

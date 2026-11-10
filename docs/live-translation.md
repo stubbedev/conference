@@ -192,9 +192,12 @@ So the page watches each GPU attempt and times its longest stretch
 without activity. A GPU it has not seen before gets 60 seconds of quiet;
 one that has loaded these models before gets four times its longest
 earlier stretch, at least 10 seconds. A worker that runs past its budget
-is terminated and a new one starts on the CPU. The browser remembers the
-hang in local storage, so later visits start on the CPU at once until
-the browser version or the model setup changes.
+is terminated and a new one starts on the CPU. A worker whose GPU refused
+every export also starts over on the CPU in a new worker, because a
+failed WebGPU run can leave the runtime unable to run even the CPU
+export, as WebGPU in Firefox on Linux does. The browser remembers either
+in local storage, so later visits start on the CPU at once until the
+browser version or the model setup changes.
 
 The models are large: whisper-large-v3-turbo at q4f16 is about 570 MB,
 TranslateGemma 4B at q4f16 about 2.7 GB (3.1 GB at q4),
