@@ -1,10 +1,14 @@
-// Downloads the model files the browser speech engines load, so an
-// operator can fill a model directory without knowing the ONNX file
-// names: the transcription and translation models in the layout
-// transformers.js loads them from, and a Piper voice per language under
-// piper/. The default models are pinned to a commit below, so the same
-// run downloads the same bytes twice; any other model is fetched at the
-// commit its repository is on, which the script names.
+// Writes the models.json the browser speech engines load from, so an
+// operator sets up a model directory without knowing the ONNX file
+// names: the models it chooses, and a manifest of every file a browser
+// may ask for, in the layout transformers.js loads them from and with a
+// Piper voice per language under piper/. Each file in the manifest names
+// its repository, the commit to fetch it at, its size and, where the Hub
+// gives one, its digest; the server fetches a file from the Hub the first
+// time a browser asks for it and caches it. No model is downloaded here.
+// The default models are pinned to a commit below, so the same run lists
+// the same bytes twice; any other model is listed at the commit its
+// repository is on, which the script names.
 //
 // The file list of each model comes from the Hugging Face API, and the
 // voices come from piper-voices' voices.json. A voice with one speaker
@@ -35,8 +39,7 @@
 //   --pair-dtype=q4f16
 //   --builtin
 
-import { createHash } from 'node:crypto'
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -83,7 +86,7 @@ const ONNX_STEMS = {
   translator: ['onnx/model'],
 }
 
-export const DTYPE_SUFFIXES = {
+const DTYPE_SUFFIXES = {
   fp32: '',
   fp16: '_fp16',
   q8: '_quantized',
@@ -100,10 +103,6 @@ export const DTYPE_SUFFIXES = {
 
 const MAX_BROWSER_FILE = 2 ** 31 - 1
 const MAX_BROWSER_EXPORT = 2 ** 32
-
-const MAX_PARALLEL = 4
-const DOWNLOAD_ATTEMPTS = 4
-const REPORT_BYTES = 64e6
 
 const USAGE =
   'usage: node scripts/fetch-speech-models.mjs <target dir> [--languages=en,de,da] [--asr=owner/model] [--asr-dtype=q4f16] ' +
@@ -297,13 +296,20 @@ function exportNames(tree, model, kind, dtype, revision, treeURL) {
 }
 
 // modelFiles is what one transformers.js model needs in each of the
-// given exports, named as its repository holds it, and where each file
-// goes in the model directory.
-async function modelFiles(dir, model, kind, dtypes) {
+// given exports, at the commit it is fetched at.
+async function modelFiles(model, kind, dtypes) {
   const revision = await revisionOf(model)
   const treeURL = `${HUB}/api/models/${model}/tree/${revision}?recursive=true`
-  const entries = (await getJSON(treeURL)).filter((entry) => entry.type === 'file')
-  const tree = new Map(entries.map((entry) => [entry.path, entry]))
+
+  return treeFiles(model, kind, dtypes, revision, await getJSON(treeURL), treeURL)
+}
+
+// treeFiles picks a model's files out of its repository's tree, the
+// listing the Hub gives: the metadata, and the ONNX files of each given
+// export and of whichever exports of the GPU ladder it has. Each file is
+// served under the model's id, as transformers.js asks for it.
+export function treeFiles(model, kind, dtypes, revision, listing, treeURL) {
+  const tree = new Map(listing.filter((entry) => entry.type === 'file').map((entry) => [entry.path, entry]))
 
   if (!tree.has('config.json')) throw new Error(`${model} has no config.json at ${revision}: ${treeURL}`)
   const names = MODEL_FILES.filter((name) => tree.has(name))
@@ -318,10 +324,12 @@ async function modelFiles(dir, model, kind, dtypes) {
   }
 
   return names.map((name) => ({
-    url: `${HUB}/${model}/resolve/${revision}/${name}`,
-    out: path.join(dir, ...model.split('/'), ...name.split('/')),
+    path: `${model}/${name}`,
+    repo: model,
+    revision,
+    file: name,
     size: tree.get(name).size,
-    sha256: tree.get(name).lfs?.oid,
+    ...(tree.get(name).lfs?.oid ? { sha256: tree.get(name).lfs.oid } : {}),
   }))
 }
 
@@ -349,12 +357,12 @@ async function listedModels(owner, search) {
   return ids
 }
 
-async function moonshineFor(dir, code, dtypes) {
+async function moonshineFor(code, dtypes) {
   for (const model of moonshineCandidates(code)) {
     if (!(await modelExists(model))) continue
 
     try {
-      return { model, files: await modelFiles(dir, model, 'seq2seq', dtypes) }
+      return { model, files: await modelFiles(model, 'seq2seq', dtypes) }
     } catch (err) {
       if (!(err instanceof MissingExport)) throw err
       process.stderr.write(`skipping ${model}: ${err.message}\n`)
@@ -391,7 +399,7 @@ export function planPairs(languages, hosted) {
   return { found, skipped }
 }
 
-async function pairModels(dir, languages, dtype) {
+async function pairModels(languages, dtype) {
   const listings = await Promise.all(PAIR_OWNERS.map((owner) => listedModels(owner, 'opus-mt-')))
   const { found, skipped } = planPairs(languages, new Set(listings.flat()))
   const pairs = []
@@ -399,7 +407,7 @@ async function pairModels(dir, languages, dtype) {
 
   for (const entry of found) {
     try {
-      files.push(...(await modelFiles(dir, entry.model, 'seq2seq', exportsFor(dtype, true))))
+      files.push(...(await modelFiles(entry.model, 'seq2seq', exportsFor(dtype, true))))
       pairs.push(entry)
     } catch (err) {
       if (!(err instanceof MissingExport)) throw err
@@ -439,8 +447,9 @@ function voiceFor(code, voices) {
 }
 
 // voiceFiles is a voice's model and the JSON beside it, as the repository
-// names them, into piper/ under the name the server and the browsers use.
-function voiceFiles(dir, voice) {
+// names them, served from piper/ under the name the server and the
+// browsers use.
+export function voiceFiles(voice) {
   return ['.onnx', '.onnx.json'].map((suffix) => {
     const name = `${voice.key}${suffix}`
     const file = Object.entries(voice.files).find(([source]) => path.posix.basename(source) === name)
@@ -448,112 +457,47 @@ function voiceFiles(dir, voice) {
 
     const [source, { size_bytes: size, md5_digest: md5 }] = file
 
-    return {
-      url: `${HUB}/${PIPER_REPO}/resolve/${PIPER_REVISION}/${source}`,
-      out: path.join(dir, 'piper', name),
-      size,
-      md5,
-    }
+    return { path: `piper/${name}`, repo: PIPER_REPO, revision: PIPER_REVISION, file: source, size, ...(md5 ? { md5 } : {}) }
   })
 }
 
-async function sizeOf(file) {
-  try {
-    const info = await stat(file)
+// manifestOf is the files of models.json, by the path each is served
+// at, in a stable order. Two models may list the same file, but never
+// two different files at one path.
+export function manifestOf(files) {
+  const manifest = new Map()
 
-    return info.isFile() ? info.size : -1
-  } catch {
-    return -1
-  }
-}
-
-function sizeLabel(bytes) {
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`
-
-  return bytes >= 1e3 ? `${(bytes / 1e3).toFixed(0)} kB` : `${bytes} B`
-}
-
-// download streams a file to a temporary name beside it and renames it
-// into place, so a file that is there is a file that is whole.
-async function download(file) {
-  const name = path.basename(file.out)
-  const size = sizeLabel(file.size)
-
-  if ((await sizeOf(file.out)) === file.size) {
-    process.stderr.write(`${file.out} is already there, ${size}\n`)
-
-    return
-  }
-
-  await mkdir(path.dirname(file.out), { recursive: true })
-
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await downloadOnce(file, name, size)
-      return
-    } catch (err) {
-      const failure = new Error(`downloading ${file.url} to ${file.out} failed on attempt ${attempt} of ${DOWNLOAD_ATTEMPTS}: ${err.message}`, { cause: err })
-      if (attempt === DOWNLOAD_ATTEMPTS) throw failure
-      process.stderr.write(`${failure.message}; trying again\n`)
+  for (const { path: served, ...source } of files) {
+    const listed = manifest.get(served)
+    if (listed && JSON.stringify(listed) !== JSON.stringify(source)) {
+      throw new Error(`${served} is listed twice, from ${JSON.stringify(listed)} and from ${JSON.stringify(source)}`)
     }
+
+    manifest.set(served, source)
   }
+
+  return Object.fromEntries([...manifest.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 }
 
-async function downloadOnce(file, name, size) {
-  const response = await hubFetch(file.url)
-  if (!response.ok) throw new Error(`cannot download ${file.out}: ${response.status} from ${file.url}, wanted ${size}`)
-
-  const partial = `${file.out}.part`
-  const handle = await open(partial, 'w')
-  const hash = createHash(file.sha256 ? 'sha256' : 'md5')
-  let written = 0
-  let reported = 0
-
-  try {
-    for await (const chunk of response.body) {
-      await handle.write(chunk)
-      hash.update(chunk)
-      written += chunk.length
-
-      if (written - reported >= REPORT_BYTES) {
-        reported = written
-        process.stderr.write(`${(written / 1e6).toFixed(1)} MB of ${size} ${name}\n`)
-      }
-    }
-  } finally {
-    await handle.close()
-  }
-
-  if (written !== file.size) {
-    await rm(partial, { force: true })
-    throw new Error(`${file.url} sent ${sizeLabel(written)}, wanted ${size} in ${file.out}`)
-  }
-
-  const digest = hash.digest('hex')
-  const expected = file.sha256 ?? file.md5
-  if (expected && digest !== expected) {
-    await rm(partial, { force: true })
-    throw new Error(`${file.url} has ${file.sha256 ? 'sha256' : 'md5'} ${digest}, expected ${expected}`)
-  }
-
-  await rename(partial, file.out)
-  process.stderr.write(`${size} ${name} done\n`)
+function hubURL({ repo, revision, file }) {
+  return `${HUB}/${repo}/resolve/${revision}/${file}`
 }
 
-async function downloadAll(files) {
-  const queue = [...files]
-  const workers = Array.from({ length: Math.min(MAX_PARALLEL, queue.length) }, async () => {
-    while (queue.length > 0) await download(queue.shift())
-  })
+async function hubText(manifest, served) {
+  const file = manifest[served]
+  if (!file) throw new Error(`${served} is not in the manifest`)
 
-  await Promise.all(workers)
+  const response = await hubFetch(hubURL(file))
+  if (!response.ok) throw new Error(`cannot read ${hubURL(file)}: ${response.status} ${response.statusText}`)
+
+  return response.text()
 }
 
-async function warnUntranslatable(dir, model, languages, pairs) {
-  const config = JSON.parse(await readFile(path.join(dir, ...model.split('/'), 'config.json'), 'utf8'))
+async function warnUntranslatable(manifest, model, languages, pairs) {
+  const config = JSON.parse(await hubText(manifest, `${model}/config.json`))
   if (config.model_type !== 'm2m_100') return
 
-  const tokenizer = await readFile(path.join(dir, ...model.split('/'), 'tokenizer.json'), 'utf8')
+  const tokenizer = await hubText(manifest, `${model}/tokenizer.json`)
   const missing = languages.filter((code) => !tokenizer.includes(`"__${code}__"`))
   for (const code of missing) {
     const covered = Object.keys(pairs).filter((pair) => pair.split('-').includes(code))
@@ -573,18 +517,18 @@ async function main() {
   if (pairOption && pairLanguages.length < 2) throw new Error(`--pair-languages names ${pairLanguages.join(', ')}, which makes no pair`)
 
   const fallbackLanguages = {}
-  const paired = pairOption ? await pairModels(dir, pairLanguages, pairOption.dtype) : { pairs: [], files: [], skipped: [] }
+  const paired = pairOption ? await pairModels(pairLanguages, pairOption.dtype) : { pairs: [], files: [], skipped: [] }
   const pairs = Object.fromEntries(paired.pairs.map(({ pair, model }) => [pair, model]))
 
   const files = [
-    ...(await modelFiles(dir, asr.model, 'seq2seq', exportsFor(asr.dtype, fallback === null))),
-    ...(await modelFiles(dir, mt.model, mt.kind, exportsFor(mt.dtype, mt.kind === 'seq2seq'))),
+    ...(await modelFiles(asr.model, 'seq2seq', exportsFor(asr.dtype, fallback === null))),
+    ...(await modelFiles(mt.model, mt.kind, exportsFor(mt.dtype, mt.kind === 'seq2seq'))),
   ]
 
   if (fallback) {
-    files.push(...(await modelFiles(dir, fallback.model, 'seq2seq', exportsFor(fallback.dtype, true))))
+    files.push(...(await modelFiles(fallback.model, 'seq2seq', exportsFor(fallback.dtype, true))))
     for (const code of languages) {
-      const moonshine = await moonshineFor(dir, code, exportsFor(fallback.dtype, true))
+      const moonshine = await moonshineFor(code, exportsFor(fallback.dtype, true))
       if (!moonshine) continue
 
       fallbackLanguages[code] = moonshine.model
@@ -592,7 +536,7 @@ async function main() {
     }
   }
 
-  if (mt.fallback) files.push(...(await modelFiles(dir, mt.fallback.model, 'seq2seq', exportsFor(mt.fallback.dtype, true))))
+  if (mt.fallback) files.push(...(await modelFiles(mt.fallback.model, 'seq2seq', exportsFor(mt.fallback.dtype, true))))
 
   files.push(...paired.files)
 
@@ -604,20 +548,18 @@ async function main() {
     if (!voice) continue
 
     tts[code] = voice.key
-    files.push(...voiceFiles(dir, voice))
+    files.push(...voiceFiles(voice))
   }
 
-  const unique = [...new Map(files.map((file) => [file.out, file])).values()]
-  const total = unique.reduce((sum, file) => sum + file.size, 0)
-  process.stderr.write(`${unique.length} files, ${(total / 1e6).toFixed(0)} MB, into ${dir}\n`)
-
-  await downloadAll(unique)
+  const manifest = manifestOf(files)
+  const listed = Object.values(manifest)
+  const total = listed.reduce((sum, file) => sum + file.size, 0)
 
   const plain = mt.kind === 'seq2seq' ? mt.model : mt.fallback?.model
-  if (plain) await warnUntranslatable(dir, plain, languages, pairs)
+  if (plain) await warnUntranslatable(manifest, plain, languages, pairs)
   reportPairs(paired.pairs, paired.skipped, mt.model)
 
-  const models = {
+  const choices = {
     asr: {
       model: asr.model,
       dtype: asr.dtype,
@@ -635,14 +577,14 @@ async function main() {
     },
     tts,
   }
-  const text = `${JSON.stringify(models, null, 2)}\n`
   const modelsFile = path.join(dir, 'models.json')
   const partial = `${modelsFile}.part`
-  await writeFile(partial, text)
+  await mkdir(dir, { recursive: true })
+  await writeFile(partial, `${JSON.stringify({ ...choices, files: manifest }, null, 2)}\n`)
   await rename(partial, modelsFile)
 
-  process.stdout.write(`${modelsFile}\n${text}`)
-  process.stderr.write(`total ${(total / 1e6).toFixed(0)} MB in ${unique.length} files in ${dir}\n`)
+  process.stdout.write(`${modelsFile}\n${JSON.stringify(choices, null, 2)}\n`)
+  process.stderr.write(`${listed.length} files of ${(total / 1e6).toFixed(0)} MB in the manifest; the server fetches each from the Hub when a browser first asks for it\n`)
 }
 
 if (import.meta.main) {

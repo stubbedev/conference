@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { externalData, parseArgs, planPairs, retryAfterSeconds } from './fetch-speech-models.mjs'
+import { externalData, manifestOf, parseArgs, planPairs, retryAfterSeconds, treeFiles, voiceFiles } from './fetch-speech-models.mjs'
 
 test('pair languages are their own list beside every language', () => {
   const options = parseArgs(['/srv/models', '--languages=all', '--pair-languages=en, de,da,en', '--pair-dtype=q4'])
@@ -97,4 +97,59 @@ test('the translator is TranslateGemma, falling back to m2m100', () => {
 
 test('an encoder-decoder translator needs no fallback', () => {
   assert.equal(parseArgs(['/srv/models', '--mt-kind=seq2seq']).mt.fallback, null)
+})
+
+const REVISION = '0123456789abcdef0123456789abcdef01234567'
+
+test('a model lists its metadata and every export it has, served under its id', () => {
+  const listing = [
+    { type: 'file', path: 'config.json', size: 2 },
+    { type: 'file', path: 'tokenizer.json', size: 30 },
+    { type: 'file', path: 'README.md', size: 9 },
+    { type: 'directory', path: 'onnx', size: 0 },
+    { type: 'file', path: 'onnx/model_q4f16.onnx', size: 400, lfs: { oid: 'ab'.repeat(32), size: 400 } },
+    { type: 'file', path: 'onnx/model_q4f16.onnx_data', size: 900, lfs: { oid: 'cd'.repeat(32), size: 900 } },
+    { type: 'file', path: 'onnx/model_quantized.onnx', size: 800, lfs: { oid: 'ef'.repeat(32), size: 800 } },
+  ]
+
+  const files = treeFiles('owner/model', 'llm', ['q4f16'], REVISION, listing, 'tree')
+
+  assert.deepEqual(files, [
+    { path: 'owner/model/config.json', repo: 'owner/model', revision: REVISION, file: 'config.json', size: 2 },
+    { path: 'owner/model/tokenizer.json', repo: 'owner/model', revision: REVISION, file: 'tokenizer.json', size: 30 },
+    { path: 'owner/model/onnx/model_q4f16.onnx', repo: 'owner/model', revision: REVISION, file: 'onnx/model_q4f16.onnx', size: 400, sha256: 'ab'.repeat(32) },
+    { path: 'owner/model/onnx/model_q4f16.onnx_data', repo: 'owner/model', revision: REVISION, file: 'onnx/model_q4f16.onnx_data', size: 900, sha256: 'cd'.repeat(32) },
+  ])
+})
+
+test('a model without the export asked for is refused by name', () => {
+  const listing = [{ type: 'file', path: 'config.json', size: 2 }]
+
+  assert.throws(() => treeFiles('owner/model', 'llm', ['q4'], REVISION, listing, 'tree'), /owner\/model has no onnx\/model_q4\.onnx/)
+})
+
+test('a voice is served from piper/ under its own name, with its MD5', () => {
+  const voice = {
+    key: 'en_US-lessac-medium',
+    files: {
+      'en/en_US/lessac/medium/en_US-lessac-medium.onnx': { size_bytes: 63, md5_digest: 'aa'.repeat(16) },
+      'en/en_US/lessac/medium/en_US-lessac-medium.onnx.json': { size_bytes: 5, md5_digest: 'bb'.repeat(16) },
+      'en/en_US/lessac/medium/MODEL_CARD': { size_bytes: 1, md5_digest: 'cc'.repeat(16) },
+    },
+  }
+
+  assert.deepEqual(voiceFiles(voice).map(({ path, file, size, md5, repo }) => ({ path, file, size, md5, repo })), [
+    { path: 'piper/en_US-lessac-medium.onnx', file: 'en/en_US/lessac/medium/en_US-lessac-medium.onnx', size: 63, md5: 'aa'.repeat(16), repo: 'rhasspy/piper-voices' },
+    { path: 'piper/en_US-lessac-medium.onnx.json', file: 'en/en_US/lessac/medium/en_US-lessac-medium.onnx.json', size: 5, md5: 'bb'.repeat(16), repo: 'rhasspy/piper-voices' },
+  ])
+})
+
+test('the manifest lists each file once by the path it is served at, in order', () => {
+  const file = (path, size) => ({ path, repo: 'owner/model', revision: REVISION, file: path.slice('owner/model/'.length), size })
+
+  const manifest = manifestOf([file('owner/model/onnx/b.onnx', 2), file('owner/model/config.json', 1), file('owner/model/onnx/b.onnx', 2)])
+
+  assert.deepEqual(Object.keys(manifest), ['owner/model/config.json', 'owner/model/onnx/b.onnx'])
+  assert.deepEqual(manifest['owner/model/config.json'], { repo: 'owner/model', revision: REVISION, file: 'config.json', size: 1 })
+  assert.throws(() => manifestOf([file('owner/model/config.json', 1), file('owner/model/config.json', 2)]), /listed twice/)
 })
