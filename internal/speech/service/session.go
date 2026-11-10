@@ -249,7 +249,7 @@ func (s *session) prepare(ctx context.Context, current *speaker, audio []int16, 
 		return
 	}
 
-	prepared := &reference{wav: encoded, text: text}
+	prepared := &reference{wav: encoded, text: text, stock: closestStock(audio)}
 	current.prepared.Store(prepared)
 	s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceReady, Seconds: seconds(len(audio))})
 
@@ -433,7 +433,7 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 		if unconverted, ok := errors.AsType[*unconvertedError](err); ok {
 			spoken, err = unconverted.stock, nil
 		} else {
-			spoken, err = s.engines.speak(ctx, translated, target, job.voice, nil)
+			spoken, err = s.engines.speak(ctx, translated, target, job.own.stock, nil)
 		}
 	}
 

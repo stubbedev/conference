@@ -122,7 +122,7 @@ func TestOwnVoiceFallsBackToTheStockVoice(t *testing.T) {
 	opened, out := newOwnVoiceSession(t, "true", engines)
 
 	job := sentence(t, opened, voiceOwn, 1)
-	job.own = &reference{wav: []byte("RIFF"), text: "hallo"}
+	job.own = &reference{wav: []byte("RIFF"), text: "hallo", stock: voiceFemale}
 
 	opened.translate(t.Context(), opened.speaker, job, mustLanguage(t, opened.settings, "en"), "hallo", nil)
 
@@ -170,7 +170,7 @@ func TestOwnVoiceRequest(t *testing.T) {
 	api, seen := fakeAPI(t)
 	settings := openAISettings(t, api)
 	settings.voiceCloning = true
-	own := &reference{wav: []byte("RIFFwave"), text: sampleText}
+	own := &reference{wav: []byte("RIFFwave"), text: sampleText, stock: voiceFemale}
 
 	_, err := newHTTPEngines(settings).speak(t.Context(), "hallo welt", mustLanguage(t, settings, "de"), voiceOwn, own)
 	if err != nil {
@@ -344,7 +344,7 @@ func TestConvertedVoiceRequests(t *testing.T) {
 
 	api, seen := fakeAPI(t)
 	settings := convertingSettings(t, api, api.URL+"/v1")
-	own := &reference{wav: []byte("RIFFwave"), text: sampleText}
+	own := &reference{wav: []byte("RIFFwave"), text: sampleText, stock: voiceFemale}
 
 	spoken, err := newHTTPEngines(settings).speak(t.Context(), helloGerman, mustLanguage(t, settings, "de"), voiceOwn, own)
 	if err != nil {
@@ -390,7 +390,7 @@ func TestFailedConversionKeepsTheStockVoice(t *testing.T) {
 	settings := convertingSettings(t, api, down.URL)
 
 	_, err := newHTTPEngines(settings).speak(t.Context(), helloGerman, mustLanguage(t, settings, "de"), voiceOwn,
-		&reference{wav: []byte("RIFF"), text: "hej"})
+		&reference{wav: []byte("RIFF"), text: "hej", stock: voiceFemale})
 
 	unconverted, ok := errors.AsType[*unconvertedError](err)
 	if !ok || unconverted.stock.rate != voiceTestRate {
@@ -404,7 +404,7 @@ func TestFailedConversionKeepsTheStockVoice(t *testing.T) {
 	opened, out := newOwnVoiceSession(t, "true", engines)
 
 	job := sentence(t, opened, voiceOwn, 1)
-	job.own = &reference{wav: []byte("RIFF"), text: "hallo"}
+	job.own = &reference{wav: []byte("RIFF"), text: "hallo", stock: voiceFemale}
 
 	opened.translate(t.Context(), opened.speaker, job, mustLanguage(t, opened.settings, "en"), "hallo", nil)
 
@@ -497,7 +497,7 @@ func TestConversionGetsAWellFormedWAV(t *testing.T) {
 	settings.voice.endpoint = mustURL(t, stock.URL)
 
 	_, err := newHTTPEngines(settings).speak(t.Context(), helloGerman, mustLanguage(t, settings, "de"), voiceOwn,
-		&reference{wav: []byte("RIFF"), text: sampleText})
+		&reference{wav: []byte("RIFF"), text: sampleText, stock: voiceFemale})
 	if err != nil {
 		t.Fatalf("speak: %v", err)
 	}

@@ -51,6 +51,19 @@ type speechEngines interface {
 type reference struct {
 	wav  []byte
 	text string
+	// stock is the stock voice nearer the speaker's pitch: a conversion
+	// starts from it, and a failed own voice falls back to it.
+	stock voiceChoice
+}
+
+// stockFor is the stock voice to speak in instead of choice: the one
+// nearer the speaker's pitch when there is a recording.
+func (r *reference) stockFor(choice voiceChoice) voiceChoice {
+	if r == nil {
+		return choice
+	}
+
+	return r.stock
 }
 
 // voiceRef is how the voice engine takes a reference recording inline
@@ -278,7 +291,7 @@ func (e *httpEngines) speak(ctx context.Context, text string, lang language, cho
 		request.ReferenceText = own.text
 		request.Language = lang.Code
 	} else {
-		name, err := e.stockVoice(lang, choice)
+		name, err := e.stockVoice(lang, own.stockFor(choice))
 		if err != nil {
 			return speech{}, err
 		}
