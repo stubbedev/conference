@@ -56,7 +56,8 @@ its default.
 | Setting | Default | |
 |---|---|---|
 | `SPEECH_RUNTIME` | `server` | `server` runs the engines on this server, `browser` runs them in every member's browser |
-| `SPEECH_MODEL_DIR`, `SPEECH_MODELS_FILE` | none | The models the browsers load, and the JSON that names them; both are required in browser mode |
+| `SPEECH_MODEL_DIR`, `SPEECH_MODELS_FILE` | none | The writable cache of the models the browsers load, and the JSON that names them and lists their files; both are required in browser mode |
+| `SPEECH_MODEL_CACHE_MAX` | `15GB` | How much of the model files the cache keeps (`kB`, `MB`, `GB`, `TB`, `KiB`, `MiB`, `GiB`, `TiB`, or bytes) |
 | `TRANSCRIBE_URL`, `TRANSCRIBE_API_KEY`, `TRANSCRIBE_MODEL` | OpenAI, `OPENAI_API_KEY`, none | Transcription: an OpenAI-compatible `/audio/transcriptions` |
 | `TRANSCRIBE_RESPONSE_FORMAT` | `json` | `verbose_json` drops what Whisper marks as non-speech (below) |
 | `INTERIM_MS` | 600, or 0 for an external transcription engine | How often to subtitle a sentence still being spoken; 0 turns it off |
@@ -113,8 +114,9 @@ no longer uses `TRANSCRIBE_*`, `TRANSLATE_*` or `VOICE_*`, and nothing
 leaves the member's machine.
 
 The operator gives two settings: `SPEECH_MODEL_DIR`, the directory the
-browsers load from, and `SPEECH_MODELS_FILE`, a JSON file naming the
-exports and the voice for each language:
+server caches the model files in, and `SPEECH_MODELS_FILE`, a JSON file
+naming the exports and the voice for each language, with a manifest of
+their files under `files` (left out below):
 
 ```json
 {
@@ -175,12 +177,39 @@ without a usable GPU runs also needs its 8-bit export (`q8`, the
 transcription fallback, and the transcription model itself when there is
 no fallback. No single file may be larger than a browser can load, 2 GiB;
 a large model splits its weights into `_data`, `_data_1` and onwards.
-The server checks every file at start, names the one that is missing or
-too large, and tells the browsers what each export on disk weighs.
+The server checks at start that the manifest lists every file the
+choices need, names the one that is missing or too large, and tells the
+browsers what each listed export weighs.
+
+The manifest gives each file the path it is served at, its repository,
+the commit to fetch it at, its size and, where the Hub gives one, its
+SHA-256 (or a Piper voice's MD5). The model directory is a cache of those
+files, not a copy of all of them: the first time a browser asks for a
+file, the server fetches it from `huggingface.co` at that commit,
+streams it to the browser while it writes it to a temporary file, and
+keeps it only once its size and digest match the manifest, so a file that
+broke off is never served. Browsers that ask for the same file meanwhile
+share that one download. A participant's browser only ever talks to this
+server, so no participant's address reaches Hugging Face. A path the
+manifest does not list is a 404; the server is no open proxy. A download
+that fails, stalls for 30 seconds or cannot connect within 10 seconds
+fails the browser's request, which reports it, and nothing is kept; a
+rate-limited Hub is waited for as long as its `Retry-After` asks, at
+most 330 seconds, four attempts in all.
+
+`SPEECH_MODEL_CACHE_MAX` (15 GB by default) bounds the files the cache
+keeps: when a new one does not fit, the one used longest ago that no
+browser is reading is deleted. A limit smaller than the largest file in
+the manifest stops the server at start, as does a model directory it
+cannot write. At start the server takes over the files already in the
+directory, so a directory filled by an earlier version is not fetched
+again: a file of the size the manifest gives is kept, one of another size
+is deleted, and anything the manifest does not list, `models.json`
+among it, is left alone and never evicted.
 
 A browser uses the GPU whenever it can. It tries each model on the GPU in
 the export `models.json` names, then in every other export of the ladder
-in `web/src/lib/speech/runtime.ts` that is on disk, skipping those that
+in `web/src/lib/speech/runtime.ts` that the manifest lists, skipping those that
 need 16-bit floats on a GPU without `shader-f16`. An export counts as
 working only once it has run a real inference, and each one that fails is
 shown to the member. Transcription walks the ladder for its larger model
@@ -205,11 +234,14 @@ m2m100_418M at q4f16 about 740 MB, Qwen2.5-1.5B-Instruct at q4f16 about 1.2 GB, 
 pair about 150 MB, and a Piper medium voice about 60 MB per language. A
 browser downloads what it uses once and caches it from then on.
 
-`node web/scripts/fetch-speech-models.mjs` fills that directory without
+`node web/scripts/fetch-speech-models.mjs` sets that directory up without
 the operator looking up a file name: it reads each model's file list from
-the Hugging Face API, downloads the exports a browser loads, picks a Piper
-voice for every language it is given, and writes `models.json` for
-`SPEECH_MODELS_FILE`. Mount the directory into the container and point
+the Hugging Face API, lists the exports a browser loads, picks a Piper
+voice for every language it is given, and writes `models.json`, with the
+manifest, for `SPEECH_MODELS_FILE`. It downloads no model; files already
+in the directory stay and are used. Mount the directory into the
+container writable, since the server caches the files in it (the image
+runs as uid 65532, so `chown -R 65532` the host directory), and point
 both settings at it.
 
 ```sh
@@ -225,10 +257,10 @@ node web/scripts/fetch-speech-models.mjs /srv/speech-models --languages=en,de,da
 
 `--asr`, `--asr-dtype`, `--asr-fallback` (or `none`), `--asr-fallback-dtype`,
 `--mt`, `--mt-dtype` and `--pair-dtype` choose other models and exports.
-The default models are pinned to a commit, so each run downloads the same
-bytes; a model the script does not pin, such as a pair, is fetched at the
-commit its repository is on, which the script names. A file already
-in place with the right size is left alone.
+The default models are pinned to a commit, so each run lists the same
+bytes; a model the script does not pin, such as a pair, is listed at the
+commit its repository is on, which the script names, and the server
+fetches it at that commit until the script is run again.
 
 OPUS-MT pairs are the default: a pair model in both directions between
 each two of `--languages`. `--pair-languages` narrows them to a subset, or
@@ -241,7 +273,8 @@ Ti without `shader-f16` its q4 export translated a sentence in about
 the GPU, so a browser without one translates the pairs and m2m100 on the
 CPU. Every model also comes with whichever exports of the GPU ladder its
 repository has and a browser can hold (4 GiB in all), which is most of
-the disk space. A pair is the transformers.js export of
+the manifest; with every language and pairs between ten of them it lists
+about 52 GB, of which the cache only holds what browsers ask for. A pair is the transformers.js export of
 Helsinki-NLP's OPUS-MT model, `Xenova/opus-mt-<source>-<target>` or
 else `onnx-community/opus-mt-<source>-<target>`. A pair with neither, or
 whose repository lacks the `--pair-dtype` or 8-bit export, is left out of

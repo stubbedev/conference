@@ -27,9 +27,11 @@ web:
 speech-files:
     cd web && node scripts/vendor-speech.mjs
 
-# Download the models and Piper voices the browser speech engines load
-# into DIR, with a models.json naming them (see
-# docs/live-translation.md); option: languages, as in
+# Write DIR/models.json, naming the models and Piper voices the browser
+# speech engines load and listing their files, which the server fetches
+# from the Hugging Face Hub and caches in DIR as browsers ask for them
+# (see docs/live-translation.md); nothing is downloaded here. Option:
+# languages, as in
 # `just speech-models /srv/speech-models en,de,da`. OPUS-MT pair models
 # cover those languages unless a third argument narrows them, or is none:
 # `just speech-models /srv/speech-models all en,de,da`.
@@ -157,8 +159,9 @@ e2e-translate-browser:
 e2e-speech:
     node web/e2e/speech-vad.mjs
 
-# The browser engines on the real models in DIR, which
-# `just speech-models` fills; needs a built UI.
+# The browser engines on the real models, served by a freshly built
+# server from DIR, whose models.json `just speech-models` writes; the
+# server caches the files it fetches in DIR.
 e2e-speech-engines dir:
     SPEECH_MODEL_DIR={{dir}} node web/e2e/speech-engines.mjs
 

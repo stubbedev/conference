@@ -59,13 +59,16 @@ services:
       SPEECH_RUNTIME: ${SPEECH_RUNTIME:-server}
       SPEECH_MODEL_DIR: ${SPEECH_MODEL_DIR:-/models}
       SPEECH_MODELS_FILE: ${SPEECH_MODELS_FILE:-/models/models.json}
+      SPEECH_MODEL_CACHE_MAX: ${SPEECH_MODEL_CACHE_MAX:-}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
       - data:/data
-      # Browser mode (SPEECH_RUNTIME=browser): a model directory filled on
-      # the host, e.g. ./models, which the browsers load from.
-      # - ./models:/models:ro
+      # Browser mode (SPEECH_RUNTIME=browser): the directory holding the
+      # models.json fetch-speech-models.mjs writes, e.g. ./models, where
+      # the server caches the model files the browsers load; writable by
+      # the container's user, uid 65532 (chown -R 65532 ./models).
+      # - ./models:/models
     ports:
       - "5000:5000/udp"
       - "3478:3478/udp"

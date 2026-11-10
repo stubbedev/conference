@@ -1,27 +1,55 @@
 // The browser speech engines on real models: a headless Chrome without a
-// GPU loads the built workers and runs each on the models in
-// SPEECH_MODEL_DIR, the directory scripts/fetch-speech-models.mjs fills.
+// GPU loads the built workers and runs each on the models a freshly built
+// meeting server serves from SPEECH_MODEL_DIR, whose models.json
+// scripts/fetch-speech-models.mjs writes; the server fetches each file
+// from the Hugging Face Hub the first time it is asked for and caches it
+// there.
 //
 //   SPEECH_MODEL_DIR=… [GPU=1] node web/e2e/speech-engines.mjs
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { evalJs, findChrome, launchChrome, sleep, stopProcess } from './browser.mjs'
-import { builtWorker, hostedSizes, serveSpeechPage, workerProbe } from './speech-page.mjs'
+import { builtWorker, serveSpeechPage, workerProbe } from './speech-page.mjs'
+import { buildServer, shutdown, startServer } from './translate-stack.mjs'
 
 const models = process.env.SPEECH_MODEL_DIR
 if (!models) {
-  console.error('SPEECH_MODEL_DIR is not set: point it at a directory fetch-speech-models.mjs filled')
+  console.error('SPEECH_MODEL_DIR is not set: point it at a directory whose models.json fetch-speech-models.mjs wrote')
   process.exit(2)
 }
 
-const chosen = JSON.parse(readFileSync(join(models, 'models.json'), 'utf8'))
-const sizes = hostedSizes(models)
 const chrome = process.env.CHROME ?? findChrome()
 const TIMEOUT_MS = 600_000
 const dir = mkdtempSync(join(tmpdir(), 'speech-engines-'))
 const failures = []
+
+async function modelServer() {
+  const base = await startServer(buildServer(dir), dir, {
+    SPEECH_RUNTIME: 'browser',
+    SPEECH_MODEL_DIR: resolve(models),
+    SPEECH_MODELS_FILE: resolve(models, 'models.json'),
+  })
+  const { translation } = await (await fetch(`${base}/api/config`)).json()
+  if (!translation.available) throw new Error(`the meeting server cannot serve the models: ${translation.reason}`)
+  return { base, chosen: translation.models }
+}
+
+async function finish(code) {
+  rmSync(dir, { recursive: true, force: true })
+  await shutdown(code)
+}
+
+let served
+try {
+  served = await modelServer()
+} catch (err) {
+  console.error(`\nSPEECH ENGINES E2E FAILED\n  - setup: ${err.message}`)
+  await finish(1)
+}
+const { base: modelBase, chosen } = served
+const { sizes } = chosen
 
 function check(label, condition, detail) {
   if (!condition) failures.push(`${label}: ${detail}`)
@@ -34,9 +62,9 @@ const ttsProbe = workerProbe(
   `
   const { ask } = workers.tts
   const runtime = await fetchRuntime()
-  await ask({ type: 'init', gpu: true, base: '/speech/', runtime, voices:${JSON.stringify(chosen.tts)} })
+  await ask({ type: 'init', gpu: true, base: ${JSON.stringify(chosen.base)}, runtime, voices:${JSON.stringify(chosen.voices)} })
   const spoken = {}
-  for (const lang of ${JSON.stringify(Object.keys(chosen.tts))}) {
+  for (const lang of ${JSON.stringify(Object.keys(chosen.voices))}) {
     const times = []
     let seconds = 0
     try {
@@ -71,7 +99,7 @@ const asrProbe = workerProbe(
   const heard = {}
   for (const [lang, url] of Object.entries(${JSON.stringify(RECORDINGS)})) {
     const audio = (await readWav(url)).slice(0, ${SECONDS} * 16000)
-    if (Object.keys(heard).length === 0) await ask({ type: 'init', gpu: true, base: '/speech/', runtime: await fetchRuntime(), asr:${JSON.stringify(chosen.asr)}, sizes: ${JSON.stringify(sizes)}, lang })
+    if (Object.keys(heard).length === 0) await ask({ type: 'init', gpu: true, base: ${JSON.stringify(chosen.base)}, runtime: await fetchRuntime(), asr:${JSON.stringify(chosen.asr)}, sizes: ${JSON.stringify(sizes)}, lang })
     const started = performance.now()
     const { text } = await ask({ type: 'transcribe', audio, lang })
     heard[lang] = { text, ms: Math.round(performance.now() - started) }
@@ -93,7 +121,7 @@ const mtProbe = workerProbe(
   { mt: builtWorker('mt') },
   `
   const { ask } = workers.mt
-  const { level } = await ask({ type: 'init', gpu: true, base: '/speech/', runtime: await fetchRuntime(), mt:${JSON.stringify(chosen.mt)}, sizes: ${JSON.stringify(sizes)} })
+  const { level } = await ask({ type: 'init', gpu: true, base: ${JSON.stringify(chosen.base)}, runtime: await fetchRuntime(), mt:${JSON.stringify(chosen.mt)}, sizes: ${JSON.stringify(sizes)} })
   const translated = {}
   for (const pair of ${JSON.stringify([...pairs.slice(0, 1), multilingual])}) {
     const [source, target] = pair.split('-')
@@ -113,7 +141,7 @@ async function probe(browser, label, expression) {
 }
 
 async function main() {
-  const server = await serveSpeechPage({ models })
+  const server = await serveSpeechPage({ modelServer: modelBase })
   const browser = await launchChrome(chrome, 0, dir, [], { gpu: process.env.GPU === '1' })
   try {
     await browser.cdp.send('Page.navigate', { url: `${server.origin}/` }, browser.sessionId)
@@ -143,19 +171,15 @@ async function main() {
   }
 }
 
-let code = 0
 try {
   await main()
 } catch (err) {
   failures.push(`setup: ${err.message}`)
-} finally {
-  rmSync(dir, { recursive: true, force: true })
 }
 if (failures.length) {
   console.error('\nSPEECH ENGINES E2E FAILED')
   for (const failure of failures) console.error(`  - ${failure}`)
-  code = 1
 } else {
   console.log('\nSPEECH ENGINES E2E OK: the browser engines run on the real models')
 }
-process.exit(code)
+await finish(failures.length ? 1 : 0)
