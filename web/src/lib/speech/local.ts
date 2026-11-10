@@ -410,7 +410,7 @@ export class LocalTranslator implements Translator {
       awaited.arrived = true
       if (line.final) this.awaited.delete(line.segId)
     }
-    this.show(line, false)
+    this.show(line)
   }
 
   private translateFor(caption: CaptionLine, target: string, earlier: readonly string[], share: boolean): void {
@@ -462,12 +462,12 @@ export class LocalTranslator implements Translator {
     const line: Translation = { speaker: caption.speaker, segId: caption.segId, sourceLang: caption.lang, lang: target, text, final: caption.final }
     const self = this.client?.memberId
     if (share && self) void this.client?.sendCaption({ k: 'translation', by: self, ...line })
-    if (target === this.selfPrefs.lang) this.show(line, true)
+    if (target === this.selfPrefs.lang) this.show({ k: 'caption', ...line })
   }
 
-  private show(line: Translation, own: boolean): void {
-    if (!own && !line.final && this.spoken.has(line.segId)) return
-    this.events.onCaption({ k: 'caption', ...line })
+  private show(line: RoomMessage): void {
+    if (line.k === 'translation' && !line.final && this.spoken.has(line.segId)) return
+    this.events.onCaption(line)
     if (line.final && this.selfPrefs.voice) void this.speak(line.speaker, line.segId, line.text)
   }
 

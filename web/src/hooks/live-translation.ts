@@ -15,7 +15,7 @@ import { translationLang } from '@/lib/track-kind'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
-import { isVoiceChoice, type CaptionLine, type LangPrefs, type TranslatorStatus } from '@/lib/translate/types'
+import { isVoiceChoice, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
 
 const CAPTION_HOLD_MS = 5000
 const INTERIM_HOLD_MS = 10_000
@@ -41,10 +41,11 @@ function translationUnknown(err: unknown): TranslationConfig {
 }
 
 export interface ShownCaption {
-  segId: string
   text: string
   final: boolean
   at: number
+  /** The member who put the line into this member's language, when another member than its speaker did. */
+  translatedBy: string | null
 }
 
 function storedLangChoice(): boolean {
@@ -138,16 +139,16 @@ export function useLiveTranslation(
   }, [translation, langPrefs, setLangPrefs])
 
   const handleRoomCaption = useCallback(
-    (caption: CaptionLine) => {
+    (line: RoomMessage) => {
       const prefs = langPrefsRef.current
-      if (caption.lang !== prefs.lang || !prefs.subtitles) return
+      if (line.lang !== prefs.lang || !prefs.subtitles) return
       const shown: ShownCaption = {
-        segId: caption.segId,
-        text: caption.text,
-        final: caption.final,
+        text: line.text,
+        final: line.final,
         at: Date.now(),
+        translatedBy: line.k === 'translation' && line.by !== line.speaker ? line.by : null,
       }
-      setCaptions((prev) => ({ ...prev, [caption.speaker]: shown }))
+      setCaptions((prev) => ({ ...prev, [line.speaker]: shown }))
     },
     [langPrefsRef],
   )

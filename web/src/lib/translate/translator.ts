@@ -3,11 +3,14 @@
 // this member's own browser.
 
 import type { RoomClient } from '@/lib/sfu'
-import type { CaptionLine, LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
+import type { LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
 
 export interface TranslatorEvents {
-  /** A caption for this member, as this member gets it. */
-  onCaption: (caption: CaptionLine) => void
+  /**
+   * A line for this member to read, as this member gets it: a caption, or
+   * the translation another member made of one.
+   */
+  onCaption: (line: RoomMessage) => void
   /** Transcription or translation failed; this member's speech is not translated. */
   onFailure: (reason: string) => void
   /** The bridge's state and anything that keeps speech from being translated. */
