@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { Contrast, Loader2, RotateCcw, ShieldCheck } from 'lucide-react'
 
-import { FALLBACK_ASPECT_RATIO } from '@/hooks/media'
+import { blurToggleLabel, FALLBACK_ASPECT_RATIO } from '@/hooks/media'
 import { Button } from '@/components/ui/button'
 import { DeviceToggle } from '@/components/DeviceToggle'
 import { Disclosure } from '@/components/Disclosure'
@@ -115,7 +115,7 @@ export function Prejoin({
                   className="size-12 rounded-full [&_svg]:size-5"
                 />
                 {canBlur && onToggleBlur && (
-                  <Hint label={blur ? 'Turn off background blur' : 'Blur background'}>
+                  <Hint label={blurToggleLabel(blur)}>
                     <Button
                       variant={blur ? 'default' : 'secondary'}
                       size="icon"

@@ -89,6 +89,10 @@ export const DEVICE_LABELS: Record<DeviceKind, string> = {
   speaker: 'Speaker',
 }
 
+export function blurToggleLabel(blur: boolean): string {
+  return blur ? 'Turn off background blur' : 'Blur background'
+}
+
 // Mobile browsers have device lists full of entries the page cannot
 // actually select (Android exposes communication routes as inputs and has
 // no real output switching), so device pickers are desktop-only there.

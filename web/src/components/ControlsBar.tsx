@@ -18,6 +18,7 @@ import { DeviceToggle } from '@/components/DeviceToggle'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Hint } from '@/components/Hint'
 import { MeetingClock } from '@/components/MeetingClock'
+import { blurToggleLabel } from '@/hooks/media'
 import { cn } from '@/lib/utils'
 
 interface ControlsBarProps {
@@ -92,6 +93,7 @@ export const ControlsBar = memo(function ControlsBar({
   const translateLabel = translating ? 'Stop live translation' : 'Start live translation'
   const shareLabel = sharing ? 'Stop sharing' : 'Share your screen'
   const recordLabel = recording ? 'Stop recording' : 'Record the call'
+  const blurLabel = blurToggleLabel(blur)
   const chatName = chatOpen ? 'Close chat' : 'Open chat'
   const [revealed, setRevealed] = useState(true)
   const visible = !fullscreen || revealed
@@ -210,10 +212,10 @@ export const ControlsBar = memo(function ControlsBar({
               <DropdownMenuItem
                 onSelect={onBlur}
                 disabled={!cam || Boolean(blurUnavailable)}
-                aria-label={blur ? 'Turn off background blur' : 'Blur background'}
+                aria-label={blurLabel}
               >
                 <Contrast />
-                {blurUnavailable || (blur ? 'Turn off background blur' : 'Blur background')}
+                {blurUnavailable || blurLabel}
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onSelect={onToggleFullscreen} aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
