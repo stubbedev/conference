@@ -109,9 +109,7 @@ export class LocalTranslator implements Translator {
     this.client = client
     client.setTranslates(this.translates)
     this.playbackContext ??= new AudioContext()
-    this.player ??= new VoicePlayer(this.playbackContext, (speaker, track) => {
-      this.events.onStream?.(speaker, this.selfPrefs.lang, track)
-    })
+    this.player ??= new VoicePlayer(this.playbackContext, this.events.onStream)
 
     this.unsubscribe = [
       client.on('lang', () => {

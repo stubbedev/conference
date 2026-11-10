@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { heardThrough, layoutLayer, type Tile, type Translations } from './tiles.ts'
+import { heardThrough, layoutLayer, withLocalVoices, withVoice, type Tile, type Translations } from './tiles.ts'
 import { CAMERA_KIND, SCREEN_KIND } from './track-kind.ts'
 
 const screen: Pick<Tile, 'key' | 'kind'> = { key: 'bob:screen', kind: SCREEN_KIND }
@@ -67,4 +67,25 @@ test('a member keeps their own voice until a translated one exists in the listen
 
 test('a share keeps its own sound while its member is translated', () => {
   assert.deepEqual(heardThrough(bobScreen, translations), HEARD_OWN)
+})
+
+test('a member’s translated voice in one language takes the place of the one it had and of no other', () => {
+  const voices = withVoice(withVoice({ bob: { fr: 'French' } }, 'bob', 'en', 'first'), 'bob', 'en', 'second')
+  assert.deepEqual(voices, { bob: { fr: 'French', en: 'second' } })
+})
+
+test('a voice the listener’s own engines make is heard in the listener’s language, whichever that is by now', () => {
+  const local = { bob: TRANSLATION }
+  const none = { ...translations, voices: {} }
+
+  for (const lang of ['en', 'fr']) {
+    const heard = heardThrough(bobCamera, { ...none, lang, voices: withLocalVoices(none.voices, local, lang) })
+    assert.deepEqual(heard, { through: 'translation', stream: TRANSLATION })
+  }
+})
+
+test('voices made here are added to the published ones, never in their place', () => {
+  const published = { alice: { en: 'published' } }
+  assert.deepEqual(withLocalVoices(published, { bob: TRANSLATION }, 'en'), { alice: { en: 'published' }, bob: { en: TRANSLATION } })
+  assert.equal(withLocalVoices(published, {}, 'en'), published)
 })
