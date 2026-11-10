@@ -285,7 +285,10 @@ export function useLiveTranslation(
   const listenLangSet = useCallback(
     (client: RoomClient) =>
       client.on('lang-set', ({ from, lang }) => {
-        if (!translationRef.current.languages.some((language) => language.code === lang)) return
+        if (!translationRef.current.languages.some((language) => language.code === lang)) {
+          console.warn(`live translation: ${from} set a language this server does not offer, which is ignored: ${lang}`)
+          return
+        }
         langChosenRef.current = true
         setLangPrefs((prefs) => ({ ...prefs, lang }))
         setCaptions({})

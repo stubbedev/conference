@@ -51,7 +51,7 @@ import {
   type TileKind,
   type TrackKind,
 } from '@/lib/track-kind'
-import { announcement, parseRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
+import { parseAnnouncement, parseLanguageSet, parseRoomMessage, type LangAnnouncement, type LangPrefs, type LanguageSet, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -769,7 +769,8 @@ export class RoomClient {
 
   /** Sets another member's live-translation language (host only); sealed like their own. */
   setMemberLanguage(target: string, lang: string): Promise<void> {
-    return this.sendSealed({ type: 'moderate', target, action: 'lang' }, JSON.stringify({ lang }))
+    const set: LanguageSet = { lang }
+    return this.sendSealed({ type: 'moderate', target, action: 'lang' }, JSON.stringify(set))
   }
 
   // announceRecording claims (or releases) the room's recording badge.
@@ -820,7 +821,8 @@ export class RoomClient {
 
   private async sendLang(): Promise<void> {
     if (!this.langPrefs) return
-    await this.sendSealed({ type: 'lang' }, JSON.stringify({ ...this.langPrefs, translates: this.translates }))
+    const announcement: LangAnnouncement = { ...this.langPrefs, translates: this.translates }
+    await this.sendSealed({ type: 'lang' }, JSON.stringify(announcement))
   }
 
   private sendState(): void {
@@ -1005,12 +1007,15 @@ export class RoomClient {
         if (msg.from) this.emit('recording', { from: msg.from, on: msg.on ?? false })
         return
       case 'lang': {
-        const opened = await this.openSealedJSON(msg, 'a language announcement')
-        const prefs = announcement(opened?.value)
-        if (opened && prefs) {
-          this.memberLangs.set(opened.from, prefs)
-          this.emit('lang', { from: opened.from, prefs })
-        }
+        const what = 'a language announcement'
+        const opened = await this.openSealedJSON(msg, what)
+        if (!opened) return
+
+        const { from } = opened
+        const prefs = this.read(what, from, parseAnnouncement(opened.value))
+        if (!prefs) return
+        this.memberLangs.set(from, prefs)
+        this.emit('lang', { from, prefs })
         return
       }
       case 'caption': {
@@ -1034,9 +1039,13 @@ export class RoomClient {
         if (action === 'mute' || action === 'cam' || action === 'screen') {
           this.emit('forced', { action })
         } else if (action === 'lang') {
-          const opened = await this.openSealedJSON(msg, 'a language set by a host')
-          const lang = (opened?.value as { lang?: unknown } | undefined)?.lang
-          if (opened && typeof lang === 'string') this.emit('lang-set', { from: opened.from, lang })
+          const what = 'a language set by a host'
+          const opened = await this.openSealedJSON(msg, what)
+          if (!opened) return
+
+          const { from } = opened
+          const set = this.read(what, from, parseLanguageSet(opened.value))
+          if (set) this.emit('lang-set', { from, lang: set.lang })
         }
         return
       }

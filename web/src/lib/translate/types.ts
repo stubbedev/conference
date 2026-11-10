@@ -49,6 +49,10 @@ export const TRANSLATION_LEVELS = ['none', 'plain', 'prompted'] as const
 
 export type TranslationLevel = (typeof TRANSLATION_LEVELS)[number]
 
+function isTranslationLevel(value: unknown): value is TranslationLevel {
+  return TRANSLATION_LEVELS.includes(value as TranslationLevel)
+}
+
 export interface LangAnnouncement extends LangPrefs {
   translates: TranslationLevel
 }
@@ -144,19 +148,31 @@ export function parseRoomMessage(value: unknown, sender: string, inCall: (member
   return { k: 'translation', by: sender, ...line }
 }
 
-export function isLangPrefs(value: unknown): value is LangPrefs {
-  if (typeof value !== 'object' || value === null) return false
-  const prefs = value as Partial<LangPrefs>
-  return (
-    typeof prefs.lang === 'string' &&
-    typeof prefs.voice === 'boolean' &&
-    typeof prefs.subtitles === 'boolean' &&
-    isVoiceChoice(prefs.voiceChoice)
-  )
+/** parseAnnouncement reads the language settings another member sealed for the room. */
+export function parseAnnouncement(value: unknown): LangAnnouncement | Refused {
+  if (typeof value !== 'object' || value === null) return { refused: 'it is not an object' }
+
+  const { lang, voice, subtitles, voiceChoice, translates } = value as Record<string, unknown>
+  if (!isLabel(lang)) return noLabel('lang')
+  if (typeof voice !== 'boolean') return { refused: 'its voice is not a boolean' }
+  if (typeof subtitles !== 'boolean') return { refused: 'its subtitles is not a boolean' }
+  if (!isVoiceChoice(voiceChoice)) return { refused: 'its voiceChoice is not a voice this build knows' }
+  if (!isTranslationLevel(translates)) return { refused: 'its translates is not a level this build knows' }
+
+  return { lang, voice, subtitles, voiceChoice, translates }
 }
 
-export function announcement(value: unknown): LangAnnouncement | null {
-  if (!isLangPrefs(value)) return null
-  const translates = (value as { translates?: unknown }).translates
-  return { ...value, translates: TRANSLATION_LEVELS.find((level) => level === translates) ?? 'none' }
+/** The language a host sets for another member. */
+export interface LanguageSet {
+  lang: string
+}
+
+/** parseLanguageSet reads what a host sealed to set this member's language. */
+export function parseLanguageSet(value: unknown): LanguageSet | Refused {
+  if (typeof value !== 'object' || value === null) return { refused: 'it is not an object' }
+
+  const { lang } = value as Record<string, unknown>
+  if (!isLabel(lang)) return noLabel('lang')
+
+  return { lang }
 }

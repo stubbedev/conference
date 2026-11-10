@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { LABEL_MAX, LINE_TEXT_MAX, parseRoomMessage, type CaptionLine, type TranslationLine } from './types.ts'
+import {
+  LABEL_MAX,
+  LINE_TEXT_MAX,
+  parseAnnouncement,
+  parseLanguageSet,
+  parseRoomMessage,
+  type CaptionLine,
+  type LangAnnouncement,
+  type TranslationLine,
+} from './types.ts'
 
 const CALL = ['anna', 'bob', 'cleo']
 const inCall = (member: string) => CALL.includes(member)
@@ -63,4 +72,33 @@ test('a translation names its sender as the translator', () => {
 
 test('a translation of someone who is not in the call is refused', () => {
   assert.match(refusal({ ...translation, speaker: 'mallory' }, 'bob'), /not in the call/)
+})
+
+const announced: LangAnnouncement = { lang: 'de', voice: true, subtitles: false, voiceChoice: 'male', translates: 'plain' }
+
+/** Why a parser refuses value; fails when it reads it instead. */
+function refused(parsed: object): string {
+  if (!('refused' in parsed) || typeof parsed.refused !== 'string') assert.fail(`read: ${JSON.stringify(parsed)}`)
+  return parsed.refused
+}
+
+test('an announcement is read as it was sent, and only its fields are kept', () => {
+  assert.deepEqual(parseAnnouncement(announced), announced)
+  assert.deepEqual(parseAnnouncement({ ...announced, name: 'Anna', html: '<b>' }), announced)
+})
+
+test('an announcement with a missing or mistyped field is refused, never completed', () => {
+  for (const value of [undefined, null, 'de', 7]) assert.match(refused(parseAnnouncement(value)), /not an object/)
+  for (const lang of [undefined, '', 7, 'x'.repeat(LABEL_MAX + 1)]) assert.match(refused(parseAnnouncement({ ...announced, lang })), /its lang is not a name/)
+  for (const field of ['voice', 'subtitles']) {
+    for (const value of [undefined, 'true', 1]) assert.match(refused(parseAnnouncement({ ...announced, [field]: value })), new RegExp(`its ${field} is not a boolean`))
+  }
+  for (const voiceChoice of [undefined, 'robot', true]) assert.match(refused(parseAnnouncement({ ...announced, voiceChoice })), /voiceChoice/)
+  for (const translates of [undefined, 'perfect', true]) assert.match(refused(parseAnnouncement({ ...announced, translates })), /translates/)
+})
+
+test('the language a host sets is a name, and nothing else is kept', () => {
+  assert.deepEqual(parseLanguageSet({ lang: 'da', voice: false }), { lang: 'da' })
+  for (const value of [undefined, null, 'da']) assert.match(refused(parseLanguageSet(value)), /not an object/)
+  for (const lang of [undefined, '', 7, 'x'.repeat(LABEL_MAX + 1)]) assert.match(refused(parseLanguageSet({ lang })), /its lang is not a name/)
 })
