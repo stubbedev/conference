@@ -3,11 +3,11 @@
 // this member's own browser.
 
 import type { RoomClient } from '@/lib/sfu'
-import type { LangPrefs, RoomCaption, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
+import type { CaptionLine, LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
 
 export interface TranslatorEvents {
-  /** A caption or voice cue for this member, as this member gets it. */
-  onCaption: (caption: RoomCaption) => void
+  /** A caption for this member, as this member gets it. */
+  onCaption: (caption: CaptionLine) => void
   /** Transcription or translation failed; this member's speech is not translated. */
   onFailure: (reason: string) => void
   /** The bridge's state and anything that keeps speech from being translated. */
@@ -26,7 +26,7 @@ export interface Translator {
   start(localMic: MediaStreamTrack | null): void
   setLocalMic(track: MediaStreamTrack | null): void
   setSelfPrefs(prefs: LangPrefs): void
-  /** A caption or voice cue another member's bridge sent the room. */
+  /** A caption or translation another member's bridge sent the room. */
   receive(caption: RoomMessage): void
   /** Stops translating this member's speech. */
   stop(): Promise<void>

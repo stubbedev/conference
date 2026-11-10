@@ -30,18 +30,6 @@ export interface CaptionLine {
   final: boolean
 }
 
-/** The translated voice of one segment starts playing on the lang track. */
-export interface VoiceCue {
-  k: 'voice'
-  speaker: string
-  segId: string
-  lang: string
-  startInMs: number
-  durationMs: number
-}
-
-export type RoomCaption = CaptionLine | VoiceCue
-
 export interface TranslationLine {
   k: 'translation'
   by: string
@@ -53,7 +41,7 @@ export interface TranslationLine {
   final: boolean
 }
 
-export type RoomMessage = RoomCaption | TranslationLine
+export type RoomMessage = CaptionLine | TranslationLine
 
 export const TRANSLATION_LEVELS = ['none', 'plain', 'prompted'] as const
 
@@ -107,7 +95,7 @@ export function isRoomMessage(value: unknown): value is RoomMessage {
   if (typeof value !== 'object' || value === null) return false
   const message = value as Record<string, unknown>
   if (message.k === 'translation') return isTranslationLine(message)
-  return message.k === 'caption' || message.k === 'voice'
+  return message.k === 'caption'
 }
 
 export function isLangPrefs(value: unknown): value is LangPrefs {

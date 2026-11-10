@@ -13,7 +13,7 @@
 
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import { MicCapture } from '@/lib/translate/capture'
-import type { CaptionLine, LangPrefs, RoomCaption, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
+import type { CaptionLine, LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
 
@@ -24,8 +24,6 @@ const RECONNECT_DELAY_MS = 2_000
 const TOKEN_GRACE_MS = 1_500
 
 interface VoiceHeader {
-  speaker: string
-  segId: string
   lang: string
   rate: number
 }
@@ -132,7 +130,7 @@ export class ServerTranslator implements Translator {
 
   /** The speech service already translated what it relays: nothing to do. */
   receive(caption: RoomMessage): void {
-    if (caption.k !== 'translation') this.events.onCaption(caption)
+    if (caption.k === 'caption') this.events.onCaption(caption)
   }
 
   /** Stops translating this member's speech and removes its voice tracks. */
@@ -253,7 +251,8 @@ export class ServerTranslator implements Translator {
       text: message.text ?? '',
       final: message.final ?? false,
     }
-    this.publish(caption)
+    void this.client?.sendCaption(caption)
+    this.events.onCaption(caption)
   }
 
   private onVoice(frame: ArrayBuffer): void {
@@ -262,19 +261,6 @@ export class ServerTranslator implements Translator {
     const { header, pcm } = unpack(frame)
     if (pcm.length === 0) return
 
-    const cue = player.play(header.lang, pcm, header.rate)
-    this.publish({
-      k: 'voice',
-      speaker: header.speaker,
-      segId: header.segId,
-      lang: header.lang,
-      startInMs: cue.startInMs,
-      durationMs: cue.durationMs,
-    })
-  }
-
-  private publish(caption: RoomCaption): void {
-    void this.client?.sendCaption(caption)
-    this.events.onCaption(caption)
+    player.play(header.lang, pcm, header.rate)
   }
 }

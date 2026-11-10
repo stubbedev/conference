@@ -149,9 +149,6 @@ export class LocalTranslator implements Translator {
 
   receive(message: RoomMessage): void {
     switch (message.k) {
-      case 'voice':
-        this.events.onCaption(message)
-        return
       case 'caption':
         this.heard(message)
         return
@@ -494,9 +491,8 @@ export class LocalTranslator implements Translator {
       const pending = clauses(text).map((clause) => tts.speak(clause, prefs.lang, prefs.voiceChoice))
       for (const voiced of pending) {
         const { pcm, rate } = await voiced
-        const cue = this.player?.play(speaker, pcm, rate)
-        if (!cue || this.stopped) return
-        this.events.onCaption({ k: 'voice', speaker, segId, lang: prefs.lang, startInMs: cue.startInMs, durationMs: cue.durationMs })
+        if (this.stopped || !this.player) return
+        this.player.play(speaker, pcm, rate)
       }
     } catch (error) {
       console.warn('live translation has no voice for', prefs.lang, error)

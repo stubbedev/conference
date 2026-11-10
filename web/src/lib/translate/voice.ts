@@ -3,12 +3,6 @@
 // publishes these streams to the room per language; the browser's own
 // engine keeps them on this machine, one per speaker.
 
-/** When a segment starts and how long it lasts, for the talking ring. */
-export interface VoiceCue {
-  startInMs: number
-  durationMs: number
-}
-
 interface Output {
   destination: MediaStreamAudioDestinationNode
   nextStart: number
@@ -25,7 +19,7 @@ export class VoicePlayer {
   }
 
   /** Plays pcm under key, after whatever it played before. */
-  play(key: string, pcm: Float32Array, rate: number): VoiceCue {
+  play(key: string, pcm: Float32Array, rate: number): void {
     const output = this.output(key)
     const buffer = this.context.createBuffer(1, Math.max(pcm.length, 1), rate)
     buffer.getChannelData(0).set(pcm)
@@ -37,16 +31,6 @@ export class VoicePlayer {
     node.buffer = buffer
     node.connect(output.destination)
     node.start(start)
-
-    return {
-      startInMs: Math.round((start - this.context.currentTime) * 1000),
-      durationMs: Math.round(buffer.duration * 1000),
-    }
-  }
-
-  /** The stream key's voice arrives on, or null when it has none yet. */
-  track(key: string): MediaStreamTrack | null {
-    return this.outputs.get(key)?.destination.stream.getAudioTracks()[0] ?? null
   }
 
   /** Drops what key played, as a departed speaker's stream should be. */
