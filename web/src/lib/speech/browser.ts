@@ -279,7 +279,7 @@ class BrowserEngines implements Engines {
     const storage = navigator.storage
     if (!storage?.estimate) return null
 
-    await this.keepModels(storage)
+    void this.keepModels(storage)
     const { quota, usage } = await storage.estimate()
     if (quota === undefined || usage === undefined) return null
 
