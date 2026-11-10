@@ -2633,7 +2633,7 @@ type sdpSection struct {
 func (s *sdpSection) apply(line string) {
 	switch {
 	case strings.HasPrefix(line, "m="):
-		s.label = strings.TrimPrefix(line, "m=")
+		*s = sdpSection{label: strings.TrimPrefix(line, "m="), hasSSRC: false}
 	case strings.HasPrefix(line, "a=mid:"):
 		s.label += " mid=" + strings.TrimPrefix(line, "a=mid:")
 	case isDirection(line):
