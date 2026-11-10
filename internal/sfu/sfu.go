@@ -1594,6 +1594,38 @@ type upViewer struct {
 	steps     ladder
 	mung      munger
 	buf       []byte
+	received  receivedUpTo
+}
+
+// receivedUpTo is the highest sequence number a viewer reported
+// receiving on a track, once it has reported one.
+type receivedUpTo struct {
+	seq   uint16
+	known bool
+}
+
+// unreported is where a viewer starts, before its first receiver report.
+//
+//nolint:gochecknoglobals // an immutable value, the zero report spelled out
+var unreported = receivedUpTo{seq: 0, known: false}
+
+// idleDecoderQuiet is how long a viewer must have been forwarded nothing
+// before its keyframe request can only be its decoder timing out. A
+// libwebrtc receiver asks for a keyframe once no frame has been decodable
+// for three seconds while packets arrived in the last five, and a still
+// screen that Chrome stops encoding trips exactly that. A viewer that
+// lost packets asks while the stream flows or moments after.
+const idleDecoderQuiet = 2 * time.Second
+
+// idleKeyframeRequest reports whether a viewer's keyframe request is its
+// decoder timing out on a stream the publisher stopped sending: the
+// viewer reported holding the last packet it was forwarded, and nothing
+// newer followed for idleDecoderQuiet. Its picture is intact; relayed,
+// the request would make the publisher's encoder open the next change of
+// the screen with a keyframe, the largest frame exactly when the bitrate
+// is needed most.
+func idleKeyframeRequest(sent munger, received receivedUpTo, now time.Time) bool {
+	return sent.started && received.known && !seqNewer(sent.lastSeq, received.seq) && now.Sub(sent.lastAt) >= idleDecoderQuiet
 }
 
 // viewerRate tracks a sustainable downlink bitrate for one viewer,
@@ -1932,7 +1964,7 @@ func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int
 	viewer := &upViewer{
 		local: local, rate: newViewerRate(),
 		mu: sync.Mutex{}, current: current, target: current, preferred: preferred,
-		steps: newLadder(), mung: newMunger(), buf: nil,
+		steps: newLadder(), mung: newMunger(), buf: nil, received: unreported,
 	}
 	ut.viewers[viewerID] = viewer
 
@@ -1989,7 +2021,9 @@ func (ut *UpTrack) setViewerREMB(viewerID string, bitrate float64) {
 	}
 }
 
-func (ut *UpTrack) updateViewerLoss(viewerID string, fractionLost uint8, elapsed time.Duration) {
+// updateViewerReport applies one receiver report block a viewer sent
+// about this track.
+func (ut *UpTrack) updateViewerReport(viewerID string, report rtcp.ReceptionReport, elapsed time.Duration) {
 	ut.mu.RLock()
 	viewer := ut.viewers[viewerID]
 	ut.mu.RUnlock()
@@ -1998,11 +2032,31 @@ func (ut *UpTrack) updateViewerLoss(viewerID string, fractionLost uint8, elapsed
 		return
 	}
 
-	viewer.rate.updateLoss(fractionLost, elapsed, ut.delivered.Load())
+	viewer.rate.updateLoss(report.FractionLost, elapsed, ut.delivered.Load())
 
 	viewer.mu.Lock()
-	viewer.steps.observeLoss(fractionLost, viewer.current)
+	viewer.steps.observeLoss(report.FractionLost, viewer.current)
+	//nolint:gosec // the low 16 bits of the extended sequence number are the sequence number itself
+	viewer.received = receivedUpTo{seq: uint16(report.LastSequenceNumber), known: true}
 	viewer.mu.Unlock()
+}
+
+// needsKeyframe reports whether a viewer's keyframe request is one the
+// publisher must answer, rather than its decoder timing out on a still
+// stream.
+func (ut *UpTrack) needsKeyframe(viewerID string, now time.Time) bool {
+	ut.mu.RLock()
+	viewer := ut.viewers[viewerID]
+	ut.mu.RUnlock()
+
+	if viewer == nil {
+		return false
+	}
+
+	viewer.mu.Lock()
+	defer viewer.mu.Unlock()
+
+	return !idleKeyframeRequest(viewer.mung, viewer.received, now)
 }
 
 func (ut *UpTrack) dropViewer(viewerID string) {
@@ -2377,6 +2431,12 @@ func (dp *DownPeer) relayFeedback(relay *feedbackRelay, packet rtcp.Packet, view
 			return
 		}
 
+		if !track.needsKeyframe(viewer.ID, now) {
+			log.Printf("sfu: viewer %.6s timed out on still track=%s, keyframe request not relayed", viewer.ID, track.key)
+
+			return
+		}
+
 		relay.keyframe = now
 
 		viewer.room.requestTrackKeyframe(dp.sourceID, track)
@@ -2392,7 +2452,7 @@ func (dp *DownPeer) relayFeedback(relay *feedbackRelay, packet rtcp.Packet, view
 
 		for _, report := range feedback.Reports {
 			if report.SSRC == ssrc {
-				track.updateViewerLoss(viewer.ID, report.FractionLost, elapsed)
+				track.updateViewerReport(viewer.ID, report, elapsed)
 			}
 		}
 	}

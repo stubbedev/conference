@@ -384,7 +384,7 @@ func TestScreenShareKeepsItsFluidLayerWithNobodyWatchingIt(t *testing.T) {
 	for _, kind := range []string{KindScreen, KindCamera} {
 		thumbnail := &upViewer{
 			local: nil, rate: newViewerRate(), mu: sync.Mutex{}, current: layerLow, target: layerLow,
-			preferred: layerLow, steps: newLadder(), mung: newMunger(), buf: nil,
+			preferred: layerLow, steps: newLadder(), mung: newMunger(), buf: nil, received: unreported,
 		}
 		track := &UpTrack{
 			key: trackKey{up: UpstreamMedia, mid: "1"}, kind: kind, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP8,
