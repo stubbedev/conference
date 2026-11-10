@@ -680,9 +680,12 @@ func (up *UpPeer) writeRemb(bitrate uint64, ssrcs []uint32) {
 
 // measure closes the period since the previous one: every track learns
 // the rate it delivered, and the connection gets what all of them
-// delivered together.
+// delivered together. The connection's first period only counts from its
+// first packet: spread over the whole period, the burst a share starts
+// with reads as a fraction of its rate, and loss in it would cut the
+// estimate down to that fraction.
 func (up *UpPeer) measure(now time.Time) linkSample {
-	elapsed := now.Sub(up.sampledAt)
+	elapsed := measuredSince(up.sampledAt, up.flowing.Load(), now)
 	up.sampledAt = now
 
 	var link receiveTotals
@@ -1217,6 +1220,7 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		uplink:     uplinkEstimate{limit: unlimited, peak: 0},
 		rembCapped: false,
 		opened:     sync.Once{},
+		flowing:    atomic.Pointer[time.Time]{},
 	}
 
 	m.setUpstream(which, upPeer)
@@ -1227,6 +1231,9 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		// arrives; registration is idempotent per mid. Late-arriving
 		// tracks must reach members that joined before the publisher
 		// sent media.
+		now := time.Now()
+		upPeer.flowing.CompareAndSwap(nil, &now)
+
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
 			upPeer.openUplink(track.SSRC())
 		}
@@ -1550,6 +1557,9 @@ type UpPeer struct {
 	// opened sends the connection's first REMB once, on its first video
 	// packet; see openUplink.
 	opened sync.Once
+
+	// flowing is when the connection's first packet arrived, nil before.
+	flowing atomic.Pointer[time.Time]
 }
 
 // UpTrack is one forwarded upstream track, keyed by its connection and

@@ -176,6 +176,21 @@ type linkSample struct {
 	elapsed time.Duration
 }
 
+// measuredSince is how much of the period since sampled a connection
+// was carrying media at now: none before its first packet, from that
+// packet on in the period it arrived in, all of it afterwards.
+func measuredSince(sampled time.Time, flowing *time.Time, now time.Time) time.Duration {
+	if flowing == nil {
+		return 0
+	}
+
+	if flowing.After(sampled) {
+		return now.Sub(*flowing)
+	}
+
+	return now.Sub(sampled)
+}
+
 const bitsPerByte = 8
 
 // bitrate is the rate the connection delivered, in bits per second.

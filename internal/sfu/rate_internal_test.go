@@ -2,6 +2,7 @@ package sfu
 
 import (
 	"testing"
+	"time"
 )
 
 // second is one REMB period in which the connection delivered bps and
@@ -207,5 +208,78 @@ func TestSequenceCountFollowsLossReorderingAndWrap(t *testing.T) {
 	fraction, known := linkSample{arrived: arrived, elapsed: rembInterval}.fractionLost()
 	if known {
 		t.Fatalf("loss %d/256 from %d packets, want it unknown below %d", fraction, count.expected(), minLossPackets)
+	}
+}
+
+func TestMeasuredSinceStartsAtTheFirstPacket(t *testing.T) {
+	t.Parallel()
+
+	tick := time.Unix(1000, 0)
+	now := tick.Add(rembInterval)
+	early := tick.Add(-time.Minute)
+	midway := tick.Add(rembInterval * 3 / 5)
+
+	for _, tc := range []struct {
+		name    string
+		flowing *time.Time
+		want    time.Duration
+	}{
+		{name: "before the first packet", flowing: nil, want: 0},
+		{name: "first packet in this period", flowing: &midway, want: rembInterval * 2 / 5},
+		{name: "flowing all period", flowing: &early, want: rembInterval},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := measuredSince(tick, tc.flowing, now); got != tc.want {
+				t.Fatalf("measured %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShareStartingLossyBacksOffToWhatItCarried: a share whose first
+// packets arrive late in a REMB period, and lose heavily as a share's
+// opening burst can on a loaded machine, backs off to the rate it
+// carried while it flowed, not to that rate spread over the whole period.
+func TestShareStartingLossyBacksOffToWhatItCarried(t *testing.T) {
+	t.Parallel()
+
+	const (
+		carried  = 10_000_000
+		flowFor  = 400 * time.Millisecond
+		sent     = 400
+		received = 300
+	)
+
+	tick := time.Unix(1000, 0)
+	now := tick.Add(rembInterval)
+
+	layer := newUpLayer(nil, now.Add(-flowFor))
+	screen := simulcastTrack(trackKey{up: UpstreamScreen, mid: "0"}, KindScreen)
+	screen.layers[layerHigh] = layer
+
+	var count sequenceCount
+
+	for seq := range uint16(sent) {
+		if seq < received {
+			count = count.observe(seq)
+		}
+	}
+
+	count = count.observe(sent - 1)
+	layer.arrived.record(int(carried*flowFor/time.Second/bitsPerByte), count)
+
+	publisher := newMember(testRoom("lossy-start"), 1, testJoin("lossy-start", "alice"), func(Message) {})
+	publishingOn(publisher, UpstreamScreen, screen)
+
+	up := publisher.ups[UpstreamScreen]
+	up.sampledAt = tick
+	started := now.Add(-flowFor)
+	up.flowing.Store(&started)
+
+	limit := up.uplink.next(up.measure(now)).limit
+	if !limit.bound || limit.bps < carried/2 || limit.bps >= carried {
+		t.Fatalf("limit %+v after 25%% loss while carrying %d bps, want a back-off from %d", limit, carried, carried)
 	}
 }

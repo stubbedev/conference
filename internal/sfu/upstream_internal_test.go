@@ -42,7 +42,7 @@ func publishingOn(member *Member, which Upstream, tracks ...*UpTrack) {
 		which: which, pc: nil, member: member, mu: sync.RWMutex{},
 		tracks: byMid, labels: map[string]string{}, ice: newICEStash(),
 		sampledAt: time.Time{}, uplink: uplinkEstimate{limit: unlimited, peak: 0}, rembCapped: false,
-		opened: sync.Once{},
+		opened: sync.Once{}, flowing: atomic.Pointer[time.Time]{},
 	}
 }
 
