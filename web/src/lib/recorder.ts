@@ -8,7 +8,7 @@ import { audioContext, playMediaElement } from '@/hooks/media'
 import { ElementSource, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
 import { initials } from './names.ts'
 import { focusKey, gridRects, NO_SPEAKER, nextSpeakerFocus, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
-import { isSpeaking, nextLevel, SPEAKING_SAMPLE_MS } from './speaking.ts'
+import { heard, holdLeft, isVoiced, SPEAKING_SAMPLE_MS, type LastVoiced } from './speaking.ts'
 import { withDuration } from './webm.ts'
 
 export interface RecorderTile {
@@ -86,7 +86,7 @@ interface MixedSource {
   source: AudioNode
   gain: GainNode
   analyser: AnalyserNode
-  level: number
+  lastVoiced: LastVoiced
   element?: HTMLAudioElement
 }
 
@@ -552,7 +552,7 @@ export class CallRecorder {
     analyser.fftSize = 512
     source.connect(gain).connect(mixer)
     source.connect(analyser)
-    return { track, source, gain, analyser, level: 0, element }
+    return { track, source, gain, analyser, lastVoiced: null, element }
   }
 
   private disconnectMixed(mixed: MixedSource): void {
@@ -629,10 +629,10 @@ export class CallRecorder {
       mixed.analyser.getFloatTimeDomainData(this.samples)
       let sum = 0
       for (const sample of this.samples) sum += sample * sample
-      mixed.level = nextLevel(mixed.level, Math.sqrt(sum / this.samples.length))
+      mixed.lastVoiced = heard(mixed.lastVoiced, isVoiced(Math.sqrt(sum / this.samples.length)), now)
     }
     const speaking = this.latest
-      .filter((tile) => !tile.screen && (tile.stream?.getAudioTracks() ?? []).some((track) => isSpeaking(this.mixed.get(track)?.level ?? 0)))
+      .filter((tile) => !tile.screen && (tile.stream?.getAudioTracks() ?? []).some((track) => holdLeft(this.mixed.get(track)?.lastVoiced ?? null, now) > 0))
       .map((tile) => tile.key)
     this.speaker = nextSpeakerFocus(this.speaker, speaking, now)
   }

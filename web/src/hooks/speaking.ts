@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { audioContext } from '@/hooks/media'
-import { isSpeaking, nextLevel, SPEAKING_SAMPLE_MS } from '@/lib/speaking'
+import { heard, holdLeft, isVoiced, SPEAKING_SAMPLE_MS, type LastVoiced } from '@/lib/speaking'
 
 // Speaking detection for every tile in the call runs on one loop. A
 // per-tile requestAnimationFrame loop wakes the page at display refresh
@@ -15,7 +15,7 @@ interface Probe {
   analyser: AnalyserNode
   source: MediaStreamAudioSourceNode | null
   samples: Uint8Array<ArrayBuffer>
-  level: number
+  lastVoiced: LastVoiced
   active: boolean
   listeners: Set<(active: boolean) => void>
 }
@@ -35,7 +35,7 @@ function bind(probe: Probe, ctx: AudioContext): void {
   probe.source.connect(probe.analyser)
 }
 
-function sample(probe: Probe): void {
+function sample(probe: Probe, now: number): void {
   probe.analyser.getByteTimeDomainData(probe.samples)
 
   let sum = 0
@@ -44,9 +44,9 @@ function sample(probe: Probe): void {
     sum += deviation * deviation
   }
 
-  probe.level = nextLevel(probe.level, Math.sqrt(sum / probe.samples.length))
+  probe.lastVoiced = heard(probe.lastVoiced, isVoiced(Math.sqrt(sum / probe.samples.length)), now)
 
-  const active = isSpeaking(probe.level)
+  const active = holdLeft(probe.lastVoiced, now) > 0
   if (active === probe.active) return
 
   probe.active = active
@@ -56,7 +56,7 @@ function sample(probe: Probe): void {
 function tick(now: number): void {
   if (now - lastSample >= SPEAKING_SAMPLE_MS) {
     lastSample = now
-    for (const probe of probes.values()) sample(probe)
+    for (const probe of probes.values()) sample(probe, now)
   }
 
   frame = probes.size > 0 ? requestAnimationFrame(tick) : 0
@@ -74,7 +74,7 @@ function probeFor(stream: MediaStream, ctx: AudioContext): Probe {
     analyser,
     source: null,
     samples: new Uint8Array(analyser.fftSize),
-    level: 0,
+    lastVoiced: null,
     active: false,
     listeners: new Set(),
   }
@@ -130,4 +130,35 @@ export function useIsSpeaking(stream: MediaStream | null): boolean {
   }, [stream])
 
   return speaking.source === stream && speaking.active
+}
+
+/**
+ * useHeldSpeaking is active held on for as long as a voice measured by
+ * the probes would be, for a voice that is only known to be playing or
+ * not, such as a member's translation.
+ */
+export function useHeldSpeaking(active: boolean): boolean {
+  const [lastVoiced, setLastVoiced] = useState<LastVoiced>(null)
+  const [now, setNow] = useState(0)
+
+  useEffect(() => {
+    if (!active) return
+
+    return () => {
+      const stoppedAt = performance.now()
+      setLastVoiced((last) => heard(last, true, stoppedAt))
+      setNow(stoppedAt)
+    }
+  }, [active])
+
+  const left = holdLeft(lastVoiced, now)
+
+  useEffect(() => {
+    if (active || left === 0) return
+
+    const timer = window.setTimeout(() => setNow(performance.now()), left)
+    return () => window.clearTimeout(timer)
+  }, [active, left])
+
+  return active || left > 0
 }

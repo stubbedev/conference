@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { MicOff, MonitorUp, Pin, PinOff, VideoOff, VolumeX } from 'lucide-react'
 
 import { useLatest } from '@/hooks/latest'
-import { useIsSpeaking } from '@/hooks/speaking'
+import { useHeldSpeaking, useIsSpeaking } from '@/hooks/speaking'
 import { useTileDebug } from '@/hooks/tileDebug'
 import { Hint } from '@/components/Hint'
 import {
@@ -36,7 +36,7 @@ interface VideoTileProps {
   /**
    * Overrides voice detection for the speaking ring: set while this
    * member is heard through their translation, which plays later than
-   * their own (muted) voice.
+   * their own (muted) voice, to whether that translation is playing.
    */
   speaking?: boolean
 }
@@ -92,7 +92,9 @@ export const VideoTile = memo(function VideoTile({
   const [audioBlocked, setAudioBlocked] = useState(false)
   const [debugStats, setDebugStats] = useState('')
   const debugOn = useTileDebug()
-  const speaking = useIsSpeaking(stream)
+  const voiceSpeaking = useIsSpeaking(stream)
+  const translationSpeaking = useHeldSpeaking(speakingOverride === true)
+  const speaking = speakingOverride === undefined ? voiceSpeaking : translationSpeaking
   const { video: videoStream, audio: audioStream } = useSplitStreams(stream)
 
   useEffect(() => {
@@ -173,7 +175,7 @@ export const VideoTile = memo(function VideoTile({
 
 
   const hideVideo = Boolean(camOff && !sharing)
-  const speakingNow = (speakingOverride ?? speaking) && !micOff && !sharing
+  const speakingNow = speaking && !micOff && !sharing
 
   useEffect(() => {
     if (!debugOn) return
