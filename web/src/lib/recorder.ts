@@ -6,7 +6,7 @@
 
 import { audioContext, playMediaElement } from '@/hooks/media'
 import { errorMessage } from './errors.ts'
-import { ElementSource, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
+import { ElementSource, endGenerator, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
 import { initials } from './names.ts'
 import { focusKey, gridRects, nextSpeakerFocus, speakingKeys, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
 import { SPEAKING_SAMPLE_MS } from './speaking.ts'
@@ -665,9 +665,8 @@ export class CallRecorder {
     this.mixer = null
     for (const entry of this.entries.values()) entry.source.close()
     this.entries.clear()
-    void this.writer?.close().catch(() => {})
+    if (this.generator && this.writer) endGenerator(this.generator, this.writer)
     this.writer = null
-    this.generator?.stop()
     this.generator = null
     this.latest = []
     for (const track of this.canvasStream?.getTracks() ?? []) track.stop()

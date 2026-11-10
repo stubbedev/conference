@@ -27,6 +27,14 @@ export function frameApis(): FrameApis | null {
   return scope as FrameApis
 }
 
+// Ends a generated track once the frame still being written has gone
+// out: stopping the track first fails that write, and the close with it.
+export function endGenerator(generator: TrackGenerator, writer: FrameWriter): void {
+  void writer
+    .close()
+    .catch((err: unknown) => console.warn('frames: closing a generated track', err))
+    .finally(() => generator.stop())
+}
 
 export interface VideoSource {
   readonly image: CanvasImageSource | null

@@ -1,6 +1,6 @@
 import { CanvasCompositor } from '@/lib/blur-2d'
 import { GlCompositor, gpuCompositing, type BlurCanvas, type Compositor } from '@/lib/blur-gl'
-import { ElementSource, FrameSource, frameApis, type FrameApis, type FrameWriter, type VideoSource } from '@/lib/frames'
+import { ElementSource, endGenerator, FrameSource, frameApis, type FrameApis, type FrameWriter, type VideoSource } from '@/lib/frames'
 import { modelFor, segmentCadence, stabiliseMask, type SegmentShape } from '@/lib/mask'
 import type { Mask, Segmenter } from '@/lib/vision'
 
@@ -45,8 +45,7 @@ function generatorOutput(apis: FrameApis): Output {
         })
     },
     stop() {
-      void writer.close().catch(() => {})
-      generator.stop()
+      endGenerator(generator, writer)
     },
   }
 }
