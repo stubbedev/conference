@@ -56,14 +56,19 @@ export interface ChatMessage {
 export interface RemoteTrack {
   sourceId: string
   stream: MediaStream
-  kind: string
+  kind: TrackKind
 }
 
 export type ModerateAction = 'mute' | 'cam' | 'screen' | 'kick'
 
+const AUDIO_KIND = 'audio'
 const TRANSLATION_KIND_PREFIX = 'translation-'
+type TranslationKind = `${typeof TRANSLATION_KIND_PREFIX}${string}`
 
-function translationKind(lang: string): string {
+/** What a published track carries, as offers label it for the SFU and the SFU for viewers. */
+export type TrackKind = typeof AUDIO_KIND | TileKind | typeof SCREEN_AUDIO_KIND | TranslationKind
+
+function translationKind(lang: string): TranslationKind {
   return `${TRANSLATION_KIND_PREFIX}${lang}`
 }
 
@@ -201,7 +206,7 @@ interface WireMessage {
   members?: MemberInfo[]
   pc?: string
   sdp?: string
-  tracks?: { mid: string; kind: string }[]
+  tracks?: { mid: string; kind: TrackKind }[]
   candidate?: RTCIceCandidateInit
   member?: string
   mic?: boolean
@@ -320,7 +325,7 @@ export class RoomClient {
   private downs = new Map<string, RTCPeerConnection>()
   private pendingIce = new Map<string, RTCIceCandidateInit[]>()
   private members = new Map<string, MemberInfo>()
-  private downKinds = new Map<string, string>()
+  private downKinds = new Map<string, TrackKind>()
   private translationTrackLangs = new Map<string, string>()
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
@@ -887,11 +892,11 @@ export class RoomClient {
     this.send({ type: 'offer', pc: id, sdp: pc.localDescription?.sdp ?? '', tracks })
   }
 
-  private kindOf(id: UpstreamId, track: MediaStreamTrack): string {
+  private kindOf(id: UpstreamId, track: MediaStreamTrack): TrackKind {
     if (id === SCREEN_UP) return track.kind === 'audio' ? SCREEN_AUDIO_KIND : SCREEN_KIND
     const translationLang = this.translationTrackLangs.get(track.id)
     if (translationLang) return translationKind(translationLang)
-    if (track.kind === 'audio') return 'audio'
+    if (track.kind === 'audio') return AUDIO_KIND
     return CAMERA_KIND
   }
 
@@ -1033,14 +1038,14 @@ export class RoomClient {
         this.installReceiverTransform(ev.receiver)
         const key = `${sourceId}:${ev.transceiver.mid ?? ''}`
         const labelled = this.downKinds.get(key)
-        const kind =
+        const kind: TrackKind =
           ev.track.kind === 'audio'
             ? labelled !== undefined && translationKindLang(labelled) !== null
               ? labelled
               : labelled === SCREEN_AUDIO_KIND
                 ? SCREEN_AUDIO_KIND
-                : 'audio'
-            : (labelled ?? 'camera')
+                : AUDIO_KIND
+            : (labelled ?? CAMERA_KIND)
         // A translated voice and a share's sound are played on their own
         // terms, never as part of the speaker's camera stream, so each
         // gets a stream of its own.
