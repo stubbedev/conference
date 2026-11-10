@@ -45,14 +45,16 @@ export function serveSpeechPage({ models } = {}) {
       }
 
       let target = file
+      let size
       try {
         if (statSync(target).isDirectory()) target = join(target, 'index.html')
+        size = statSync(target).size
       } catch {
         res.writeHead(404).end()
         return
       }
 
-      res.writeHead(200, { 'Content-Type': CONTENT_TYPES[extname(target)] ?? 'application/octet-stream', ...ISOLATION_HEADERS })
+      res.writeHead(200, { 'Content-Type': CONTENT_TYPES[extname(target)] ?? 'application/octet-stream', 'Content-Length': size, ...ISOLATION_HEADERS })
       createReadStream(target).pipe(res)
     })
 
