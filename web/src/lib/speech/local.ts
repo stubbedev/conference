@@ -38,6 +38,7 @@ const EARLIER_SENTENCES = 8
 const INTERIM_TRANSCRIPTION_GAP_MS = 1_000
 const INTERIM_TRANSLATION_GAP_MS = 1_500
 const REMEMBERED_TRANSLATIONS = 64
+const REMEMBERED_SPOKEN = 256
 
 interface PendingInterim {
   caption: CaptionLine
@@ -75,7 +76,7 @@ export class LocalTranslator implements Translator {
   private readonly interimAfter = new Map<string, number>()
   private readonly translations = new Recent<string>(REMEMBERED_TRANSLATIONS)
   private interimTranscriptionAfter = 0
-  private readonly spoken = new Set<string>()
+  private readonly spoken = new Recent<true>(REMEMBERED_SPOKEN)
   private readonly voices = new Map<string, MediaStreamTrack>()
   private readonly unvoiced = new Set<string>()
   private readonly voiceless = new Set<string>()
@@ -506,14 +507,14 @@ export class LocalTranslator implements Translator {
   }
 
   private show(line: RoomMessage): void {
-    if (line.k === 'translation' && !line.final && this.spoken.has(line.segId)) return
+    if (line.k === 'translation' && !line.final && this.spoken.get(line.segId)) return
     this.events.onCaption(line)
     if (line.final && this.selfPrefs.voice) void this.speak(line.speaker, line.segId, line.text)
   }
 
   private async speak(speaker: string, segId: string, text: string): Promise<void> {
-    if (this.spoken.has(segId)) return
-    this.spoken.add(segId)
+    if (this.spoken.get(segId)) return
+    this.spoken.set(segId, true)
 
     const prefs = this.selfPrefs
     try {
