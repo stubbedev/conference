@@ -136,6 +136,7 @@ export class CallRecorder {
   private recorder: MediaRecorder | null = null
   private filename = ''
   private sink: DiskSink | MemorySink | null = null
+  private sourcesWatched: AbortController | null = null
   private starting: Promise<void> | null = null
   private drawing = false
   private frame = 0
@@ -277,9 +278,11 @@ export class CallRecorder {
       void this.finish()
     }
     // A source that ends (the canvas capture or the audio mix stopped by
-    // the browser) ends the recording; keep the file and report it.
+    // the browser) ends the recording; keep the file and report it. The
+    // recorder ends its own sources when it is done, which is not that.
+    this.sourcesWatched = new AbortController()
     for (const track of tracks) {
-      track.addEventListener('ended', () => this.endUnexpectedly('a media source stopped'))
+      track.addEventListener('ended', () => this.endUnexpectedly('a media source stopped'), { signal: this.sourcesWatched.signal })
     }
 
     // Name the file after the container MediaRecorder actually picked,
@@ -649,6 +652,8 @@ export class CallRecorder {
   }
 
   private dispose(): void {
+    this.sourcesWatched?.abort()
+    this.sourcesWatched = null
     cancelAnimationFrame(this.frame)
     this.drawing = false
     window.clearInterval(this.paintTimer)
