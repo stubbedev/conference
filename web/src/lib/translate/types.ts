@@ -56,9 +56,33 @@ function isTranslationLevel(value: unknown): value is TranslationLevel {
   return TRANSLATION_LEVELS.includes(value as TranslationLevel)
 }
 
-export interface LangAnnouncement extends LangPrefs {
+/**
+ * What a member's translator does for the room at this moment. It is
+ * announced with the member's settings and withdrawn the moment it
+ * stops, so who is captioned, who translates and which translated
+ * voices are alive are facts every member holds, not guesses.
+ */
+export interface Provides {
+  /** This member's speech is being captioned. */
+  captions: boolean
+  /** How well this member translates what others say. */
   translates: TranslationLevel
+  /** The languages this member's last sentence went out in as a voice published to the room. */
+  voices: readonly string[]
 }
+
+export const PROVIDES_NOTHING: Provides = { captions: false, translates: 'none', voices: [] }
+
+export function sameProvides(a: Provides, b: Provides): boolean {
+  return (
+    a.captions === b.captions &&
+    a.translates === b.translates &&
+    a.voices.length === b.voices.length &&
+    a.voices.every((lang, i) => lang === b.voices[i])
+  )
+}
+
+export interface LangAnnouncement extends LangPrefs, Provides {}
 
 export const LOADING_PARTS = ['runtime', 'transcription', 'translation', 'voice'] as const
 
@@ -95,6 +119,9 @@ export interface TranslatorStatus {
 
 /** A member id, a segment id or a language code: a name, never prose. */
 export const LABEL_MAX = 128
+
+/** More languages than a call has members to speak them. */
+export const VOICES_MAX = 64
 
 /**
  * The longest text a line carries, in UTF-16 units. A tile shows three
@@ -176,14 +203,18 @@ export function parseRoomMessage(value: unknown, sender: string, room: Room): Ro
 export function parseAnnouncement(value: unknown): LangAnnouncement | Refused {
   if (typeof value !== 'object' || value === null) return { refused: 'it is not an object' }
 
-  const { lang, voice, subtitles, voiceChoice, translates } = value as Record<string, unknown>
+  const { lang, voice, subtitles, voiceChoice, captions, translates, voices } = value as Record<string, unknown>
   if (!isLabel(lang)) return noLabel('lang')
   if (typeof voice !== 'boolean') return { refused: 'its voice is not a boolean' }
   if (typeof subtitles !== 'boolean') return { refused: 'its subtitles is not a boolean' }
   if (!isVoiceChoice(voiceChoice)) return { refused: 'its voiceChoice is not a voice this build knows' }
+  if (typeof captions !== 'boolean') return { refused: 'its captions is not a boolean' }
   if (!isTranslationLevel(translates)) return { refused: 'its translates is not a level this build knows' }
+  if (!Array.isArray(voices) || voices.length > VOICES_MAX || !voices.every(isLabel)) {
+    return { refused: `its voices is not a list of at most ${VOICES_MAX} names` }
+  }
 
-  return { lang, voice, subtitles, voiceChoice, translates }
+  return { lang, voice, subtitles, voiceChoice, captions, translates, voices }
 }
 
 /** The language a host sets for another member. */

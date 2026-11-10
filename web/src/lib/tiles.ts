@@ -1,5 +1,6 @@
 import type { Layer } from './quality.ts'
 import { SCREEN_KIND, type TileKind } from './track-kind.ts'
+import type { LangAnnouncement } from './translate/types.ts'
 
 export const LOCAL_SOURCE = 'local'
 
@@ -40,19 +41,8 @@ export function withoutVoice<Stream>(voices: Voices<Stream>, member: string, lan
   return Object.keys(kept).length === 0 ? others : { ...others, [member]: kept }
 }
 
-/**
- * withLocalVoices adds the voices the listener's own engines make, one
- * per member, to those published to the room. Such a voice speaks the
- * listener's language, whichever that is by now, so it is filed under
- * lang when it is looked up and not when it was made.
- */
-export function withLocalVoices<Stream>(
-  voices: Voices<Stream>,
-  local: Readonly<Record<string, Stream>>,
-  lang: string,
-): Voices<Stream> {
-  return Object.entries(local).reduce((all, [member, stream]) => withVoice(all, member, lang, stream), voices)
-}
+/** What a member says of their own speech: its language, and what is made of it right now. */
+export type Speaker = Pick<LangAnnouncement, 'lang' | 'captions' | 'voices'>
 
 /** What live translation gives one listener to hear. */
 export interface Translations<Stream> {
@@ -62,9 +52,15 @@ export interface Translations<Stream> {
   lang: string
   /** Whether the listener wants other languages spoken in theirs. */
   voice: boolean
-  /** The language each other member speaks, by member id. */
-  spoken: Readonly<Record<string, string>>
-  voices: Voices<Stream>
+  /** What each other member last announced, by member id. */
+  announced: ReadonlyMap<string, Speaker>
+  /** The translated voices that arrive from the room. */
+  published: Voices<Stream>
+  /**
+   * The voices the listener's own engines make, by member id. Such a
+   * voice speaks the listener's language, whichever that is by now.
+   */
+  local: Readonly<Record<string, Stream>>
 }
 
 /** The stream a tile is heard through, and whether that is its own. */
@@ -74,10 +70,15 @@ export type Heard<Stream> = { through: 'own'; stream: Stream | null } | { throug
  * heardThrough is what a tile is heard through: the one rule behind what
  * plays, what every speaking signal measures and what a recording holds.
  * A translated voice replaces a member's own only when the listener
- * wants translations spoken, the member speaks another language and that
- * voice exists, which it does for as long as something carries it.
- * Everyone else, and every share, is heard through their own stream, so
- * no preference and no translator that stopped leaves a member silent.
+ * wants translations spoken, the member speaks another language and a
+ * voice in the listener's language is both there and alive. A voice from
+ * the room is alive while its speaker announces that language as
+ * voiced; a voice made here is alive while its speaker announces
+ * captions for it to be made from. That a voice exists is not enough: a
+ * translator that has fallen silent keeps its track, and a speaker whose
+ * captions stopped leaves a voice with nothing to say. Everyone else,
+ * and every share, is heard through their own stream, so no preference
+ * and no translator that stopped leaves a member silent.
  */
 export function heardThrough<Stream>(
   tile: { sourceId: string; kind: TileKind; stream: Stream | null },
@@ -86,10 +87,14 @@ export function heardThrough<Stream>(
   const own: Heard<Stream> = { through: 'own', stream: tile.stream }
   if (!translations.on || !translations.voice || tile.kind === SCREEN_KIND) return own
 
-  const spoken: string | undefined = translations.spoken[tile.sourceId]
-  const voices: Readonly<Record<string, Stream>> | undefined = translations.voices[tile.sourceId]
-  const voice: Stream | undefined = voices?.[translations.lang]
-  if (!spoken || spoken === translations.lang || voice === undefined) return own
+  const speaker = translations.announced.get(tile.sourceId)
+  if (!speaker || speaker.lang === translations.lang) return own
+
+  const fromRoom: Readonly<Record<string, Stream>> | undefined = translations.published[tile.sourceId]
+  const published = speaker.voices.includes(translations.lang) ? fromRoom?.[translations.lang] : undefined
+  const madeHere: Stream | undefined = translations.local[tile.sourceId]
+  const voice = published ?? (speaker.captions ? madeHere : undefined)
+  if (voice === undefined) return own
 
   return { through: 'translation', stream: voice }
 }

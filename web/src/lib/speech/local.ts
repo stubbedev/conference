@@ -26,7 +26,7 @@ import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
 import { WarmUps } from '@/lib/speech/warm-ups'
 import { webgpuAvailable } from '@/lib/speech/webgpu'
 import { MicCapture } from '@/lib/translate/capture'
-import type { CaptionLine, LangPrefs, RoomMessage, TranslationLevel, TranslationLine, TranslatorStatus } from '@/lib/translate/types'
+import { PROVIDES_NOTHING, type CaptionLine, type LangPrefs, type RoomMessage, type TranslationLevel, type TranslationLine, type TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
 
@@ -72,6 +72,7 @@ export class LocalTranslator implements Translator {
   private steppedDown = false
   private canTranscribe = true
   private translates: TranslationLevel = 'none'
+  private captioning = false
   private readonly earlier = new Map<string, string[]>()
   private readonly awaited = new Map<string, Awaited>()
   private readonly interims = new Map<string, PendingInterim>()
@@ -102,7 +103,7 @@ export class LocalTranslator implements Translator {
   attach(client: RoomClient): void {
     this.detach()
     this.client = client
-    client.setTranslates(this.translates)
+    this.announce()
     this.playbackContext ??= new AudioContext()
     this.player ??= new VoicePlayer(this.playbackContext, this.events.onStream)
 
@@ -153,6 +154,7 @@ export class LocalTranslator implements Translator {
 
   async stop(): Promise<void> {
     this.stopped = true
+    this.client?.setProvides(PROVIDES_NOTHING)
     this.detach()
     for (const { timer } of this.awaited.values()) if (timer) clearTimeout(timer)
     this.awaited.clear()
@@ -191,8 +193,9 @@ export class LocalTranslator implements Translator {
     if (this.stopped) return
 
     this.canTranscribe &&= prepared.transcribes
+    this.captioning &&= this.canTranscribe
     this.translates = prepared.translates
-    this.client?.setTranslates(this.translates)
+    this.announce()
 
     if (prepared.problems.length > 0) {
       const detail = prepared.problems.join(' ')
@@ -211,6 +214,8 @@ export class LocalTranslator implements Translator {
     )
     if (!segmenter) return
 
+    this.captioning = true
+    this.announce()
     this.warmUps = new WarmUps()
     this.warmUpMembers()
   }
@@ -235,6 +240,10 @@ export class LocalTranslator implements Translator {
     this.notes.clear()
     this.setStatus({ state: 'live', detail: '', loading: null })
     void this.prepare().catch((error: unknown) => this.fail(error))
+  }
+
+  private announce(): void {
+    this.client?.setProvides({ captions: this.captioning, translates: this.translates, voices: [] })
   }
 
   private setSameLanguage(): void {

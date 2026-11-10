@@ -14,7 +14,7 @@
 import { Refusals } from '@/lib/sealed'
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import { MicCapture } from '@/lib/translate/capture'
-import type { LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
+import { PROVIDES_NOTHING, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
 import { packAudio, parseSpeechMessage, parseVoice } from '@/lib/translate/wire'
@@ -32,6 +32,8 @@ export class ServerTranslator implements Translator {
   private capture: MicCapture
   private playbackContext: AudioContext | null = null
   private player: VoicePlayer | null = null
+  /** The languages this member's last sentence went out in as a voice. */
+  private voiced = new Set<string>()
   private refusedConnects = 0
   private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
   private selfPrefs: LangPrefs
@@ -68,6 +70,7 @@ export class ServerTranslator implements Translator {
       client.on('lang', () => this.sendTargets()),
       client.on('member-gone', () => this.sendTargets()),
     ]
+    this.announce()
   }
 
   /**
@@ -106,6 +109,7 @@ export class ServerTranslator implements Translator {
     this.stopped = true
     const client = this.client
     this.detach()
+    client?.setProvides(PROVIDES_NOTHING)
     await client?.removeTranslationTracks()
     await this.capture.close()
     await this.playbackContext?.close()
@@ -121,6 +125,7 @@ export class ServerTranslator implements Translator {
     this.capture.stop()
     // The tracks belonged to the old connection; the next client publishes afresh.
     this.player = this.playbackContext ? new VoicePlayer(this.playbackContext, this.publishTrack) : null
+    this.voiced.clear()
     this.client = null
   }
 
@@ -140,6 +145,7 @@ export class ServerTranslator implements Translator {
       this.refusedConnects = 0
       this.setStatus({ state: 'live', detail: '' })
       this.sendTargets()
+      this.announce()
     }
     speech.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
       if (typeof event.data === 'string') this.onSpeechText(event.data)
@@ -148,6 +154,8 @@ export class ServerTranslator implements Translator {
     speech.onclose = () => {
       if (this.speech !== speech || this.stopped) return
       this.speech = null
+      this.voiced.clear()
+      this.announce()
       if (!opened && ++this.refusedConnects >= MAX_REFUSED_CONNECTS) {
         const reason = 'The speech service cannot be reached or refused the connection.'
         this.setStatus({ state: 'failed', detail: reason })
@@ -174,10 +182,23 @@ export class ServerTranslator implements Translator {
   }
 
   private sendTargets(): void {
-    const sameLanguage = this.targets().length < 2
+    const targets = this.targets()
+    const sameLanguage = targets.length < 2
     if (sameLanguage !== this.status.sameLanguage) this.setStatus({ sameLanguage })
+    for (const lang of this.voiced) if (!targets.includes(lang)) this.voiced.delete(lang)
+    this.announce()
     if (this.speech?.readyState !== WebSocket.OPEN) return
-    this.speech.send(JSON.stringify({ type: 'hello', targets: this.targets() }))
+    this.speech.send(JSON.stringify({ type: 'hello', targets }))
+  }
+
+  // While the connection is open this member's speech is captioned, and
+  // a language is voiced once a sentence has come back spoken in it.
+  private announce(): void {
+    this.client?.setProvides({
+      captions: this.speech?.readyState === WebSocket.OPEN,
+      translates: 'none',
+      voices: [...this.voiced].sort(),
+    })
   }
 
   private endSpeech(): void {
@@ -232,5 +253,8 @@ export class ServerTranslator implements Translator {
     if (voice.pcm.length === 0) return
 
     player.play(voice.lang, voice.pcm, voice.rate)
+    if (this.voiced.has(voice.lang)) return
+    this.voiced.add(voice.lang)
+    this.announce()
   }
 }

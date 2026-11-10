@@ -52,7 +52,19 @@ import {
   type TileKind,
   type TrackKind,
 } from '@/lib/track-kind'
-import { parseAnnouncement, parseLanguageSet, parseRoomMessage, type LangAnnouncement, type LangPrefs, type LanguageSet, type Room, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
+import {
+  parseAnnouncement,
+  parseLanguageSet,
+  parseRoomMessage,
+  PROVIDES_NOTHING,
+  sameProvides,
+  type LangAnnouncement,
+  type LangPrefs,
+  type LanguageSet,
+  type Provides,
+  type Room,
+  type RoomMessage,
+} from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -354,7 +366,7 @@ export class RoomClient {
   private refusals = new Refusals((line, ...detail) => console.warn(`sfu: ${line}`, ...detail))
   private sealing = new Serial()
   private opening = new Serial()
-  private translates: TranslationLevel = 'none'
+  private provides: Provides = PROVIDES_NOTHING
   private election = new Election()
   private room: Room = {
     inCall: (member) => member === this.selfId || this.members.has(member),
@@ -732,9 +744,10 @@ export class RoomClient {
     void this.sendLang()
   }
 
-  setTranslates(translates: TranslationLevel): void {
-    if (this.translates === translates) return
-    this.translates = translates
+  /** Sets and announces what this member's translator does for the room right now. */
+  setProvides(provides: Provides): void {
+    if (sameProvides(this.provides, provides)) return
+    this.provides = provides
     this.elect()
     void this.sendLang()
   }
@@ -844,13 +857,13 @@ export class RoomClient {
   // the id the room knows it by.
   private elect(): void {
     const others = [...this.memberLangs].map(([id, prefs]) => ({ id, lang: prefs.lang, translates: prefs.translates }))
-    const self = this.langPrefs && this.selfId ? [{ id: this.selfId, lang: this.langPrefs.lang, translates: this.translates }] : []
+    const self = this.langPrefs && this.selfId ? [{ id: this.selfId, lang: this.langPrefs.lang, translates: this.provides.translates }] : []
     this.election.hold([...others, ...self])
   }
 
   private async sendLang(): Promise<void> {
     if (!this.langPrefs) return
-    const announcement: LangAnnouncement = { ...this.langPrefs, translates: this.translates }
+    const announcement: LangAnnouncement = { ...this.langPrefs, ...this.provides }
     await this.sendSealed({ type: 'lang' }, JSON.stringify(announcement))
   }
 

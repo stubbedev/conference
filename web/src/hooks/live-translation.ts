@@ -10,7 +10,7 @@ import { LocalTranslator } from '@/lib/speech/local'
 import { StandInEngines } from '@/lib/speech/standin'
 import type { MemberInfo, RoomClient } from '@/lib/sfu'
 import { readStored, storedFields } from '@/lib/storage'
-import { withLocalVoices, withoutVoice, withVoice, type Translations, type Voices } from '@/lib/tiles'
+import { withoutVoice, withVoice, type Translations, type Voices } from '@/lib/tiles'
 import { translationLang } from '@/lib/track-kind'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
@@ -316,10 +316,11 @@ export function useLiveTranslation(
       on: translationBy !== null,
       lang: langPrefs.lang,
       voice: langPrefs.voice,
-      spoken: memberLangs,
-      voices: withLocalVoices(publishedVoices, localVoices, langPrefs.lang),
+      announced,
+      published: publishedVoices,
+      local: localVoices,
     }),
-    [translationBy, langPrefs.lang, langPrefs.voice, memberLangs, publishedVoices, localVoices],
+    [translationBy, langPrefs.lang, langPrefs.voice, announced, publishedVoices, localVoices],
   )
 
   return {
