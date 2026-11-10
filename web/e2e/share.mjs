@@ -127,6 +127,7 @@ export const remoteScreen = `
 })()
 `
 
+// What the viewer made of the share, read at `at` on the page's clock.
 export const shareReceiveCounters = `
 (async () => {
   const tile = (${tileByLabel.toString()})('screen')
@@ -134,7 +135,7 @@ export const shareReceiveCounters = `
   for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
     for (const r of (await pc.getStats()).values()) {
       if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
-        return { decoded: r.framesDecoded || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
+        return { at: performance.now(), decoded: r.framesDecoded || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
       }
     }
   }
@@ -142,8 +143,9 @@ export const shareReceiveCounters = `
 })()
 `
 
-// The share's outgoing encodings by rid, found by the share's own
-// connection, which carries no other video.
+// The share's outgoing encodings by rid, read at `at` on the page's
+// clock, found by the share's own connection, which carries no other
+// video.
 export const shareSendCounters = `
 (async () => {
   const pc = ${sharePeerConnection}
@@ -152,6 +154,6 @@ export const shareSendCounters = `
   for (const r of (await pc.getStats()).values()) {
     if (r.type === 'outbound-rtp' && r.kind === 'video' && r.rid) layers[r.rid] = { ssrc: r.ssrc, encoded: r.framesEncoded || 0, keyframes: r.keyFramesEncoded || 0, plis: r.pliCount || 0, firs: r.firCount || 0, limit: r.qualityLimitationReason, bytes: r.bytesSent || 0, target: r.targetBitrate || 0, nacks: r.nackCount || 0, retransmitted: r.retransmittedBytesSent || 0 }
   }
-  return { layers }
+  return { at: performance.now(), layers }
 })()
 `

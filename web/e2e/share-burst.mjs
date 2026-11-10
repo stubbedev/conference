@@ -60,14 +60,18 @@ const burstStarted = (second) => phaseAt(second) === 'scrolling' && second % (PH
 
 const mbps = (bits) => (bits / 1e6).toFixed(1)
 
-// One second of the share at both ends, from two readings of the counters.
+// One stretch of the share at both ends, from two readings of the
+// counters. A stretch is a second by intent only: each end says when it
+// was read, and the rates are over the time that really passed there.
 function secondOf(second, before, after, estimate) {
-  const h = after.send?.layers.h ?? {}
-  const ph = before.send?.layers.h ?? {}
+  const h = after.send.layers.h ?? {}
+  const ph = before.send.layers.h ?? {}
   return {
     second,
     phase: phaseAt(second),
-    viewerFps: after.recv.decoded - before.recv.decoded,
+    recvSeconds: (after.recv.at - before.recv.at) / 1000,
+    sendSeconds: (after.send.at - before.send.at) / 1000,
+    decoded: after.recv.decoded - before.recv.decoded,
     freezes: after.recv.freezes - before.recv.freezes,
     frozenMs: after.recv.frozenMs - before.recv.frozenMs,
     keyframes: after.recv.keyframes - before.recv.keyframes,
@@ -76,34 +80,38 @@ function secondOf(second, before, after, estimate) {
     presenterPlis: (h.plis ?? 0) - (ph.plis ?? 0) + (h.firs ?? 0) - (ph.firs ?? 0),
     lost: after.recv.lost - before.recv.lost,
     width: after.recv.width,
-    encodedFps: (h.encoded ?? 0) - (ph.encoded ?? 0),
-    sentBps: ((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8,
+    encoded: (h.encoded ?? 0) - (ph.encoded ?? 0),
+    sentBits: ((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8,
     targetBps: h.target ?? 0,
     limit: h.limit ?? '-',
     estimateBps: estimate,
   }
 }
 
-async function counters(presenter, viewer) {
+async function counters(presenter, viewer, second) {
   const [recv, send] = await Promise.all([evalJs(viewer, shareReceiveCounters), evalJs(presenter, shareSendCounters)])
+  if (!recv) throw new Error(`the viewer lost the share at t=${second}s`)
+  if (!send) throw new Error(`the presenter lost the share at t=${second}s`)
   return { recv, send }
 }
+
+const perSecond = (count, seconds) => (seconds > 0 ? count / seconds : 0)
 
 async function timeline(presenter, viewer, seconds) {
   const out = []
   await evalJs(presenter, shareMode(phaseAt(0)))
-  let before = await counters(presenter, viewer)
+  let before = await counters(presenter, viewer, 0)
   for (let second = 0; second < seconds; second++) {
     const phase = phaseAt(second)
     await sleep(1000)
     if (phaseAt(second + 1) !== phase) await evalJs(presenter, shareMode(phaseAt(second + 1)))
-    const after = await counters(presenter, viewer)
-    if (!after.recv) throw new Error(`the viewer lost the share at t=${second}s`)
-    const ssrc = after.send?.layers.h?.ssrc
+    const after = await counters(presenter, viewer, second)
+    const ssrc = after.send.layers.h?.ssrc
     const row = secondOf(second, before, after, ssrc === undefined ? null : await presenter.outgoingEstimate(ssrc))
+    const fps = (count, over) => String(Math.round(perSecond(count, over))).padStart(2)
     console.log(
-      `  t=${String(second).padStart(2)}s ${phase.padEnd(9)} viewer ${String(row.viewerFps).padStart(2)} fps, +${row.freezes} freeze (${row.frozenMs} ms), +${row.keyframes} key, +${row.viewerPlis} pli, +${row.lost} lost, ${row.width}px` +
-        ` | presenter h ${String(row.encodedFps).padStart(2)} fps, +${row.sentKeyframes} key, +${row.presenterPlis} pli, ${mbps(row.sentBps)} Mbps (target ${mbps(row.targetBps)}), ${row.limit}` +
+      `  t=${String(second).padStart(2)}s ${phase.padEnd(9)} viewer ${fps(row.decoded, row.recvSeconds)} fps, +${row.freezes} freeze (${row.frozenMs} ms), +${row.keyframes} key, +${row.viewerPlis} pli, +${row.lost} lost, ${row.width}px` +
+        ` | presenter h ${fps(row.encoded, row.sendSeconds)} fps, +${row.sentKeyframes} key, +${row.presenterPlis} pli, ${mbps(perSecond(row.sentBits, row.sendSeconds))} Mbps (target ${mbps(row.targetBps)}), ${row.limit}` +
         ` | estimate ${row.estimateBps === null ? 'unknown' : `${mbps(row.estimateBps)} Mbps`}`,
     )
     out.push(row)
@@ -114,22 +122,25 @@ async function timeline(presenter, viewer, seconds) {
 
 const mean = (values) => (values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : 0)
 
+const total = (rows, field) => rows.reduce((sum, row) => sum + row[field], 0)
+
 function summarize(rows) {
   const scrolling = rows.filter((row) => row.phase === 'scrolling')
   const still = rows.filter((row) => row.phase === 'still')
   const bursts = Map.groupBy(scrolling, (row) => burstOf(row.second))
   const estimates = (of) => of.map((row) => row.estimateBps).filter((bps) => bps !== null)
+  const sentMbps = (of) => perSecond(total(of, 'sentBits'), total(of, 'sendSeconds')) / 1e6
   const inBursts = rows.filter((row) => burstStarted(row.second))
   return {
-    burstFps: [...bursts.values()].map((burst) => mean(burst.map((row) => row.viewerFps))),
-    scrollEncodedFps: mean(scrolling.map((row) => row.encodedFps)),
-    scrollMbps: mean(scrolling.map((row) => row.sentBps)) / 1e6,
-    stillMbps: mean(still.map((row) => row.sentBps)) / 1e6,
+    burstFps: [...bursts.values()].map((burst) => perSecond(total(burst, 'decoded'), total(burst, 'recvSeconds'))),
+    scrollEncodedFps: perSecond(total(scrolling, 'encoded'), total(scrolling, 'sendSeconds')),
+    scrollMbps: sentMbps(scrolling),
+    stillMbps: sentMbps(still),
     scrollEstimates: estimates(scrolling),
     stillEstimates: estimates(still),
-    burstFreezes: inBursts.reduce((sum, row) => sum + row.freezes, 0),
+    burstFreezes: total(inBursts, 'freezes'),
     burstFrozenMs: Math.max(0, ...inBursts.map((row) => row.frozenMs)),
-    keyframes: rows.reduce((sum, row) => sum + row.keyframes, 0),
+    keyframes: total(rows, 'keyframes'),
   }
 }
 
