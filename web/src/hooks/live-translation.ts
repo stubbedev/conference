@@ -8,9 +8,10 @@ import { browserEngines } from '@/lib/speech/browser'
 import { LocalTranslator } from '@/lib/speech/local'
 import { message } from '@/lib/speech/runtime'
 import { StandInEngines } from '@/lib/speech/standin'
-import { translationKindLang, type MemberInfo, type RoomClient } from '@/lib/sfu'
+import type { MemberInfo, RoomClient } from '@/lib/sfu'
 import { readStored, storedFields } from '@/lib/storage'
 import type { Translations } from '@/lib/tiles'
+import { translationLang } from '@/lib/track-kind'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
@@ -247,7 +248,7 @@ export function useLiveTranslation(
         setTranslationStreams(({ [id]: _gone, ...rest }) => rest)
       })
       client.on('track', ({ sourceId, stream, kind }) => {
-        const lang = translationKindLang(kind)
+        const lang = translationLang(kind)
         if (lang === null) return
         setTranslationStreams((prev) => ({ ...prev, [sourceId]: { ...prev[sourceId], [lang]: stream } }))
       })

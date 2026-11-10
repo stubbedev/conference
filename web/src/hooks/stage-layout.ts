@@ -4,7 +4,8 @@ import { useElementSize } from '@/hooks/element-size'
 import { useLatest } from '@/hooks/latest'
 import { bestGrid, tileRatio } from '@/lib/layout'
 import type { RoomClient } from '@/lib/sfu'
-import { CAMERA_KIND, layoutLayer, LOCAL_SOURCE, SCREEN_KIND, type Tile } from '@/lib/tiles'
+import { layoutLayer, LOCAL_SOURCE, type Tile } from '@/lib/tiles'
+import { CAMERA_KIND, SCREEN_KIND } from '@/lib/track-kind'
 
 export const TILE_GAP = 8
 export const STAGE_TOP = 64

@@ -32,8 +32,18 @@ import {
   screenLayers,
   screenSenderParameters,
 } from '@/lib/encodings'
-import { SCREEN_AUDIO_KIND } from '@/lib/screen'
-import { CAMERA_KIND, SCREEN_KIND, type TileKind } from '@/lib/tiles'
+import {
+  AUDIO_KIND,
+  CAMERA_KIND,
+  isTileKind,
+  SCREEN_AUDIO_KIND,
+  SCREEN_KIND,
+  TILE_KINDS,
+  translationKind,
+  translationLang,
+  type TileKind,
+  type TrackKind,
+} from '@/lib/track-kind'
 import { announcement, isRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
 export interface MemberInfo {
@@ -61,32 +71,11 @@ export interface RemoteTrack {
 
 export type ModerateAction = 'mute' | 'cam' | 'screen' | 'kick'
 
-const AUDIO_KIND = 'audio'
-const TRANSLATION_KIND_PREFIX = 'translation-'
-type TranslationKind = `${typeof TRANSLATION_KIND_PREFIX}${string}`
-
-/** What a published track carries, as offers label it for the SFU and the SFU for viewers. */
-export type TrackKind = typeof AUDIO_KIND | TileKind | typeof SCREEN_AUDIO_KIND | TranslationKind
-
-function translationKind(lang: string): TranslationKind {
-  return `${TRANSLATION_KIND_PREFIX}${lang}`
-}
-
-export function translationKindLang(kind: string): string | null {
-  return kind.startsWith(TRANSLATION_KIND_PREFIX) ? kind.slice(TRANSLATION_KIND_PREFIX.length) : null
-}
-
 /** Simulcast layer of a camera, as the SFU names the encodings. */
 export type { Layer } from '@/lib/quality'
 
 /** How often a viewer's own statistics are checked for trouble. */
 const QUALITY_SAMPLE_MS = 2000
-
-const LAYERED_KINDS: readonly TileKind[] = [CAMERA_KIND, SCREEN_KIND]
-
-function isLayeredKind(kind: string | undefined): kind is TileKind {
-  return LAYERED_KINDS.some((layered) => layered === kind)
-}
 
 function streamKey(sourceId: string, kind: TileKind): string {
   return `${sourceId}:${kind}`
@@ -119,7 +108,7 @@ interface Upstream {
  */
 async function readInboundCounters(
   pc: RTCPeerConnection,
-  kindOf: (mid: string) => string | undefined,
+  kindOf: (mid: string) => TrackKind | undefined,
 ): Promise<Map<TileKind, InboundCounters> | null> {
   const mids = new Map<string, string>()
   for (const transceiver of pc.getTransceivers()) {
@@ -135,7 +124,7 @@ async function readInboundCounters(
 
       const mid = mids.get(String(entry.trackIdentifier))
       const kind = mid === undefined ? undefined : kindOf(mid)
-      if (!isLayeredKind(kind)) continue
+      if (!isTileKind(kind)) continue
 
       const sum = counters.get(kind) ?? noCounts()
       addCounts(sum, {
@@ -1014,7 +1003,7 @@ export class RoomClient {
 
   /** Forgets a member and closes its downstream; reports whether it was known. */
   private dropMember(id: string): boolean {
-    for (const kind of LAYERED_KINDS) {
+    for (const kind of TILE_KINDS) {
       const key = streamKey(id, kind)
       this.layerPrefs.delete(key)
       this.layoutLayers.delete(key)
@@ -1040,7 +1029,7 @@ export class RoomClient {
         const labelled = this.downKinds.get(key)
         const kind: TrackKind =
           ev.track.kind === 'audio'
-            ? labelled !== undefined && translationKindLang(labelled) !== null
+            ? labelled !== undefined && translationLang(labelled) !== null
               ? labelled
               : labelled === SCREEN_AUDIO_KIND
                 ? SCREEN_AUDIO_KIND
@@ -1050,7 +1039,7 @@ export class RoomClient {
         // terms, never as part of the speaker's camera stream, so each
         // gets a stream of its own.
         const stream =
-          translationKindLang(kind) !== null || kind === SCREEN_AUDIO_KIND
+          translationLang(kind) !== null || kind === SCREEN_AUDIO_KIND
             ? new MediaStream([ev.track])
             : (ev.streams[0] ?? new MediaStream([ev.track]))
         this.emit('track', { sourceId, stream, kind })

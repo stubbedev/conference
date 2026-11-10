@@ -12,7 +12,8 @@ import {
   type SpeakerFocus,
 } from './recording-layout.ts'
 import { SPEAKING_HOLD_MS } from './speaking.ts'
-import { CAMERA_KIND, heardThrough, type Translations } from './tiles.ts'
+import { heardThrough, type Translations } from './tiles.ts'
+import { CAMERA_KIND } from './track-kind.ts'
 import { VoiceMeter } from './voice-meter.ts'
 
 const FRAME: Rect = { x: 0, y: 0, width: 1280, height: 720 }

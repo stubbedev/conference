@@ -2,7 +2,8 @@ import { VideoTile } from '@/components/VideoTile'
 import type { ShownCaption } from '@/hooks/live-translation'
 import { STAGE_TOP, TILE_GAP, type StageLayout } from '@/hooks/stage-layout'
 import type { MemberInfo } from '@/lib/sfu'
-import { heardThrough, LOCAL_SOURCE, SCREEN_KIND, tileLabel, type Tile, type Translations } from '@/lib/tiles'
+import { heardThrough, LOCAL_SOURCE, tileLabel, type Tile, type Translations } from '@/lib/tiles'
+import { SCREEN_KIND } from '@/lib/track-kind'
 
 interface StageProps {
   layout: StageLayout

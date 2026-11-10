@@ -1,10 +1,7 @@
 import type { Layer } from './quality.ts'
+import { SCREEN_KIND, type TileKind } from './track-kind.ts'
 
-export const SCREEN_KIND = 'screen'
-export const CAMERA_KIND = 'camera'
 export const LOCAL_SOURCE = 'local'
-
-export type TileKind = typeof SCREEN_KIND | typeof CAMERA_KIND
 
 export interface Tile {
   key: string

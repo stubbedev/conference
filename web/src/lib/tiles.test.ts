@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { CAMERA_KIND, heardThrough, layoutLayer, SCREEN_KIND, type Tile, type Translations } from './tiles.ts'
+import { heardThrough, layoutLayer, type Tile, type Translations } from './tiles.ts'
+import { CAMERA_KIND, SCREEN_KIND } from './track-kind.ts'
 
 const screen: Pick<Tile, 'key' | 'kind'> = { key: 'bob:screen', kind: SCREEN_KIND }
 const camera: Pick<Tile, 'key' | 'kind'> = { key: 'bob:cam', kind: CAMERA_KIND }
