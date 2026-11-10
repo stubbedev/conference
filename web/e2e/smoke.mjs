@@ -593,6 +593,14 @@ const screenSent = `
 })()
 `
 
+// The publisher's open uploads, the share's apart from the camera's, and
+// whether the server answered each with transport-wide congestion control.
+const uploads = `
+window.__pcs
+  .filter((pc) => pc.signalingState !== 'closed' && pc.getSenders().some((s) => s.track))
+  .map((pc) => ({ share: pc.getSenders().some((s) => s.track?.contentHint === 'detail'), twcc: /transport-cc/.test(pc.remoteDescription?.sdp ?? '') }))
+`
+
 function tileByLabel(suffix) {
   return [...document.querySelectorAll('.group')].find((g) => g.querySelector('.hud-label')?.textContent.trim().endsWith(suffix))
 }
@@ -646,10 +654,12 @@ const shareSendCounters = `
   if (!pc) return null
   const mid = pc.getTransceivers().find((t) => t.sender.track?.contentHint === 'detail').mid
   const layers = {}
+  let available = 0
   for (const r of (await pc.getStats()).values()) {
-    if (r.type === 'outbound-rtp' && r.mid === mid && r.rid) layers[r.rid] = { encoded: r.framesEncoded || 0, keyframes: r.keyFramesEncoded || 0, plis: r.pliCount || 0, firs: r.firCount || 0, limit: r.qualityLimitationReason, bytes: r.bytesSent || 0 }
+    if (r.type === 'outbound-rtp' && r.mid === mid && r.rid) layers[r.rid] = { encoded: r.framesEncoded || 0, keyframes: r.keyFramesEncoded || 0, plis: r.pliCount || 0, firs: r.firCount || 0, limit: r.qualityLimitationReason, bytes: r.bytesSent || 0, target: r.targetBitrate || 0 }
+    if (r.type === 'candidate-pair' && r.nominated && r.availableOutgoingBitrate) available = r.availableOutgoingBitrate
   }
-  return layers
+  return { layers, available }
 })()
 `
 
@@ -662,14 +672,15 @@ async function shareTimeline(publisher, viewer) {
     const [recv, send] = await Promise.all([evalJs(viewer, shareReceiveCounters), evalJs(publisher, shareSendCounters)])
     const sample = { recv, send }
     if (previous?.recv && recv) {
-      const h = send?.h ?? {}
-      const ph = previous.send?.h ?? {}
-      const l = send?.l ?? {}
-      const pl = previous.send?.l ?? {}
+      const h = send?.layers.h ?? {}
+      const ph = previous.send?.layers.h ?? {}
+      const l = send?.layers.l ?? {}
+      const pl = previous.send?.layers.l ?? {}
       console.log(
         `  t=${second}s viewer: ${recv.decoded - previous.recv.decoded} fps, +${recv.keyframes - previous.recv.keyframes} key, +${recv.freezes - previous.recv.freezes} freeze (${recv.frozenMs - previous.recv.frozenMs} ms), +${recv.plis - previous.recv.plis} pli, +${recv.lost - previous.recv.lost} lost, ${recv.width}px` +
-          ` | presenter h: ${(h.encoded ?? 0) - (ph.encoded ?? 0)} fps, +${(h.keyframes ?? 0) - (ph.keyframes ?? 0)} key, +${(h.plis ?? 0) - (ph.plis ?? 0)} pli, ${(((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8 / 1e6).toFixed(1)} Mbps, ${h.limit}` +
-          ` l: +${(l.keyframes ?? 0) - (pl.keyframes ?? 0)} key, +${(l.plis ?? 0) - (pl.plis ?? 0)} pli`,
+          ` | presenter h: ${(h.encoded ?? 0) - (ph.encoded ?? 0)} fps, +${(h.keyframes ?? 0) - (ph.keyframes ?? 0)} key, +${(h.plis ?? 0) - (ph.plis ?? 0)} pli, ${(((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8 / 1e6).toFixed(1)} Mbps (target ${((h.target ?? 0) / 1e6).toFixed(1)}), ${h.limit}` +
+          ` l: +${(l.keyframes ?? 0) - (pl.keyframes ?? 0)} key, +${(l.plis ?? 0) - (pl.plis ?? 0)} pli` +
+          ` | share estimate ${((send?.available ?? 0) / 1e6).toFixed(1)} Mbps`,
       )
     }
     samples.push(sample)
@@ -726,7 +737,11 @@ async function checkScreenShare(failures, publisher, viewer) {
   const sent = await waitFor(publisher, screenSent, (s) => s && ['l', 'h'].every((rid) => s.layers[rid]?.frames > 0), 20000)
   console.log(`screen share sent: ${JSON.stringify(sent.value)}`)
   check(failures, 'screen share', sent.ok, `the share is not sent as a slow and a fluid encoding: ${JSON.stringify(sent.value)}; console: ${publisherConsole.join(' | ')}`)
-  check(failures, 'screen share', sent.value?.twcc === true, 'the server did not negotiate transport-wide congestion control on the upload')
+  const open = await evalJs(publisher, uploads)
+  console.log(`screen share uploads: ${JSON.stringify(open)}`)
+  check(failures, 'screen share', open.filter((up) => up.share).length === 1, `the share is not published on a connection of its own: ${JSON.stringify(open)}`)
+  check(failures, 'screen share', open.some((up) => !up.share && up.twcc), `the camera's upload lost transport-wide congestion control: ${JSON.stringify(open)}`)
+  check(failures, 'screen share', sent.value?.twcc === false, "the server negotiated transport-wide congestion control on the share's upload, which holds its estimate down while the screen is still")
   for (const rid of ['l', 'h']) {
     const width = sent.value?.layers[rid]?.width
     check(failures, 'screen share', width === SHARE_WIDTH, `the ${rid} encoding of the share is ${width}px wide, not the full ${SHARE_WIDTH}px`)
@@ -766,6 +781,9 @@ async function checkScreenShare(failures, publisher, viewer) {
   check(failures, 'screen share', await clickButtonByTitle(publisher, 'Stop sharing'), 'no "Stop sharing" button')
   const gone = await waitFor(viewer, remoteScreen, (v) => v === null, 20000)
   check(failures, 'screen share', gone.ok, 'the share tile stayed after the share stopped')
+  const left = await evalJs(publisher, uploads)
+  check(failures, 'screen share', !left.some((up) => up.share), `the share's connection stayed open after the share stopped: ${JSON.stringify(left)}`)
+  check(failures, 'screen share', left.some((up) => !up.share), `stopping the share closed the camera's upload too: ${JSON.stringify(left)}`)
 }
 
 async function checkPinRoundTrip(failures, label, browser) {

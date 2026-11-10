@@ -1,9 +1,10 @@
 // Package sfu implements the transport-agnostic video core: a hub of live
-// rooms where each member publishes one upstream peer connection and
-// subscribes to every other member through per-source downstream
-// peer connections. RTP packets are forwarded opaquely, which is what
-// makes client-side end-to-end encryption possible: the server never
-// holds media keys and only ever relays ciphertext.
+// rooms where each member publishes on an upstream peer connection (and
+// a second one while sharing its screen) and subscribes to every other
+// member through per-source downstream peer connections. RTP packets are
+// forwarded opaquely, which is what makes client-side end-to-end
+// encryption possible: the server never holds media keys and only ever
+// relays ciphertext.
 //
 // The forwarding design follows Galène (https://github.com/jech/galene):
 // publishers offer upstream, the server offers downstream, ICE is
@@ -25,10 +26,10 @@ import (
 	"github.com/stubbe/conference/internal/relay"
 )
 
-// Engine owns the pion API factories: one for the connections members
+// Engine owns the pion API factories: one per kind of connection members
 // publish on, one for the connections they watch others on.
 type Engine struct {
-	upstream   *webrtc.API
+	upstream   [upstreamCount]*webrtc.API
 	downstream *webrtc.API
 
 	mediaAddrs []relay.MediaAddr
@@ -57,12 +58,18 @@ func NewEngine(udpPort int, externalIPs []netip.Addr) (*Engine, func(), error) {
 // newEngine builds the engine on settingEngine with the SFU's codecs
 // and interceptors.
 func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr) (*Engine, error) {
-	upstream, err := newAPI(settingEngine, directionUpstream)
-	if err != nil {
-		return nil, err
+	var upstream [upstreamCount]*webrtc.API
+
+	for which := range upstreamCount {
+		api, err := newAPI(settingEngine, which.feedback())
+		if err != nil {
+			return nil, fmt.Errorf("sfu: %s api: %w", which, err)
+		}
+
+		upstream[which] = api
 	}
 
-	downstream, err := newAPI(settingEngine, directionDownstream)
+	downstream, err := newAPI(settingEngine, feedbackReceiverEstimate)
 	if err != nil {
 		return nil, err
 	}
@@ -70,14 +77,18 @@ func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr)
 	return &Engine{upstream: upstream, downstream: downstream, mediaAddrs: mediaAddrs}, nil
 }
 
-type direction int
+// congestionFeedback is what the server reports back for the browser's
+// send-side bandwidth estimate.
+type congestionFeedback int
 
 const (
-	directionUpstream direction = iota
-	directionDownstream
+	// feedbackReceiverEstimate is REMB and receiver reports only.
+	feedbackReceiverEstimate congestionFeedback = iota
+	// feedbackTransportWide adds transport-wide congestion control feedback.
+	feedbackTransportWide
 )
 
-func newAPI(settingEngine webrtc.SettingEngine, dir direction) (*webrtc.API, error) {
+func newAPI(settingEngine webrtc.SettingEngine, feedback congestionFeedback) (*webrtc.API, error) {
 	mediaEngine, err := newMediaEngine()
 	if err != nil {
 		return nil, err
@@ -88,7 +99,7 @@ func newAPI(settingEngine webrtc.SettingEngine, dir direction) (*webrtc.API, err
 		return nil, err
 	}
 
-	if dir == directionUpstream {
+	if feedback == feedbackTransportWide {
 		err = webrtc.ConfigureTWCCSender(mediaEngine, registry)
 		if err != nil {
 			return nil, fmt.Errorf("sfu: transport-wide congestion control feedback: %w", err)
@@ -333,11 +344,11 @@ func newInterceptors() (*interceptor.Registry, error) {
 	return registry, nil
 }
 
-// NewUpstreamPeerConnection creates a connection a member publishes on.
-func (e *Engine) NewUpstreamPeerConnection() (*webrtc.PeerConnection, error) {
-	pc, err := e.upstream.NewPeerConnection(webrtc.Configuration{})
+// NewUpstreamPeerConnection creates the connection a member publishes up on.
+func (e *Engine) NewUpstreamPeerConnection(up Upstream) (*webrtc.PeerConnection, error) {
+	pc, err := e.upstream[up].NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
-		return nil, fmt.Errorf("sfu: new upstream peer connection: %w", err)
+		return nil, fmt.Errorf("sfu: new %s peer connection: %w", up, err)
 	}
 
 	return pc, nil

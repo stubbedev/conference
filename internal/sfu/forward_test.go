@@ -76,8 +76,7 @@ func publishWithBrowserExtmap(t *testing.T, publisher *testPeer) (*webrtc.TrackL
 		t.Fatalf("publisher pc: %v", err)
 	}
 
-	publisher.setLocal(publisherPC)
-	publisherPC.OnICECandidate(onICECandidate(publisher.member, "up"))
+	attachUp(publisher, sfu.UpstreamMedia, publisherPC)
 
 	audio, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
@@ -91,7 +90,7 @@ func publishWithBrowserExtmap(t *testing.T, publisher *testPeer) (*webrtc.TrackL
 		t.Fatalf("add audio: %v", err)
 	}
 
-	negotiateUp(t, publisher, publisherPC)
+	negotiateUp(t, publisher, sfu.UpstreamMedia, publisherPC)
 
 	params := sender.GetParameters().RTPParameters
 

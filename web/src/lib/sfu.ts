@@ -1,9 +1,9 @@
 // RoomClient: the browser side of the signaling protocol (see
-// internal/sfu) and the WebRTC engine. Each member publishes one
-// upstream peer connection and answers one downstream connection per
-// remote source. When the room is end-to-end encrypted, encoded frames
-// are transformed through the E2EE worker, so the server only ever
-// relays ciphertext.
+// internal/sfu) and the WebRTC engine. Each member publishes its camera
+// and microphone on one upstream peer connection, a shared screen on a
+// second one, and answers one downstream connection per remote source.
+// When the room is end-to-end encrypted, encoded frames are transformed
+// through the E2EE worker, so the server only ever relays ciphertext.
 
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
 import {
@@ -87,6 +87,26 @@ function isLayeredKind(kind: string | undefined): kind is TileKind {
 
 function streamKey(sourceId: string, kind: TileKind): string {
   return `${sourceId}:${kind}`
+}
+
+// The connections a member publishes on, named as the SFU names them. A
+// share gets its own: the server answers it without transport-wide
+// congestion control, so its bandwidth estimate stays at the server's
+// ceiling while the screen is still instead of settling on what idling
+// sends.
+const MEDIA_UP = 'up'
+const SCREEN_UP = 'up-screen'
+type UpstreamId = typeof MEDIA_UP | typeof SCREEN_UP
+const UPSTREAM_IDS: readonly UpstreamId[] = [MEDIA_UP, SCREEN_UP]
+
+function isUpstreamId(pc: string | undefined): pc is UpstreamId {
+  return UPSTREAM_IDS.some((id) => id === pc)
+}
+
+/** One publishing connection and its chain of serialized offers. */
+interface Upstream {
+  pc: RTCPeerConnection
+  negotiation: Promise<void>
 }
 
 /**
@@ -299,19 +319,16 @@ async function tuneScreenSender(sender: RTCRtpSender): Promise<void> {
 export class RoomClient {
   private ws: WebSocket | null = null
   private opts: RoomClientOptions
-  private up: RTCPeerConnection | null = null
+  private ups = new Map<UpstreamId, Upstream>()
   private downs = new Map<string, RTCPeerConnection>()
   private pendingIce = new Map<string, RTCIceCandidateInit[]>()
   private members = new Map<string, MemberInfo>()
   private downKinds = new Map<string, string>()
-  private screenTrackIds = new Set<string>()
-  private screenSenders: RTCRtpSender[] = []
   private translationTrackLangs = new Map<string, string>()
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
   private memberLangs = new Map<string, LangAnnouncement>()
   private translates: TranslationLevel = 'none'
-  private negotiation: Promise<void> = Promise.resolve()
   private transformed = new WeakSet<object>()
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
@@ -462,8 +479,7 @@ export class RoomClient {
   }
 
   async publish(stream: MediaStream): Promise<void> {
-    const pc = this.newPC('up')
-    this.up = pc
+    const pc = this.openUp(MEDIA_UP)
 
     this.localMic = stream.getAudioTracks()[0] ?? null
     this.localCam = stream.getVideoTracks()[0] ?? null
@@ -471,7 +487,7 @@ export class RoomClient {
     this.camSender = this.localCam ? this.addCamera(pc, this.localCam, stream) : null
 
     for (const sender of pc.getSenders()) this.installSenderTransform(sender)
-    if (pc.getSenders().length > 0) await this.sendUpOffer()
+    if (pc.getSenders().length > 0) await this.sendUpOffer(MEDIA_UP)
 
     this.state = {
       mic: this.localMic?.enabled ?? false,
@@ -481,47 +497,67 @@ export class RoomClient {
     this.sendState()
   }
 
+  // addScreen publishes a share on a connection of its own. A share
+  // carries its own sound when the picker offered it; everything on this
+  // connection is announced as the screen or its audio, so the server
+  // treats the sound as audio and every member hears what is shared.
   async addScreen(stream: MediaStream): Promise<void> {
-    const pc = this.up
-    if (!pc) throw new Error('Publish before sharing your screen.')
+    if (!this.ups.has(MEDIA_UP)) throw new Error('Publish before sharing your screen.')
+    if (this.ups.has(SCREEN_UP)) throw new Error('A screen is already being shared.')
 
-    for (const track of stream.getTracks()) {
-      // A share carries its own sound when the picker offered it; it is
-      // announced as screen audio so the server treats it as audio and
-      // every member hears what is shared.
-      this.screenTrackIds.add(track.id)
+    const pc = this.openUp(SCREEN_UP)
+    try {
+      for (const track of stream.getTracks()) {
+        const sender = track.kind === 'video' ? await this.addScreenVideo(pc, track, stream) : pc.addTrack(track, stream)
+        this.installSenderTransform(sender)
 
-      const sender = track.kind === 'video' ? await this.addScreenVideo(pc, track, stream) : pc.addTrack(track, stream)
-      this.screenSenders.push(sender)
-      this.installSenderTransform(sender)
-
-      if (track.kind === 'video') await tuneScreenSender(sender)
+        if (track.kind === 'video') await tuneScreenSender(sender)
+      }
+      await this.sendUpOffer(SCREEN_UP)
+    } catch (err) {
+      this.dropScreen()
+      throw err
     }
 
     this.state = { ...this.state, sharing: true }
     void this.tuneCamera()
     this.sendState()
-    await this.sendUpOffer()
   }
 
   async removeScreen(): Promise<void> {
-    const pc = this.up
-    if (!pc) return
-
-    for (const sender of this.screenSenders) {
-      if (sender.track) this.screenTrackIds.delete(sender.track.id)
-      try {
-        pc.removeTrack(sender)
-      } catch (err) {
-        console.warn('removeTrack', err)
-      }
-    }
-    this.screenSenders = []
+    if (!this.dropScreen()) return
 
     this.state = { ...this.state, sharing: false }
     void this.tuneCamera()
     this.sendState()
-    await this.sendUpOffer()
+  }
+
+  /** Closes the share's connection on both ends; reports whether it was open. */
+  private dropScreen(): boolean {
+    if (!this.closeUp(SCREEN_UP)) return false
+    this.send({ type: 'close', pc: SCREEN_UP })
+    return true
+  }
+
+  private openUp(id: UpstreamId): RTCPeerConnection {
+    const pc = this.newPC(id)
+    this.ups.set(id, { pc, negotiation: Promise.resolve() })
+    return pc
+  }
+
+  /** Closes one publishing connection; reports whether it was open. */
+  private closeUp(id: UpstreamId): boolean {
+    const up = this.ups.get(id)
+    if (!up) return false
+
+    this.ups.delete(id)
+    this.pendingIce.delete(id)
+    up.pc.close()
+    return true
+  }
+
+  private closeUps(): void {
+    for (const id of UPSTREAM_IDS) this.closeUp(id)
   }
 
   // tuneCamera retunes the camera's encodings in place for the track it
@@ -539,10 +575,10 @@ export class RoomClient {
     )
   }
 
-  private demandLayers(mid: string, active: boolean[]): void {
-    const sender = this.up?.getTransceivers().find((transceiver) => transceiver.mid === mid)?.sender
+  private demandLayers(up: UpstreamId, mid: string, active: boolean[]): void {
+    const sender = this.ups.get(up)?.pc.getTransceivers().find((transceiver) => transceiver.mid === mid)?.sender
     if (!sender) return
-    void this.retune(sender, 'pausing and resuming camera layers', (parameters) => demandParameters(parameters, active))
+    void this.retune(sender, 'pausing and resuming simulcast layers', (parameters) => demandParameters(parameters, active))
   }
 
   private retune(sender: RTCRtpSender, doing: string, change: (parameters: RTCRtpSendParameters) => RTCRtpSendParameters): Promise<void> {
@@ -552,7 +588,7 @@ export class RoomClient {
   }
 
   async replaceLocalTrack(kind: 'mic' | 'cam', track: MediaStreamTrack): Promise<void> {
-    const pc = this.up
+    const pc = this.ups.get(MEDIA_UP)?.pc
     if (!pc) return
 
     let sender = kind === 'mic' ? this.micSender : this.camSender
@@ -562,7 +598,7 @@ export class RoomClient {
       this.installSenderTransform(sender)
       if (kind === 'mic') this.micSender = sender
       else this.camSender = sender
-      await this.sendUpOffer()
+      await this.sendUpOffer(MEDIA_UP)
     } else {
       await sender.replaceTrack(track)
       if (kind === 'cam') await this.tuneCamera()
@@ -681,18 +717,18 @@ export class RoomClient {
 
   /** Publishes a translated-voice track, labelled translation-<lang> for the room. */
   async addTranslationTrack(lang: string, track: MediaStreamTrack): Promise<void> {
-    const pc = this.up
+    const pc = this.ups.get(MEDIA_UP)?.pc
     if (!pc) throw new Error('Publish before adding a translation track.')
 
     this.translationTrackLangs.set(track.id, lang)
     const sender = pc.addTrack(track, new MediaStream([track]))
     this.translationSenders.push(sender)
     this.installSenderTransform(sender)
-    await this.sendUpOffer()
+    await this.sendUpOffer(MEDIA_UP)
   }
 
   async removeTranslationTracks(): Promise<void> {
-    const pc = this.up
+    const pc = this.ups.get(MEDIA_UP)?.pc
     if (!pc || this.translationSenders.length === 0) return
 
     for (const sender of this.translationSenders) {
@@ -704,7 +740,7 @@ export class RoomClient {
     }
     this.translationSenders = []
     this.translationTrackLangs.clear()
-    await this.sendUpOffer()
+    await this.sendUpOffer(MEDIA_UP)
   }
 
   moderate(target: string, action: ModerateAction): void {
@@ -728,7 +764,7 @@ export class RoomClient {
     this.closing = true
     this.stopQualityWatch()
     this.ws?.close()
-    this.up?.close()
+    this.closeUps()
     for (const pc of this.downs.values()) pc.close()
     this.downs.clear()
     this.worker.terminate()
@@ -743,7 +779,7 @@ export class RoomClient {
   pause(): void {
     this.closing = true
     this.ws?.close()
-    this.up?.close()
+    this.closeUps()
   }
 
   destroy(): void {
@@ -829,18 +865,21 @@ export class RoomClient {
     return transceiver.sender
   }
 
-  // Offers are serialized: a second createOffer/setLocalDescription
-  // overlapping the first (two translation tracks added at once) makes
-  // Chrome reject the description as modified.
-  private sendUpOffer(): Promise<void> {
-    const next = this.negotiation.then(() => this.negotiateUp())
-    this.negotiation = next.catch(() => {})
+  // Offers are serialized per connection: a second
+  // createOffer/setLocalDescription overlapping the first (two
+  // translation tracks added at once) makes Chrome reject the
+  // description as modified.
+  private sendUpOffer(id: UpstreamId): Promise<void> {
+    const up = this.ups.get(id)
+    if (!up) return Promise.reject(new Error(`Offer on ${id}, which is not open.`))
+
+    const next = up.negotiation.then(() => this.negotiateUp(id, up.pc))
+    up.negotiation = next.catch(() => {})
     return next
   }
 
-  private async negotiateUp(): Promise<void> {
-    const pc = this.up
-    if (!pc) return
+  private async negotiateUp(id: UpstreamId, pc: RTCPeerConnection): Promise<void> {
+    if (this.ups.get(id)?.pc !== pc) return
 
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
@@ -848,28 +887,29 @@ export class RoomClient {
     const tracks = pc
       .getTransceivers()
       .filter((t) => t.sender.track && t.mid)
-      .map((t) => ({ mid: t.mid as string, kind: this.kindOf(t.sender.track) }))
+      .map((t) => ({ mid: t.mid as string, kind: this.kindOf(id, t.sender.track as MediaStreamTrack) }))
 
-    this.send({ type: 'offer', sdp: pc.localDescription?.sdp ?? '', tracks })
+    this.send({ type: 'offer', pc: id, sdp: pc.localDescription?.sdp ?? '', tracks })
   }
 
-  private kindOf(track: MediaStreamTrack | null): string {
-    if (!track) return 'camera'
+  private kindOf(id: UpstreamId, track: MediaStreamTrack): string {
+    if (id === SCREEN_UP) return track.kind === 'audio' ? SCREEN_AUDIO_KIND : SCREEN_KIND
     const translationLang = this.translationTrackLangs.get(track.id)
     if (translationLang) return translationKind(translationLang)
-    if (this.screenTrackIds.has(track.id)) return track.kind === 'audio' ? SCREEN_AUDIO_KIND : 'screen'
     if (track.kind === 'audio') return 'audio'
-    return 'camera'
+    return CAMERA_KIND
   }
 
   private async handle(msg: WireMessage): Promise<void> {
     switch (msg.type) {
-      case 'answer':
-        if (msg.pc === 'up' && this.up && msg.sdp) {
-          await this.up.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
-          this.flushIce('up', this.up)
+      case 'answer': {
+        const pc = isUpstreamId(msg.pc) ? this.ups.get(msg.pc)?.pc : undefined
+        if (pc && msg.pc && msg.sdp) {
+          await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
+          this.flushIce(msg.pc, pc)
         }
         return
+      }
       case 'offer':
         if (msg.pc?.startsWith('down-') && msg.sdp) {
           await this.handleDownOffer(msg.pc.slice('down-'.length), msg)
@@ -962,9 +1002,9 @@ export class RoomClient {
         return
       case 'layers': {
         const active = msg.active
-        if (typeof msg.mid !== 'string' || !Array.isArray(active)) return
+        if (!isUpstreamId(msg.pc) || typeof msg.mid !== 'string' || !Array.isArray(active)) return
         if (active.length !== LAYER_RIDS.length || !active.every((value) => typeof value === 'boolean')) return
-        this.demandLayers(msg.mid, active as boolean[])
+        this.demandLayers(msg.pc, msg.mid, active as boolean[])
         return
       }
       default:
@@ -1034,7 +1074,11 @@ export class RoomClient {
   private handleIce(msg: WireMessage): void {
     if (!msg.candidate || !msg.pc) return
 
-    const pc = msg.pc === 'up' ? this.up : this.downs.get(msg.pc.slice('down-'.length))
+    const id = msg.pc
+    const pc = isUpstreamId(id) ? this.ups.get(id)?.pc : this.downs.get(id.slice('down-'.length))
+    // A publishing connection exists before the server learns of it, so a
+    // candidate for one that is gone trails its close and has nowhere to go.
+    if (isUpstreamId(id) && !pc) return
     if (!pc || !pc.remoteDescription) {
       const queue = this.pendingIce.get(msg.pc) ?? []
       queue.push(msg.candidate)
@@ -1093,7 +1137,7 @@ export class RoomClient {
     ]
 
     const connections: [string, RTCPeerConnection][] = []
-    if (this.up) connections.push(['up', this.up])
+    for (const [id, up] of this.ups) connections.push([id, up.pc])
     for (const [id, down] of this.downs) connections.push([`down-${id.slice(0, 6)}`, down])
 
     for (const [label, pc] of connections) {

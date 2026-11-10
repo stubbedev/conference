@@ -387,7 +387,7 @@ func TestScreenShareKeepsItsFluidLayerWithNobodyWatchingIt(t *testing.T) {
 			preferred: layerLow, steps: newLadder(), mung: newMunger(), buf: nil,
 		}
 		track := &UpTrack{
-			mid: "1", kind: kind, pc: nil, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP8,
+			key: trackKey{up: UpstreamMedia, mid: "1"}, kind: kind, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP8,
 			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{}, viewers: map[string]*upViewer{"thumbnail": thumbnail},
 			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
 		}
@@ -516,7 +516,8 @@ func TestAStillScreenKeepsItsLayersWhileACameraLosesThem(t *testing.T) {
 		layer.lastPacket.Store(sparse.UnixNano())
 
 		track := &UpTrack{
-			mid: "1", kind: tc.kind, pc: nil, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP9,
+			key: trackKey{up: UpstreamMedia, mid: "1"}, kind: tc.kind,
+			first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP9,
 			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{layer, nil, nil}, viewers: map[string]*upViewer{},
 			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
 		}

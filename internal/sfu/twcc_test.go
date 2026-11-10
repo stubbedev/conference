@@ -78,8 +78,7 @@ func TestPublisherReceivesTransportWideFeedback(t *testing.T) {
 		t.Fatalf("publisher pc: %v", err)
 	}
 
-	publisher.setLocal(publisherPC)
-	publisherPC.OnICECandidate(onICECandidate(publisher.member, "up"))
+	attachUp(publisher, sfu.UpstreamMedia, publisherPC)
 
 	video := newSampleTrack(t, webrtc.MimeTypeVP8, "video")
 
@@ -88,7 +87,7 @@ func TestPublisherReceivesTransportWideFeedback(t *testing.T) {
 		t.Fatalf("add video: %v", err)
 	}
 
-	negotiateUp(t, publisher, publisherPC)
+	negotiateUp(t, publisher, sfu.UpstreamMedia, publisherPC)
 
 	if !strings.Contains(publisherPC.RemoteDescription().SDP, transportCCURI) {
 		t.Fatal("the server's answer to a publisher does not negotiate transport-wide sequence numbers")
@@ -126,7 +125,7 @@ func TestViewerOfferLeavesOutTransportWideFeedback(t *testing.T) {
 	viewer := newTestPeer(t, hub, engine, "bob", false)
 	viewerSubscribe(t, viewer, engine)
 
-	offer := viewer.localPC().RemoteDescription().SDP
+	offer := viewer.localPC(downID(publisher)).RemoteDescription().SDP
 	if strings.Contains(offer, transportCCURI) || strings.Contains(offer, webrtc.TypeRTCPFBTransportCC) {
 		t.Fatal("the server asks a viewer for transport-wide feedback it has no congestion controller to use")
 	}

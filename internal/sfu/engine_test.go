@@ -78,7 +78,7 @@ func freeUDPPort(t *testing.T) int {
 func gatheredSDP(t *testing.T, engine *sfu.Engine) string {
 	t.Helper()
 
-	connection, err := engine.NewUpstreamPeerConnection()
+	connection, err := engine.NewUpstreamPeerConnection(sfu.UpstreamMedia)
 	if err != nil {
 		t.Fatal(err)
 	}
