@@ -53,5 +53,3 @@ export async function firstThatRuns<R, T>(rungs: readonly R[], attempt: (rung: R
 export function fallbackToWasm(err: unknown): boolean {
   return REFUSED_ON_DEVICE.test(errorMessage(err))
 }
-
-export { errorMessage as message } from '../errors.ts'

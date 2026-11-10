@@ -4,9 +4,9 @@ import { toast } from 'sonner'
 import { useLatest } from '@/hooks/latest'
 import { usePersistentState } from '@/hooks/persistent'
 import { api, type TranslationConfig } from '@/lib/api'
+import { errorMessage } from '@/lib/errors'
 import { browserEngines } from '@/lib/speech/browser'
 import { LocalTranslator } from '@/lib/speech/local'
-import { message } from '@/lib/speech/runtime'
 import { StandInEngines } from '@/lib/speech/standin'
 import type { MemberInfo, RoomClient } from '@/lib/sfu'
 import { readStored, storedFields } from '@/lib/storage'
@@ -33,7 +33,7 @@ const TRANSLATION_CHECKING: TranslationConfig = {
 function translationUnknown(err: unknown): TranslationConfig {
   return {
     available: false,
-    reason: `Live translation is unavailable: the server configuration could not be read: ${message(err)}`,
+    reason: `Live translation is unavailable: the server configuration could not be read: ${errorMessage(err)}`,
     mode: 'server',
     languages: [],
     external: false,
