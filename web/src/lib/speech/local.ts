@@ -57,10 +57,6 @@ interface Awaited {
   taken: boolean
 }
 
-function translatedId(segId: string, target: string): string {
-  return `${segId}-${target}`
-}
-
 export class LocalTranslator implements Translator {
   private client: RoomClient | null = null
   private unsubscribe: (() => void)[] = []
@@ -381,7 +377,7 @@ export class LocalTranslator implements Translator {
   }
 
   private await(caption: CaptionLine, earlier: readonly string[]): void {
-    const segId = translatedId(caption.segId, this.selfPrefs.lang)
+    const { segId } = caption
     const awaited = this.awaited.get(segId) ?? { timer: null, latest: caption, earlier, arrived: false, taken: false }
     awaited.latest = caption
     awaited.earlier = earlier
@@ -467,7 +463,7 @@ export class LocalTranslator implements Translator {
     }
     if (this.stopped) return
 
-    const line: Translation = { speaker: caption.speaker, segId: translatedId(caption.segId, target), sourceLang: caption.lang, lang: target, text, final: caption.final }
+    const line: Translation = { speaker: caption.speaker, segId: caption.segId, sourceLang: caption.lang, lang: target, text, final: caption.final }
     const self = this.client?.memberId
     if (share && self) void this.client?.sendCaption({ k: 'translation', by: self, ...line })
     if (target === this.selfPrefs.lang) this.show(line, true)

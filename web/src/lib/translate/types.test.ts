@@ -16,7 +16,7 @@ const CALL = ['anna', 'bob', 'cleo']
 const inCall = (member: string) => CALL.includes(member)
 
 const caption: CaptionLine = { k: 'caption', speaker: 'anna', segId: 'anna-3', sourceLang: 'de', lang: 'de', text: 'Guten Morgen.', final: true }
-const translation: TranslationLine = { ...caption, k: 'translation', by: 'bob', segId: 'anna-3-en', lang: 'en', text: 'Good morning.' }
+const translation: TranslationLine = { ...caption, k: 'translation', by: 'bob', lang: 'en', text: 'Good morning.' }
 
 /** Why a message from sender is refused; fails when it is read instead. */
 function refusal(value: unknown, sender: string): string {

@@ -21,7 +21,10 @@ export function isVoiceChoice(value: unknown): value is VoiceChoice {
   return VOICE_CHOICES.includes(value as VoiceChoice)
 }
 
-/** A subtitle line: interim lines are replaced in place by segId. */
+/**
+ * A subtitle line: interim lines are replaced in place by segId, which
+ * names the sentence in whatever language a line gives it.
+ */
 export interface CaptionLine {
   k: 'caption'
   speaker: string
