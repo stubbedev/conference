@@ -1358,7 +1358,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 
 		down.sends[track.key] = &downSend{local: local, kind: track.kind}
 		track.addViewer(m.ID, local, m.layerPreference(sourceID, track.kind))
-		down.watchFeedback(transceiver.Sender(), m, track)
+		down.watchFeedback(transceiver.Sender(), local, m, track)
 	}
 
 	added := len(down.sends) - beforeSends
@@ -2329,7 +2329,7 @@ func (dp *DownPeer) removeSender(local *forwardTrack, viewer *Member) {
 // publisher's bitrate. Without the relay a constrained downlink floods
 // into a frozen picture no keyframe can recover. The loop ends when the
 // peer connection closes and ReadRTCP fails.
-func (dp *DownPeer) watchFeedback(sender *webrtc.RTPSender, viewer *Member, track *UpTrack) {
+func (dp *DownPeer) watchFeedback(sender *webrtc.RTPSender, local *forwardTrack, viewer *Member, track *UpTrack) {
 	if sender == nil {
 		return
 	}
@@ -2343,8 +2343,13 @@ func (dp *DownPeer) watchFeedback(sender *webrtc.RTPSender, viewer *Member, trac
 				return
 			}
 
+			ssrc, bound := local.boundSSRC()
+			if !bound {
+				continue
+			}
+
 			for _, packet := range packets {
-				dp.relayFeedback(&relay, packet, viewer, track)
+				dp.relayFeedback(&relay, packet, viewer, track, ssrc)
 			}
 		}
 	}()
@@ -2359,7 +2364,11 @@ type feedbackRelay struct {
 }
 
 // relayFeedback hands one RTCP packet from a viewer to the publisher.
-func (dp *DownPeer) relayFeedback(relay *feedbackRelay, packet rtcp.Packet, viewer *Member, track *UpTrack) {
+// pion hands every sender of the connection each packet that names its
+// SSRC, so a receiver report arrives with the blocks of the viewer's
+// other tracks too; only the block about ssrc, the SSRC this track is
+// sent on, describes it.
+func (dp *DownPeer) relayFeedback(relay *feedbackRelay, packet rtcp.Packet, viewer *Member, track *UpTrack, ssrc uint32) {
 	now := time.Now()
 
 	switch feedback := packet.(type) {
@@ -2382,7 +2391,9 @@ func (dp *DownPeer) relayFeedback(relay *feedbackRelay, packet rtcp.Packet, view
 		relay.loss = now
 
 		for _, report := range feedback.Reports {
-			track.updateViewerLoss(viewer.ID, report.FractionLost, elapsed)
+			if report.SSRC == ssrc {
+				track.updateViewerLoss(viewer.ID, report.FractionLost, elapsed)
+			}
 		}
 	}
 }

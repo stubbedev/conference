@@ -18,6 +18,20 @@ func simulcastTrack(key trackKey, kind string) *UpTrack {
 	}
 }
 
+// testRoom is a room with no engine behind it, for tests that drive its
+// members directly.
+func testRoom(slug string) *Room {
+	return &Room{
+		slug: slug, name: slug, limit: 0, hub: nil,
+		cfg: &HubConfig{Engine: nil, Relay: nil, MaxMembers: 0, Speech: nil, Translate: false},
+		mu:  sync.Mutex{}, members: map[string]*Member{}, nextShort: 0, recorder: "", translatingBy: "", rembStop: nil,
+	}
+}
+
+func testJoin(slug, name string) JoinRequest {
+	return JoinRequest{Slug: slug, RoomName: slug, MemberName: name, MaxMembers: 0, Priv: false, Host: "", Resume: ""}
+}
+
 func publishingOn(member *Member, which Upstream, tracks ...*UpTrack) {
 	byMid := make(map[string]*UpTrack, len(tracks))
 	for _, track := range tracks {
@@ -38,17 +52,10 @@ func publishingOn(member *Member, which Upstream, tracks ...*UpTrack) {
 func TestLayerDemandNamesTheConnection(t *testing.T) {
 	t.Parallel()
 
-	room := &Room{
-		slug: "two-upstreams", name: "Two upstreams", limit: 0, hub: nil,
-		cfg: &HubConfig{Engine: nil, Relay: nil, MaxMembers: 0, Speech: nil, Translate: false},
-		mu:  sync.Mutex{}, members: map[string]*Member{}, nextShort: 0, recorder: "", translatingBy: "", rembStop: nil,
-	}
+	room := testRoom("two-upstreams")
 
 	sent := make(chan Message, 8)
-	join := JoinRequest{
-		Slug: "two-upstreams", RoomName: "Two upstreams", MemberName: "alice", MaxMembers: 0, Priv: false, Host: "", Resume: "",
-	}
-	publisher := newMember(room, 1, join, func(msg Message) { sent <- msg })
+	publisher := newMember(room, 1, testJoin("two-upstreams", "alice"), func(msg Message) { sent <- msg })
 	room.members[publisher.ID] = publisher
 
 	camera := simulcastTrack(trackKey{up: UpstreamMedia, mid: "0"}, KindCamera)
