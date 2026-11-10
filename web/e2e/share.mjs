@@ -115,6 +115,32 @@ window.__pcs
   .map((pc) => ({ share: pc.getSenders().some((s) => s.track?.contentHint === 'detail'), twcc: /transport-cc/.test(pc.remoteDescription?.sdp ?? '') }))
 `
 
+// Why a share is or is not going out, for a failing test to print: the
+// state of its connection, what each encoding has encoded and sent, the
+// presenter's estimate, and what the E2EE worker has moved through each
+// transform that encrypts (TransformCounts in lib/e2ee).
+export const shareState = `
+(async () => {
+  const pc = ${sharePeerConnection}
+  if (!pc) return null
+  const encodings = {}
+  let estimate = null
+  for (const r of (await pc.getStats()).values()) {
+    if (r.type === 'outbound-rtp' && r.kind === 'video') encodings[r.rid ?? ''] = { active: r.active ?? null, encoded: r.framesEncoded || 0, packets: r.packetsSent || 0, bytes: r.bytesSent || 0, limit: r.qualityLimitationReason ?? null }
+    if (r.type === 'candidate-pair' && r.nominated && r.availableOutgoingBitrate !== undefined) estimate = r.availableOutgoingBitrate
+  }
+  return {
+    ice: pc.iceConnectionState,
+    connection: pc.connectionState,
+    signaling: pc.signalingState,
+    encodings,
+    estimate,
+    encrypting: (window.__e2ee?.transforms ?? []).filter((transform) => transform.purpose === 'send'),
+    errors: window.__errors,
+  }
+})()
+`
+
 export function tileByLabel(suffix) {
   return [...document.querySelectorAll('.group')].find((g) => g.querySelector('.hud-label')?.textContent.trim().endsWith(suffix))
 }
