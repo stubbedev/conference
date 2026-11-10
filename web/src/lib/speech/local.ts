@@ -15,6 +15,7 @@
 
 import { errorMessage } from '@/lib/errors'
 import type { RoomClient } from '@/lib/sfu'
+import { Awaited } from '@/lib/speech/awaited'
 import { clauses } from '@/lib/speech/clauses'
 import type { Engines, Segmenter } from '@/lib/speech/engines'
 import { invented } from '@/lib/speech/invented'
@@ -48,14 +49,6 @@ const NO_WEBGPU = 'This browser cannot transcribe: it needs WebGPU, and this ser
 
 type Translation = Pick<CaptionLine, 'speaker' | 'segId' | 'sourceLang' | 'lang' | 'text' | 'final'>
 
-interface Awaited {
-  timer: ReturnType<typeof setTimeout> | null
-  latest: CaptionLine
-  earlier: readonly string[]
-  arrived: boolean
-  taken: boolean
-}
-
 export class LocalTranslator implements Translator {
   private client: RoomClient | null = null
   private unsubscribe: (() => void)[] = []
@@ -74,7 +67,8 @@ export class LocalTranslator implements Translator {
   private translates: TranslationLevel = 'none'
   private captioning = false
   private readonly earlier = new Map<string, string[]>()
-  private readonly awaited = new Map<string, Awaited>()
+  private readonly awaited = new Awaited(TRANSLATION_WAIT_MS)
+  private waitTimer: ReturnType<typeof setTimeout> | null = null
   private readonly interims = new Map<string, PendingInterim>()
   private readonly interimBusy = new Set<string>()
   private readonly interimTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -111,11 +105,14 @@ export class LocalTranslator implements Translator {
       client.on('lang', () => {
         this.setSameLanguage()
         this.warmUpMembers()
+        this.reassign()
       }),
       client.on('member-gone', ({ id }) => {
         this.player?.forget(id)
         this.earlier.delete(id)
+        this.awaited.forget(id)
         this.setSameLanguage()
+        this.reassign()
       }),
     ]
     this.setSameLanguage()
@@ -139,6 +136,7 @@ export class LocalTranslator implements Translator {
     this.selfPrefs = prefs
     this.setSameLanguage()
     this.warmUpMembers()
+    this.reassign()
   }
 
   receive(message: RoomMessage): void {
@@ -156,8 +154,8 @@ export class LocalTranslator implements Translator {
     this.stopped = true
     this.client?.setProvides(PROVIDES_NOTHING)
     this.detach()
-    for (const { timer } of this.awaited.values()) if (timer) clearTimeout(timer)
     this.awaited.clear()
+    this.scheduleWaits()
     for (const timer of this.interimTimers.values()) clearTimeout(timer)
     this.interimTimers.clear()
     this.interims.clear()
@@ -244,6 +242,7 @@ export class LocalTranslator implements Translator {
 
   private announce(): void {
     this.client?.setProvides({ captions: this.captioning, translates: this.translates, voices: [] })
+    this.reassign()
   }
 
   private setSameLanguage(): void {
@@ -378,29 +377,34 @@ export class LocalTranslator implements Translator {
       this.translateOwn(caption, context)
       return
     }
-    this.await(caption, context)
+    if (this.awaited.heard(caption, context, translator, performance.now()) === 'take') this.translateOwn(caption, context)
+    this.scheduleWaits()
   }
 
-  private await(caption: CaptionLine, earlier: readonly string[]): void {
-    const { segId } = caption
-    const awaited = this.awaited.get(segId) ?? { timer: null, latest: caption, earlier, arrived: false, taken: false }
-    awaited.latest = caption
-    awaited.earlier = earlier
-    this.awaited.set(segId, awaited)
+  private scheduleWaits(): void {
+    if (this.waitTimer !== null) clearTimeout(this.waitTimer)
+    this.waitTimer = null
 
-    if (awaited.taken) {
-      this.translateOwn(caption, earlier)
-      if (caption.final) this.awaited.delete(segId)
-      return
+    const due = this.awaited.nextDue
+    if (due === null) return
+    this.waitTimer = setTimeout(() => {
+      this.waitTimer = null
+      for (const { caption, earlier } of this.awaited.overdue(performance.now())) this.translateOwn(caption, earlier)
+      this.scheduleWaits()
+    }, Math.max(0, due - performance.now()))
+  }
+
+  private reassign(): void {
+    const client = this.client
+    if (!client) return
+
+    const mine = this.selfPrefs.lang
+    const translator = client.translatorFor(mine)
+    for (const { caption, earlier } of this.awaited.reassigned(translator)) {
+      if (translator === client.memberId) this.translateFor(caption, mine, earlier, true)
+      else this.translateOwn(caption, earlier)
     }
-
-    if (awaited.timer !== null || (awaited.arrived && !caption.final)) return
-    awaited.timer = setTimeout(() => {
-      awaited.timer = null
-      awaited.taken = true
-      this.translateOwn(awaited.latest, awaited.earlier)
-      if (awaited.latest.final) this.awaited.delete(segId)
-    }, TRANSLATION_WAIT_MS)
+    this.scheduleWaits()
   }
 
   private translateOwn(caption: CaptionLine, earlier: readonly string[]): void {
@@ -412,13 +416,8 @@ export class LocalTranslator implements Translator {
   private translated(line: TranslationLine): void {
     if (line.lang !== this.selfPrefs.lang) return
 
-    const awaited = this.awaited.get(line.segId)
-    if (awaited?.timer) clearTimeout(awaited.timer)
-    if (awaited) {
-      awaited.timer = null
-      awaited.arrived = true
-      if (line.final) this.awaited.delete(line.segId)
-    }
+    this.awaited.translated(line)
+    this.scheduleWaits()
     this.show(line)
   }
 
