@@ -11,7 +11,13 @@ import (
 // gathering on every interface of a multi-homed machine multiplies the
 // candidate pairs until ICE cannot finish its checks in time.
 func NewLoopbackEngine() (*Engine, func(), error) {
+	sockets, err := newMediaNet()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	settingEngine := webrtc.SettingEngine{}
+	settingEngine.SetNet(sockets)
 	settingEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 	settingEngine.SetIncludeLoopbackCandidate(true)
 	settingEngine.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
