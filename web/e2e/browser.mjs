@@ -140,11 +140,21 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
   const { product } = await cdp.send('Browser.getVersion')
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' })
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
+  const requests = new Map()
+  const networkFailures = []
+  cdp.on('Network.requestWillBeSent', ({ requestId, request }) => requests.set(requestId, request.url))
+  cdp.on('Network.loadingFailed', ({ requestId, errorText }) => networkFailures.push(`${requests.get(requestId) ?? requestId}: ${errorText}`))
+  await cdp.send('Network.enable', {}, sessionId)
   return {
     proc,
     cdp,
     sessionId,
     browser: product,
+    // Every request of the page that failed below HTTP, with the browser's
+    // reason. Chrome only: subscribing to Firefox's network.fetchError makes
+    // its browsingContext.navigate fail with "A new navigation interrupted
+    // an unfinished navigation".
+    networkFailures: () => [...networkFailures],
     async addInitScript(source) {
       await cdp.send('Page.enable', {}, sessionId)
       await cdp.send('Runtime.enable', {}, sessionId)
@@ -541,12 +551,14 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
     }
     await sleep(250)
   }
-  throw new Error(`"Join call" never became clickable on ${url}: ${JSON.stringify(await evalJs(browser, joinScreenState))}`)
+  const networkFailures = browser.networkFailures ? browser.networkFailures() : 'not recorded for this browser'
+  const state = { ...(await evalJs(browser, joinScreenState)), networkFailures }
+  throw new Error(`"Join call" never became clickable on ${url}: ${JSON.stringify(state)}`)
 }
 
 // What the join screen shows when it cannot be passed: the preview's
 // tracks, the buttons and whether they are disabled, the page's text and
-// the errors it reported.
+// the errors it reported; joinRoom adds the requests that failed.
 const joinScreenState = `({
   location: location.href,
   preview: [...document.querySelectorAll('video')].map((v) => (v.srcObject ? v.srcObject.getVideoTracks().map((t) => t.readyState) : null)),
