@@ -264,7 +264,7 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 	translated, err := s.engines.translate(ctx, text, job.lang, target, earlier)
 	if err != nil {
 		logFailure(ctx, "translation, sent the original", err)
-		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeTranslateFailed})
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeTranslateFailed, Lang: target.Code})
 		s.caption(ctx, current, job.seg, job.lang, target, text, true)
 
 		return
@@ -275,6 +275,7 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 	spoken, err := s.engines.speak(ctx, translated, target, job.voice)
 	if err != nil {
 		logFailure(ctx, "voice", err)
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeVoiceFailed, Lang: target.Code})
 
 		return
 	}

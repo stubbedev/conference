@@ -14,7 +14,7 @@ import (
 
 const headerLength = 2
 
-// Message types and the notice code a client acts on.
+// Message types and the notice codes a client acts on.
 const (
 	TypeHello             = "hello"
 	TypeEnd               = "end"
@@ -22,6 +22,7 @@ const (
 	TypeCaption           = "caption"
 	TypeNotice            = "notice"
 	NoticeTranslateFailed = "translation-failed"
+	NoticeVoiceFailed     = "voice-failed"
 )
 
 var (
@@ -64,10 +65,13 @@ type Caption struct {
 	Final      bool   `json:"final"`
 }
 
-// Notice tells the client something went wrong without ending the stream.
+// Notice tells the client that a sentence went out without a voice in
+// Lang, because it could not be translated or could not be spoken. The
+// stream goes on.
 type Notice struct {
 	Type string `json:"type"`
 	Code string `json:"code"`
+	Lang string `json:"lang"`
 }
 
 // Pack builds a binary frame from a header and PCM16 samples.
