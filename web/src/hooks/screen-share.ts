@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 
 import type { Controls } from '@/hooks/local-media'
 import { stopMediaStream } from '@/hooks/media'
-import { errorMessage } from '@/lib/errors'
+import { errorMessage, errorName } from '@/lib/errors'
 import { requestDisplay } from '@/lib/screen'
 import type { RoomClient } from '@/lib/sfu'
 
@@ -46,7 +46,7 @@ export function useScreenShare(
     } catch (err) {
       stopMediaStream(screenStreamRef.current)
       screenStreamRef.current = null
-      if (err instanceof DOMException && err.name === 'NotAllowedError') return
+      if (errorName(err) === 'NotAllowedError') return
       console.error('screen share: starting the share', err)
       toast.error(`Your screen could not be shared: ${errorMessage(err)}`)
     }

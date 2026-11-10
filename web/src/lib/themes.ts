@@ -17,7 +17,7 @@ export function nextToggleTheme(current: Theme): Theme {
 
 export type ThemeChoice = Theme | 'system'
 
-export const DEFAULT_THEME: ThemeChoice = 'dark'
+const DEFAULT_THEME: ThemeChoice = 'dark'
 
 export function parseThemeChoice(stored: unknown): ThemeChoice {
   if (stored === 'system') return stored

@@ -61,7 +61,7 @@ export function recorderKeepsPaceHidden(): boolean {
   return frameApis() !== null
 }
 
-export function saveFile(file: Blob, filename: string): void {
+function saveFile(file: Blob, filename: string): void {
   const url = URL.createObjectURL(file)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -156,7 +156,7 @@ export class CallRecorder {
   private lastPaint = 0
   private lastListen = 0
   private speaker: SpeakerFocus = null
-  private endedReason = ''
+  private endedReason: string | null = null
   private startedAt = 0
   private finishing: Promise<void> | null = null
   private stopped: (() => void) | null = null
@@ -350,7 +350,7 @@ export class CallRecorder {
     this.finishing ??= (async () => {
       const ended = this.ended
       this.ended = null
-      const reason = this.endedReason || 'the recorder stopped'
+      const reason = this.endedReason ?? 'the recorder stopped'
       await this.flushAndDispose()
       ended?.(reason)
     })()
@@ -361,7 +361,7 @@ export class CallRecorder {
   // page know, so a recorder that gives up after an hour is never a
   // silent loss: the file downloads and the badge clears.
   private endUnexpectedly(reason: string): void {
-    this.endedReason ||= reason
+    this.endedReason ??= reason
     const recorder = this.recorder
     if (recorder && recorder.state !== 'inactive') {
       recorder.stop()

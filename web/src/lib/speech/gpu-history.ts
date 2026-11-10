@@ -1,6 +1,6 @@
 export const FIRST_GPU_BUDGET_MS = 60_000
 export const MIN_GPU_BUDGET_MS = 10_000
-export const GPU_BUDGET_FACTOR = 4
+const GPU_BUDGET_FACTOR = 4
 
 export interface GpuHistory<P extends string> {
   readonly setup: string
