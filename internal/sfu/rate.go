@@ -282,17 +282,11 @@ func (e uplinkEstimate) next(sample linkSample) uplinkEstimate {
 		return e
 	}
 
-	rate := sample.bitrate()
-	e.peak = max(e.peak, rate)
+	e.peak = max(e.peak, sample.bitrate())
 
 	switch {
 	case fraction > highLossFraction:
-		through := rate
-		if sample.applicationLimited(e.limit) {
-			through = e.peak
-		}
-
-		e.limit = capAt(max(backOff(e.limit.clamp(through), fraction), minPublisherBitrate))
+		e.limit = sample.backedOff(e.limit, e.peak, fraction, minPublisherBitrate)
 	case fraction < lowLossFraction && e.limit.bound:
 		e.limit = grownTo(senderGain.grow(e.limit.bps, sample.elapsed))
 	}
