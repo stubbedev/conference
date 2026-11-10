@@ -190,8 +190,6 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
   }
 }
 
-export const DEFAULT_FIREFOX = '/etc/profiles/per-user/stubbe/bin/firefox'
-
 export function findFirefox() {
   for (const name of ['firefox', 'firefox-esr']) {
     if (spawnSync('sh', ['-c', `command -v ${name}`]).status === 0) return name
