@@ -1,5 +1,6 @@
 import { browserFetchDeps, headFirstFetch, resilientFetch } from './fetching'
-import { message, type Capabilities, type Rung } from './runtime'
+import { errorMessage } from '../errors'
+import type { Capabilities, Rung } from './runtime'
 import { notify } from './serve'
 import { webgpuAvailable, webgpuHalves } from './webgpu'
 
@@ -40,7 +41,7 @@ export function reportWarning(warning: string): void {
 }
 
 export function webgpuFailed(err: unknown, instead: string): false {
-  reportWarning(`WebGPU failed (${message(err)}), so ${instead}.`)
+  reportWarning(`WebGPU failed (${errorMessage(err)}), so ${instead}.`)
   return false
 }
 
@@ -54,7 +55,7 @@ export function gpuCapabilities(what: string): Promise<Capabilities> {
 
 export function reportRefused(what: string, model: string, rung: Rung, err: unknown): void {
   if (rung.device === 'webgpu') notify('gpu-refused', {})
-  reportWarning(`The ${what} model ${model} could not run as ${rung.dtype} on the ${rung.device === 'webgpu' ? 'GPU' : 'CPU'}: ${message(err)}`)
+  reportWarning(`The ${what} model ${model} could not run as ${rung.dtype} on the ${rung.device === 'webgpu' ? 'GPU' : 'CPU'}: ${errorMessage(err)}`)
 }
 
 export function fetchRetrying(url: string, init: RequestInit = {}): Promise<Response> {

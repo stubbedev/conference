@@ -166,7 +166,7 @@ function pipe(transformer: RTCRtpScriptTransformer, purpose: Purpose): void {
   transformer.readable
     .pipeThrough(transform)
     .pipeTo(transformer.writable)
-    .catch(() => {})
+    .catch((err: unknown) => console.warn(`e2ee: the pipe of ${purpose} frames ended`, err))
 }
 
 self.onrtctransform = (event: RTCTransformEvent) => {

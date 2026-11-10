@@ -22,16 +22,22 @@ func capAt(bps uint64) bitrateLimit {
 	return bitrateLimit{bps: bps, bound: true}
 }
 
+// clamp is rate held to the limit.
+func (l bitrateLimit) clamp(rate uint64) uint64 {
+	if !l.bound {
+		return rate
+	}
+
+	return min(rate, l.bps)
+}
+
 // tighter is whichever of the two limits allows less.
 func (l bitrateLimit) tighter(other bitrateLimit) bitrateLimit {
-	switch {
-	case !l.bound:
-		return other
-	case !other.bound:
+	if !other.bound {
 		return l
-	default:
-		return capAt(min(l.bps, other.bps))
 	}
+
+	return capAt(l.clamp(other.bps))
 }
 
 // Loss-controller tuning shared by the viewer and the publisher
@@ -221,14 +227,29 @@ func (s linkSample) fractionLost() (uint8, bool) {
 	return uint8(min(lost*fractionScale/expected, math.MaxUint8)), true
 }
 
-// throughputHeadroom bounds the publisher's estimate once loss has
-// limited it: at most half again what the connection has delivered
-// cleanly, the bound libwebrtc's delay-based controller puts on its own
-// estimate (1.5 times the measured throughput).
+// A publisher that sends less than this share of its limit is held by
+// what it has to send, not by the limit: libwebrtc calls a sender
+// application-limited below 65% of its estimate
+// (AlrDetectorConfig.bandwidth_usage_ratio).
 const (
-	throughputHeadroomNum = 3
-	throughputHeadroomDen = 2
+	limitUseNum = 13
+	limitUseDen = 20
 )
+
+// applicationLimited reports whether the publisher sent less in the
+// period than limit lets it. What it sent is what arrived, scaled up by
+// the packets that did not. A period nothing arrived in cannot tell how
+// much was sent, and does not count.
+func (s linkSample) applicationLimited(limit bitrateLimit) bool {
+	if !limit.bound {
+		return true
+	}
+
+	expected := s.arrived.expected
+	received := min(s.arrived.received, expected)
+
+	return s.bitrate()*expected*limitUseDen < limit.bps*received*limitUseNum
+}
 
 // uplinkEstimate is the server's loss-based estimate of one publisher
 // connection that carries no transport-wide feedback, the only estimate
@@ -237,13 +258,21 @@ const (
 // what actually got through, moderate loss holds it, a clean link grows
 // it. It does not follow the send rate: a still screen sends almost
 // nothing, and an estimate that settled there would hold the next burst
-// to a trickle.
+// to a trickle. Loss while the publisher sends little is the same trap:
+// what got through then is little because little was sent, so the
+// back-off starts from the most the connection has delivered.
+//
+// Growth has no bound in what the publisher sends, as it has none in the
+// browser's own loss controller: a share content with a few megabits
+// never proves more, and the server cannot probe an uplink it does not
+// send on.
 type uplinkEstimate struct {
 	// limit is none until the connection loses packets heavily: before
-	// that nothing measured says the uplink cannot carry more.
+	// that nothing measured says the uplink cannot carry more. Clean
+	// periods grow it until it is none again.
 	limit bitrateLimit
 
-	// peak is the highest rate the connection delivered without loss.
+	// peak is the highest rate the connection has delivered.
 	peak uint64
 }
 
@@ -254,22 +283,18 @@ func (e uplinkEstimate) next(sample linkSample) uplinkEstimate {
 	}
 
 	rate := sample.bitrate()
+	e.peak = max(e.peak, rate)
 
 	switch {
 	case fraction > highLossFraction:
 		through := rate
-		if e.limit.bound {
-			through = min(through, e.limit.bps)
+		if sample.applicationLimited(e.limit) {
+			through = e.peak
 		}
 
-		e.limit = capAt(max(backOff(through, fraction), minPublisherBitrate))
-	case fraction < lowLossFraction:
-		e.peak = max(e.peak, rate)
-
-		if e.limit.bound {
-			ceiling := e.peak * throughputHeadroomNum / throughputHeadroomDen
-			e.limit = capAt(max(e.limit.bps, min(senderGain.grow(e.limit.bps, sample.elapsed), ceiling)))
-		}
+		e.limit = capAt(max(backOff(e.limit.clamp(through), fraction), minPublisherBitrate))
+	case fraction < lowLossFraction && e.limit.bound:
+		e.limit = grownTo(senderGain.grow(e.limit.bps, sample.elapsed))
 	}
 
 	return e
@@ -279,6 +304,16 @@ func (e uplinkEstimate) next(sample linkSample) uplinkEstimate {
 // nothing in the SDP limits (kDefaultMaxBitrate, 1 Gbps): a REMB this
 // high limits nothing, yet is a finite estimate the browser starts from.
 const browserMaxBitrate = 1_000_000_000
+
+// grownTo is the limit a clean period has raised to bps: none once it
+// reaches the browser's maximum, where it limits nothing.
+func grownTo(bps uint64) bitrateLimit {
+	if bps >= browserMaxBitrate {
+		return unlimited
+	}
+
+	return capAt(bps)
+}
 
 // rembFor is the REMB a publisher connection gets this period, if any.
 //

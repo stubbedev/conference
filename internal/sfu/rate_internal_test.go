@@ -77,8 +77,8 @@ func TestUplinkEstimateHoldsWhileTheScreenIsStill(t *testing.T) {
 	}
 
 	typing := estimateAfter(append([]linkSample{lossy}, repeat(second(typingRate, typingPackets, 0), 120)...)...)
-	if typing.limit.bps < limited.limit.bps {
-		t.Fatalf("limit %d after two clean minutes of light typing, want at least the %d it had", typing.limit.bps, limited.limit.bps)
+	if typing.limit.bound {
+		t.Fatalf("limit %d after two clean minutes of light typing, want none", typing.limit.bps)
 	}
 }
 
@@ -103,6 +103,111 @@ func TestUplinkEstimateBacksOffUnderHeavyLoss(t *testing.T) {
 	}
 }
 
+// idleLoss is a period in which the publisher sent little and most of
+// it was lost, as a still screen's few frames are when the server drops
+// packets: 120 of 176, half a megabit getting through.
+func idleLoss() linkSample {
+	return second(500_000, 176, 120)
+}
+
+// TestLossWhileIdleBacksOffFromWhatTheConnectionDelivered: what gets
+// through a lossy period in which little was sent is little, and says
+// nothing about the link. One such period must not set the limit near
+// what idling sends, far below what the connection delivered before.
+func TestLossWhileIdleBacksOffFromWhatTheConnectionDelivered(t *testing.T) {
+	t.Parallel()
+
+	lossy := idleLoss()
+
+	fraction, known := lossy.fractionLost()
+	if !known || fraction <= highLossFraction {
+		t.Fatalf("loss %d/256 (known %v) in the idle period, want it heavy; the test proves nothing", fraction, known)
+	}
+
+	estimate := estimateAfter(append(repeat(second(burstRate, burstPackets, 0), 3), lossy)...)
+
+	want := backOff(burstRate, fraction)
+	if estimate.limit != capAt(want) {
+		t.Fatalf("limit %+v after one lossy idle period on a connection that delivered %d, want %d, the back-off from that",
+			estimate.limit, burstRate, want)
+	}
+
+	const recovery = 6
+
+	for range recovery {
+		estimate = estimate.next(second(typingRate, typingPackets, 0))
+	}
+
+	if estimate.limit.bps < burstRate {
+		t.Fatalf("limit %d after %d clean seconds, want it back at the %d the connection delivered before the loss",
+			estimate.limit.bps, recovery, burstRate)
+	}
+}
+
+// TestLossWhileIdleBacksOffFromTheLimit: with a limit in place, loss in a
+// period that used little of it lowers that limit, and does not replace
+// it with the little that got through.
+func TestLossWhileIdleBacksOffFromTheLimit(t *testing.T) {
+	t.Parallel()
+
+	lossy := idleLoss()
+	fraction, _ := lossy.fractionLost()
+
+	limited := estimateAfter(second(burstRate, burstPackets, burstPackets/4))
+
+	want := backOff(limited.limit.bps, fraction)
+	if got := limited.next(lossy).limit; got != capAt(want) {
+		t.Fatalf("limit %+v after a lossy idle period under a limit of %d, want %d, the back-off from the limit", got, limited.limit.bps, want)
+	}
+}
+
+// TestLossAtTheLimitBacksOffToWhatGotThrough: a publisher that sends all
+// its limit allows and loses half of it has found what the link carries.
+func TestLossAtTheLimitBacksOffToWhatGotThrough(t *testing.T) {
+	t.Parallel()
+
+	limited := estimateAfter(second(burstRate, burstPackets, burstPackets/4))
+	through := limited.limit.bps / 2
+
+	want := backOff(through, fractionScale/2)
+	if got := limited.next(second(through, burstPackets, burstPackets/2)).limit; got != capAt(want) {
+		t.Fatalf("limit %+v after losing half of what a limit of %d allows, want %d, the back-off from the %d that got through",
+			got, limited.limit.bps, want, through)
+	}
+}
+
+func TestApplicationLimited(t *testing.T) {
+	t.Parallel()
+
+	const (
+		limit = 8_000_000
+		used  = limit * limitUseNum / limitUseDen
+	)
+
+	for _, tc := range []struct {
+		name   string
+		sample linkSample
+		limit  bitrateLimit
+		want   bool
+	}{
+		{name: "sending the limit", sample: second(limit, burstPackets, 0), limit: capAt(limit), want: false},
+		{name: "sending 65% of the limit", sample: second(used, burstPackets, 0), limit: capAt(limit), want: false},
+		{name: "sending just under 65%", sample: second(used-bitsPerByte, burstPackets, 0), limit: capAt(limit), want: true},
+		{name: "sending the limit and losing half", sample: second(limit/2, burstPackets, burstPackets/2), limit: capAt(limit), want: false},
+		{name: "sending little and losing most", sample: idleLoss(), limit: capAt(limit), want: true},
+		{name: "nothing arrived", sample: second(0, burstPackets, burstPackets), limit: capAt(limit), want: false},
+		{name: "no limit", sample: second(limit, burstPackets, 0), limit: unlimited, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := tc.sample.applicationLimited(tc.limit); got != tc.want {
+				t.Fatalf("application-limited %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestUplinkEstimateHoldsUnderModerateLoss(t *testing.T) {
 	t.Parallel()
 
@@ -119,32 +224,75 @@ func TestUplinkEstimateHoldsUnderModerateLoss(t *testing.T) {
 	}
 }
 
-// TestUplinkEstimateRecoversOnACleanLink: after a congested moment the
-// limit grows back while the link is clean and the publisher uses it, but
-// never past half again the most the connection has delivered cleanly.
+// TestUplinkEstimateRecoversOnACleanLink: after a congested moment every
+// clean second raises the limit by the 8% the browser's own loss
+// controller grows by.
 func TestUplinkEstimateRecoversOnACleanLink(t *testing.T) {
 	t.Parallel()
 
 	estimate := estimateAfter(second(burstRate, burstPackets, 0), second(burstRate, burstPackets, burstPackets/2))
 	dropped := estimate.limit.bps
 
-	estimate = estimate.next(second(dropped, burstPackets, 0))
-	if estimate.limit.bps <= dropped {
-		t.Fatalf("limit %d after a clean period at the limit, want it above %d", estimate.limit.bps, dropped)
+	want := senderGain.grow(dropped, rembInterval)
+	if got := estimate.next(second(dropped, burstPackets, 0)).limit; got != capAt(want) {
+		t.Fatalf("limit %+v after a clean second at a limit of %d, want %d", got, dropped, want)
+	}
+}
+
+// TestUplinkEstimateRecoversWhileThePublisherSendsLittle: a share content
+// with three megabits never delivers more, so a limit that waited for it
+// to would stay for good. Every clean second raises the limit, past
+// anything the connection has delivered, until it limits nothing.
+func TestUplinkEstimateRecoversWhileThePublisherSendsLittle(t *testing.T) {
+	t.Parallel()
+
+	const (
+		delivered    = 5_600_000
+		content      = 3_000_000
+		packets      = 300
+		liftedWithin = 90
+	)
+
+	estimate := estimateAfter(second(delivered, burstPackets, 0), second(delivered, burstPackets, burstPackets/2))
+
+	for seconds := 0; estimate.limit.bound; seconds++ {
+		if seconds == liftedWithin {
+			t.Fatalf("limit %d after %d clean seconds at %d bps, want none", estimate.limit.bps, seconds, content)
+		}
+
+		next := estimate.next(second(content, packets, 0))
+		if next.limit.bound && next.limit.bps <= estimate.limit.bps {
+			t.Fatalf("limit froze at %d after %d clean seconds at %d bps, with %d the most delivered",
+				next.limit.bps, seconds, content, next.peak)
+		}
+
+		estimate = next
 	}
 
-	for range 60 {
-		estimate = estimate.next(second(estimate.limit.bps, burstPackets, 0))
+	bitrate, send := rembFor(feedbackReceiverEstimate, estimate.limit, false)
+	if !send || bitrate != browserMaxBitrate {
+		t.Fatalf("REMB %d (sent %v) once the limit is lifted, want the browser's maximum %d", bitrate, send, browserMaxBitrate)
+	}
+}
+
+// TestUplinkEstimateLeavesTheFloor: the lowest limit there is, with a
+// publisher sending all of it, is gone after two clean minutes.
+func TestUplinkEstimateLeavesTheFloor(t *testing.T) {
+	t.Parallel()
+
+	const liftedWithin = 2 * time.Minute / rembInterval
+
+	estimate := estimateAfter(repeat(second(burstRate, burstPackets, burstPackets), 40)...)
+	if estimate.limit != capAt(minPublisherBitrate) {
+		t.Fatalf("limit %+v after total loss, want the floor %d", estimate.limit, minPublisherBitrate)
 	}
 
-	ceiling := estimate.peak * throughputHeadroomNum / throughputHeadroomDen
-	if estimate.limit.bps > ceiling {
-		t.Fatalf("limit %d after a clean minute, want at most %d, half again the %d delivered cleanly",
-			estimate.limit.bps, ceiling, estimate.peak)
+	for range liftedWithin {
+		estimate = estimate.next(second(estimate.limit.bps, typingPackets, 0))
 	}
 
-	if estimate.limit.bps <= burstRate {
-		t.Fatalf("limit %d after a clean minute at the limit, want it above the %d delivered before the loss", estimate.limit.bps, burstRate)
+	if estimate.limit.bound {
+		t.Fatalf("limit %d after two clean minutes at the limit, want none", estimate.limit.bps)
 	}
 }
 

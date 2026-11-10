@@ -8,13 +8,13 @@
 // from several places at the same time (an interim caption while a
 // sentence is still being spoken, two listeners' languages).
 
-import { message } from './runtime'
+import { errorMessage } from '../errors'
 import { Serial } from './serial'
 
 /** err with whatever caused it, which is where a wrapped failure says why. */
 function reason(err: unknown): string {
   const cause = err instanceof Error && err.cause ? err.cause : null
-  return cause ? `${message(err)}: ${reason(cause)}` : message(err)
+  return cause ? `${errorMessage(err)}: ${reason(cause)}` : errorMessage(err)
 }
 
 /** One request as it arrives, with the id the page waits for. */

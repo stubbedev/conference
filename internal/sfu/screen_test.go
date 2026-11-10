@@ -58,13 +58,13 @@ type shareCall struct {
 	viewerPC  *webrtc.PeerConnection
 }
 
-// publishOn opens the publisher's upstream which from a browser-like peer
-// that offers transport-wide congestion control, with an audio and a
-// video track. Both connections start their mids at 0, so they collide.
-func publishOn(t *testing.T, publisher *testPeer, which sfu.Upstream, audioID, videoID string) map[string]published {
+// publishOn opens the publisher's upstream which on a connection of api,
+// with an audio and a video track. Every connection starts its mids at 0,
+// so two of them collide.
+func publishOn(t *testing.T, api *webrtc.API, publisher *testPeer, which sfu.Upstream, audioID, videoID string) map[string]published {
 	t.Helper()
 
-	peerConn, err := twccPublisherAPI(t).NewPeerConnection(webrtc.Configuration{})
+	peerConn, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatalf("%s pc: %v", which, err)
 	}
@@ -122,8 +122,8 @@ func newShareCall(t *testing.T) *shareCall {
 	hub := newTestHub(t, engine)
 	publisher := newTestPeer(t, hub, engine, "alice", false)
 
-	sent := publishOn(t, publisher, sfu.UpstreamMedia, micID, cameraID)
-	maps.Copy(sent, publishOn(t, publisher, sfu.UpstreamScreen, screenAudioID, screenID))
+	sent := publishOn(t, twccPublisherAPI(t), publisher, sfu.UpstreamMedia, micID, cameraID)
+	maps.Copy(sent, publishOn(t, twccPublisherAPI(t), publisher, sfu.UpstreamScreen, screenAudioID, screenID))
 
 	for id, each := range sent {
 		go pumpMarked(each.track, markerOf(id))
@@ -329,7 +329,7 @@ func TestShareGetsItsFirstRembWithItsFirstPacket(t *testing.T) {
 	t.Cleanup(closeEngine)
 
 	publisher := newTestPeer(t, newTestHub(t, engine), engine, "alice", false)
-	sent := publishOn(t, publisher, sfu.UpstreamScreen, screenAudioID, screenID)
+	sent := publishOn(t, twccPublisherAPI(t), publisher, sfu.UpstreamScreen, screenAudioID, screenID)
 	rembs := watchRembOnPublisher(sent[screenID].sender)
 
 	waitPublisherConnected(t, publisher.localPC(sfu.UpstreamScreen.PCID()))

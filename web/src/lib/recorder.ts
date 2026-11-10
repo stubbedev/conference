@@ -4,10 +4,12 @@
 // server, which keeps local recording compatible with the E2EE promise:
 // the SFU relays ciphertext it cannot decode, let alone record.
 
-import { audioContext, playMediaElement } from '@/hooks/media'
-import { ElementSource, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
+import { audioContext, playMediaElement, resumeAudio } from '@/hooks/media'
+import { errorMessage, errorName } from './errors.ts'
+import { ElementSource, endGenerator, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
 import { initials } from './names.ts'
 import { focusKey, gridRects, nextSpeakerFocus, speakingKeys, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
+import { settled } from './settled.ts'
 import { SPEAKING_SAMPLE_MS } from './speaking.ts'
 import { VoiceMeter } from './voice-meter.ts'
 import { withDuration } from './webm.ts'
@@ -59,7 +61,7 @@ export function recorderKeepsPaceHidden(): boolean {
   return frameApis() !== null
 }
 
-export function saveFile(file: Blob, filename: string): void {
+function saveFile(file: Blob, filename: string): void {
   const url = URL.createObjectURL(file)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -99,11 +101,12 @@ const PLACEHOLDER_FILL = '#26262b'
 const INITIALS_FONT = '600 40px system-ui, sans-serif'
 
 // Chunked data streams into the origin-private file system where the
-// browser has it (Chrome, Firefox, Safari 16.4+), keeping memory flat
-// for calls of any length and making the final download disk-backed.
-// Browsers without it buffer chunks in memory for the whole call, up to
-// a cap: past that the recording ends with what it has instead of the
-// tab dying with everything still inside it.
+// browser has it and can write a file there from the page (Chrome,
+// Firefox, Safari 26+), keeping memory flat for calls of any length and
+// making the final download disk-backed. Browsers without it, and a
+// private window that refuses it, buffer chunks in memory for the whole
+// call, up to a cap: past that the recording ends with what it has
+// instead of the tab dying with everything still inside it.
 interface DiskSink {
   handle: FileSystemFileHandle
   writable: FileSystemWritableFileStream
@@ -116,6 +119,16 @@ interface MemorySink {
 }
 
 const MEMORY_SINK_LIMIT_BYTES = 1024 * 1024 * 1024
+
+// Deletes a file of a finished recording from the origin-private file
+// system. One that was never created is already gone.
+async function discard(root: FileSystemDirectoryHandle, name: string): Promise<void> {
+  try {
+    await root.removeEntry(name)
+  } catch (err) {
+    if (errorName(err) !== 'NotFoundError') console.warn(`recorder: deleting ${name} from this browser's storage, where it stays`, err)
+  }
+}
 
 export class CallRecorder {
   private slug: string
@@ -135,6 +148,7 @@ export class CallRecorder {
   private recorder: MediaRecorder | null = null
   private filename = ''
   private sink: DiskSink | MemorySink | null = null
+  private sourcesWatched: AbortController | null = null
   private starting: Promise<void> | null = null
   private drawing = false
   private frame = 0
@@ -142,7 +156,7 @@ export class CallRecorder {
   private lastPaint = 0
   private lastListen = 0
   private speaker: SpeakerFocus = null
-  private endedReason = ''
+  private endedReason: string | null = null
   private startedAt = 0
   private finishing: Promise<void> | null = null
   private stopped: (() => void) | null = null
@@ -218,7 +232,7 @@ export class CallRecorder {
       .write(frame)
       .catch((err: unknown) => {
         frame.close()
-        this.endUnexpectedly(`the recording's picture could not be written: ${err instanceof Error ? err.message : String(err)}`)
+        this.endUnexpectedly(`the recording's picture could not be written: ${errorMessage(err)}`)
       })
       .finally(() => {
         this.writing = false
@@ -236,8 +250,8 @@ export class CallRecorder {
   private async doStart(): Promise<void> {
     if (this.active) return
 
+    resumeAudio()
     const ctx = audioContext()
-    if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {})
     this.mixer = ctx ? ctx.createMediaStreamDestination() : null
     this.connectAudio(this.latest)
 
@@ -276,9 +290,11 @@ export class CallRecorder {
       void this.finish()
     }
     // A source that ends (the canvas capture or the audio mix stopped by
-    // the browser) ends the recording; keep the file and report it.
+    // the browser) ends the recording; keep the file and report it. The
+    // recorder ends its own sources when it is done, which is not that.
+    this.sourcesWatched = new AbortController()
     for (const track of tracks) {
-      track.addEventListener('ended', () => this.endUnexpectedly('a media source stopped'))
+      track.addEventListener('ended', () => this.endUnexpectedly('a media source stopped'), { signal: this.sourcesWatched.signal })
     }
 
     // Name the file after the container MediaRecorder actually picked,
@@ -309,7 +325,7 @@ export class CallRecorder {
   }
 
   async stop(): Promise<void> {
-    await this.starting?.catch(() => {})
+    if (this.starting) await settled(this.starting)
     this.starting = null
 
     if (this.finishing) {
@@ -334,7 +350,7 @@ export class CallRecorder {
     this.finishing ??= (async () => {
       const ended = this.ended
       this.ended = null
-      const reason = this.endedReason || 'the recorder stopped'
+      const reason = this.endedReason ?? 'the recorder stopped'
       await this.flushAndDispose()
       ended?.(reason)
     })()
@@ -345,7 +361,7 @@ export class CallRecorder {
   // page know, so a recorder that gives up after an hour is never a
   // silent loss: the file downloads and the badge clears.
   private endUnexpectedly(reason: string): void {
-    this.endedReason ||= reason
+    this.endedReason ??= reason
     const recorder = this.recorder
     if (recorder && recorder.state !== 'inactive') {
       recorder.stop()
@@ -355,17 +371,24 @@ export class CallRecorder {
   }
 
   private async openSink(): Promise<void> {
+    this.sink = (await this.openDiskSink()) ?? { chunks: [], bytes: 0 }
+  }
+
+  private async openDiskSink(): Promise<DiskSink | null> {
+    const storage: StorageManager | undefined = navigator.storage
+    if (typeof storage?.getDirectory !== 'function' || !('createWritable' in FileSystemFileHandle.prototype)) return null
+    // A recording is worth far too much to lose to a browser that
+    // evicts origin storage under disk pressure mid-call.
+    void storage.persist().catch((err: unknown) => console.warn('recorder: asking the browser to keep the recording under disk pressure', err))
     try {
-      // A recording is worth far too much to lose to a browser that
-      // evicts origin storage under disk pressure mid-call.
-      void navigator.storage?.persist?.().catch(() => {})
-      const root = await navigator.storage.getDirectory()
+      const root = await storage.getDirectory()
       const handle = await root.getFileHandle(this.filename, { create: true })
       const writable = await handle.createWritable()
       this.storageRoot = root
-      this.sink = { handle, writable, writing: Promise.resolve() }
-    } catch {
-      this.sink = { chunks: [], bytes: 0 }
+      return { handle, writable, writing: Promise.resolve() }
+    } catch (err) {
+      console.warn('recorder: opening a file for the recording, which is held in memory instead', err)
+      return null
     }
   }
 
@@ -400,7 +423,7 @@ export class CallRecorder {
     this.sink = null
     try {
       if (sink && 'writable' in sink) {
-        await sink.writing.catch(() => {})
+        await sink.writing
         await sink.writable.close()
         const file = await sink.handle.getFile()
         if (file.size > 0) {
@@ -412,7 +435,7 @@ export class CallRecorder {
           const root = this.storageRoot
           const names = temporary ? [this.filename, temporary] : [this.filename]
           window.setTimeout(() => {
-            for (const name of names) void root?.removeEntry(name).catch(() => {})
+            if (root) for (const name of names) void discard(root, name)
           }, 10_000)
         }
       } else if (sink && sink.chunks.length > 0) {
@@ -473,7 +496,7 @@ export class CallRecorder {
       return { blob: await handle.getFile(), temporary }
     } catch (err) {
       console.warn('recorder: writing the recording with its duration to disk, keeping the file as recorded', err)
-      await root.removeEntry(temporary).catch(() => {})
+      await discard(root, temporary)
       return { blob: file, temporary: null }
     }
   }
@@ -648,6 +671,8 @@ export class CallRecorder {
   }
 
   private dispose(): void {
+    this.sourcesWatched?.abort()
+    this.sourcesWatched = null
     cancelAnimationFrame(this.frame)
     this.drawing = false
     window.clearInterval(this.paintTimer)
@@ -659,9 +684,8 @@ export class CallRecorder {
     this.mixer = null
     for (const entry of this.entries.values()) entry.source.close()
     this.entries.clear()
-    void this.writer?.close().catch(() => {})
+    if (this.generator && this.writer) endGenerator(this.generator, this.writer)
     this.writer = null
-    this.generator?.stop()
     this.generator = null
     this.latest = []
     for (const track of this.canvasStream?.getTracks() ?? []) track.stop()

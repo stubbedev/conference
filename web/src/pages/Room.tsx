@@ -36,7 +36,8 @@ import { blurSupported } from '@/lib/blur'
 import { storedDisplayName } from '@/lib/names'
 import type { RecorderTile } from '@/lib/recorder'
 import type { RoomClient } from '@/lib/sfu'
-import { heardThrough, LOCAL_SOURCE, SCREEN_KIND, tileLabel } from '@/lib/tiles'
+import { heardThrough, LOCAL_SOURCE, tileLabel } from '@/lib/tiles'
+import { SCREEN_KIND } from '@/lib/track-kind'
 import type { Language } from '@/lib/translate/languages'
 
 const NO_LANGUAGES: Language[] = []

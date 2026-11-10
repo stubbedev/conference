@@ -9,7 +9,18 @@ export interface ShortcutActions {
   toggleMic: () => void
   toggleCam: () => void
   toggleChat: () => void
-  toggleFullscreen: () => void
+  /** Null where the page cannot go full screen. */
+  toggleFullscreen: (() => void) | null
+}
+
+export type Shortcut = keyof ShortcutActions
+
+// The key of each shortcut, as KeyboardEvent.key gives it in lower case.
+const KEYS: Record<Shortcut, string> = { toggleMic: 'm', toggleCam: 'v', toggleChat: 'c', toggleFullscreen: 'f' }
+
+/** The key as a hint shows it and as aria-keyshortcuts names it. */
+export function shortcutKey(shortcut: Shortcut): string {
+  return KEYS[shortcut].toUpperCase()
 }
 
 export function useShortcuts(phase: Phase, { toggleMic, toggleCam, toggleChat, toggleFullscreen }: ShortcutActions) {
@@ -20,10 +31,10 @@ export function useShortcuts(phase: Phase, { toggleMic, toggleCam, toggleChat, t
       const target = event.target
       if (target instanceof Element && target.closest(TYPING_TARGETS)) return
       const key = event.key.toLowerCase()
-      if (key === 'm') toggleMic()
-      else if (key === 'v') toggleCam()
-      else if (key === 'c' && phase === 'live') toggleChat()
-      else if (key === 'f') toggleFullscreen()
+      if (key === KEYS.toggleMic) toggleMic()
+      else if (key === KEYS.toggleCam) toggleCam()
+      else if (key === KEYS.toggleChat && phase === 'live') toggleChat()
+      else if (key === KEYS.toggleFullscreen) toggleFullscreen?.()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

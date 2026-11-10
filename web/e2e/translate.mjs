@@ -8,9 +8,10 @@
 // speech, and the test checks what each side must get: the host's state
 // reaching "live", subtitles in each listener's language on the other's
 // tile (sent by that speaker), the translated voice arriving as audio,
-// the other-language speaker muted under it, and translation outliving
-// the host: after the host leaves, a joiner still gets the guest's
-// speech in its own language.
+// the other-language speaker muted under it, that speaker's own voice
+// coming back once its translator has given up while translation stays
+// on, and translation outliving the host: after the host leaves, a
+// joiner still gets the guest's speech in its own language.
 //
 // SPEECH_RUNTIME=browser runs the same test against the browsers' own
 // engines, on the same stand-ins: no audio leaves either browser, the
@@ -118,6 +119,22 @@ const translationAudio = `[...document.querySelectorAll('audio')]
   .filter((a) => !a.closest('.hud-tile'))
   .map((a) => ({ tracks: a.srcObject?.getAudioTracks().filter((t) => t.readyState === 'live').length ?? 0, paused: a.paused }))`
 
+// What the listener hears of the member named `name`: the volume of their
+// own voice and the translated voices playing in its place.
+const heardOf = (name) => `({ own: ${tileState(name)}?.volume ?? null, translated: ${translationAudio} })`
+
+// Turns every later connection to the speech service away and drops the
+// one that is open, as a speech service that is gone for good would.
+const loseSpeechService = `(() => {
+  const Open = window.WebSocket
+  window.WebSocket = function (url, ...rest) {
+    return new Open(String(url).replace('/ws/speech', '/ws/speech-gone'), ...rest)
+  }
+  window.WebSocket.prototype = Open.prototype
+  Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 })
+  for (const socket of window.__sockets) if (socket.url.includes('/ws/speech')) socket.close()
+})()`
+
 const consoles = {}
 
 // The guest records its voice on the join screen, so it is in use from its first sentence.
@@ -192,6 +209,21 @@ async function main() {
 
   const muted = await waitFor(guest, tileState('Hana'), (tile) => tile?.volume === 0, 5_000)
   check('guest muting', muted.ok, `the host's own voice is not muted for the guest: ${JSON.stringify(muted.value)}`)
+
+  // The host's translator gives up while live translation stays on in the
+  // room: its translated voice leaves the call, and the guest must hear
+  // the host's own voice again instead of nothing. Only the speech
+  // service's voices travel as tracks; the browsers' own engines make
+  // theirs where they are heard.
+  if (runtime === 'server') {
+    await evalJs(host, loseSpeechService)
+    const gaveUp = await waitFor(host, `document.querySelector('header')?.innerText ?? ''`, (text) => text.includes('Live translation failed'), TIMEOUT_MS)
+    check('host gives up', gaveUp.ok, `the host's translator never reported failing: ${JSON.stringify(gaveUp.value)}`)
+
+    const ownAgain = await waitFor(guest, heardOf('Hana'), (heard) => heard?.own > 0 && heard.translated.length === 0, TIMEOUT_MS)
+    check('own voice again', ownAgain.ok, `the guest does not hear the host's own voice after the host's translator stopped: ${JSON.stringify(ownAgain.value)}`)
+    console.log(`after the host's translator stopped, guest hears: ${JSON.stringify(ownAgain.value)}`)
+  }
 
   // A guest who never chose a language starts in the browser's own one,
   // and the join screen asks for it plainly.

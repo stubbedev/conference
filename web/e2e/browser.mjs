@@ -28,6 +28,26 @@ export function findChrome() {
   throw new Error('no Chrome binary found; pass --chrome or set CHROME')
 }
 
+// A control's accessible name, as far as this app's markup goes: what
+// aria-labelledby points at, else its aria-label, else its content, which
+// is its text and the labels of what is inside it, without the parts
+// hidden from assistive technology.
+export function accessibleName(control) {
+  const text = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) return node.data
+    if (node.nodeType !== Node.ELEMENT_NODE || node.getAttribute('aria-hidden') === 'true') return ''
+    return node.getAttribute('aria-label') ?? node.getAttribute('alt') ?? [...node.childNodes].map(text).join('')
+  }
+  const tidy = (name) => name.replace(/\s+/g, ' ').trim()
+  const labelledBy = control.getAttribute('aria-labelledby')
+  if (labelledBy) return tidy(labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? '').join(' '))
+  return tidy(text(control))
+}
+
+// A function called in the page travels as its source, so nothing of
+// this module is in its scope except what is declared beside it here.
+const inPage = (fn) => `(...args) => { ${accessibleName}; return (${fn})(...args) }`
+
 class CDP {
   constructor(ws) {
     this.ws = ws
@@ -143,7 +163,7 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
       const r = await cdp.send(
         'Runtime.callFunctionOn',
         {
-          functionDeclaration: fn.toString(),
+          functionDeclaration: inPage(fn),
           objectId: global.result.objectId,
           arguments: args.map((value) => ({ value })),
           returnByValue: true,
@@ -169,8 +189,6 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
     },
   }
 }
-
-export const DEFAULT_FIREFOX = '/etc/profiles/per-user/stubbe/bin/firefox'
 
 export function findFirefox() {
   for (const name of ['firefox', 'firefox-esr']) {
@@ -321,7 +339,7 @@ export async function launchFirefox(firefox, idx, dir, { headless = true } = {})
     },
     async callFunction(fn, ...args) {
       const response = await bidi.send('script.callFunction', {
-        functionDeclaration: `async (...args) => JSON.stringify(await (${fn.toString()})(...args))`,
+        functionDeclaration: `async (...args) => JSON.stringify(await (${inPage(fn)})(...args))`,
         arguments: args.map(bidiValue),
         target,
         awaitPromise: true,
@@ -514,8 +532,19 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
     }
     await sleep(250)
   }
-  throw new Error('Join call button never became clickable')
+  throw new Error(`"Join call" never became clickable on ${url}: ${JSON.stringify(await evalJs(browser, joinScreenState))}`)
 }
+
+// What the join screen shows when it cannot be passed: the preview's
+// tracks, the buttons and whether they are disabled, the page's text and
+// the errors it reported.
+const joinScreenState = `({
+  location: location.href,
+  preview: [...document.querySelectorAll('video')].map((v) => (v.srcObject ? v.srcObject.getVideoTracks().map((t) => t.readyState) : null)),
+  buttons: [...document.querySelectorAll('button')].map((b) => b.textContent.trim() + (b.disabled ? ' (disabled)' : '')).filter((text) => text !== ''),
+  text: document.body.innerText.slice(0, 400),
+  errors: window.__errors ?? [],
+})`
 
 // Both browsers answer the same calls (see launchChrome and launchFirefox):
 // an expression or a function evaluated in the page, awaited, and its

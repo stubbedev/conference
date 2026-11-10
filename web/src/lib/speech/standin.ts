@@ -4,6 +4,7 @@
 // run the real capture, voice detection, room mode and caption relay, so
 // a test sees the whole pipeline without a model or a GPU.
 
+import { asError } from '../errors.ts'
 import type { AsrEngine, Engines, MtEngine, Prepared, Segmenter, SegmenterEvents, Sentence, TtsEngine, Voiced } from './engines.ts'
 import { loudness } from './energy.ts'
 import { RATE, Segmentation } from './vad.ts'
@@ -62,7 +63,7 @@ export class StandInSegmenter implements Segmenter {
       .then(async () => {
         for (const segment of await this.segmentation.push(pcm, loudness)) this.events.onSegment(segment)
       })
-      .catch((err: unknown) => this.events.onError(err instanceof Error ? err : new Error(String(err))))
+      .catch((err: unknown) => this.events.onError(asError(err)))
   }
 
   flush(): void {

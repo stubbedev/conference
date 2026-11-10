@@ -1,7 +1,16 @@
+import { errorName } from './errors.ts'
+
+interface FrameRead {
+  value?: VideoFrame
+  done: boolean
+}
+
 interface FrameReader {
-  read(): Promise<{ value?: VideoFrame; done: boolean }>
+  read(): Promise<FrameRead>
   cancel(): Promise<void>
 }
+
+const ENDED: FrameRead = { done: true }
 
 interface TrackProcessor {
   readable: { getReader(): FrameReader }
@@ -27,6 +36,14 @@ export function frameApis(): FrameApis | null {
   return scope as FrameApis
 }
 
+// Ends a generated track once the frame still being written has gone
+// out: stopping the track first fails that write, and the close with it.
+export function endGenerator(generator: TrackGenerator, writer: FrameWriter): void {
+  void writer
+    .close()
+    .catch((err: unknown) => console.warn('frames: closing a generated track', err))
+    .finally(() => generator.stop())
+}
 
 export interface VideoSource {
   readonly image: CanvasImageSource | null
@@ -43,7 +60,10 @@ export class ElementSource implements VideoSource {
     this.video.muted = true
     this.video.playsInline = true
     this.video.srcObject = new MediaStream([track])
-    void this.video.play().catch(() => {})
+    // close() interrupts a play() that has not started, which is an AbortError.
+    void this.video.play().catch((err: unknown) => {
+      if (errorName(err) !== 'AbortError') console.warn('frames: playing a track to read its picture', err)
+    })
     if (onFrame) this.follow(onFrame)
   }
 
@@ -97,14 +117,17 @@ export class FrameSource implements VideoSource {
 
   close(): void {
     this.closed = true
-    void this.reader.cancel().catch(() => {})
+    void this.reader.cancel().catch((err: unknown) => console.warn('frames: releasing the reader of a track', err))
     this.frame?.close()
     this.frame = null
   }
 
   private async pump(onFrame: () => void): Promise<void> {
     for (;;) {
-      const { value, done } = await this.reader.read().catch(() => ({ value: undefined, done: true }))
+      const { value, done } = await this.reader.read().catch((err: unknown) => {
+        console.warn('frames: reading the frames of a track, whose picture stops here', err)
+        return ENDED
+      })
       if (done || !value) return
       if (this.closed) {
         value.close()

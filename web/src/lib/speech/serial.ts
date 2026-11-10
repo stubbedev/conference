@@ -6,13 +6,15 @@
 // so a reply cannot be mistaken for another call's and the machine is
 // never asked for two inferences at once.
 
+import { settled } from '../settled.ts'
+
 export class Serial {
-  private tail: Promise<unknown> = Promise.resolve()
+  private tail: Promise<void> = Promise.resolve()
 
   /** Runs task once everything queued before it has finished. */
   run<T>(task: () => Promise<T> | T): Promise<T> {
     const next = this.tail.then(task)
-    this.tail = next.catch(() => {})
+    this.tail = settled(next)
     return next
   }
 }

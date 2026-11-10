@@ -79,6 +79,15 @@ relay. Make sure these ports are open:
 | 5000/udp     | video and audio                |
 | 3478/udp+tcp | the network relay (TURN)       |
 
+Video arrives in bursts, so the server asks the kernel for a 4 MiB
+receive buffer on its media sockets. Linux grants at most
+`net.core.rmem_max`, 208 KiB on a stock kernel, and the server logs a
+warning when it gets less. Raise the limit on the host:
+
+```bash
+sysctl -w net.core.rmem_max=4194304
+```
+
 Rooms are stored in SQLite under the `data` volume.
 
 Prefer running it without Docker?

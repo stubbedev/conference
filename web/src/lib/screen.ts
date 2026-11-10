@@ -3,8 +3,6 @@ import { SCREEN_SHARE_FPS } from './encodings.ts'
 // A screen share's picture, sound and picker. The encoder settings that
 // carry it live in encodings.ts, next to the camera's.
 
-export const SCREEN_AUDIO_KIND = 'screen-audio'
-
 export const SCREEN_CAPTURE: MediaTrackConstraints = { frameRate: { ideal: SCREEN_SHARE_FPS } }
 
 /**

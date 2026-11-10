@@ -1,3 +1,5 @@
+import { removeStoredWithPrefix } from '@/lib/storage'
+
 const DB_NAME = 'conference'
 const STORE = 'roompass'
 const RETIRED_PLAINTEXT_PREFIX = 'conference:roompw:'
@@ -56,12 +58,5 @@ export async function forgetRoomPassword(slug: string): Promise<void> {
 }
 
 export function purgePlaintextRoomPasswords(): void {
-  try {
-    const retired = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter(
-      (key): key is string => key !== null && key.startsWith(RETIRED_PLAINTEXT_PREFIX),
-    )
-    for (const key of retired) localStorage.removeItem(key)
-  } catch (err) {
-    console.warn('roompass: purging plaintext room passwords', err)
-  }
+  removeStoredWithPrefix(RETIRED_PLAINTEXT_PREFIX)
 }

@@ -1753,12 +1753,7 @@ func (vr *viewerRate) updateLoss(fractionLost uint8, elapsed time.Duration, deli
 			return
 		}
 
-		through := delivered
-		if vr.loss.bound {
-			through = min(through, vr.loss.bps)
-		}
-
-		vr.loss = capAt(max(backOff(through, fractionLost), minViewerBitrate))
+		vr.loss = capAt(max(backOff(vr.loss.clamp(delivered), fractionLost), minViewerBitrate))
 	case fractionLost < lowLossFraction:
 		vr.clean = true
 

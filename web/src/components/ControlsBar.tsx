@@ -19,6 +19,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Hint } from '@/components/Hint'
 import { MeetingClock } from '@/components/MeetingClock'
 import { blurToggleLabel } from '@/hooks/media'
+import { shortcutKey } from '@/hooks/shortcuts'
 import { unreadBadge } from '@/hooks/side-panel'
 import { cn } from '@/lib/utils'
 
@@ -50,7 +51,8 @@ interface ControlsBarProps {
   onRecord: () => void
   onLeave: () => void
   onToggleChat: () => void
-  onToggleFullscreen: () => void
+  /** Null where the page cannot go full screen; the menu then leaves it out. */
+  onToggleFullscreen: (() => void) | null
   children?: ReactNode
 }
 
@@ -93,7 +95,8 @@ export const ControlsBar = memo(function ControlsBar({
   const shareLabel = sharing ? 'Stop sharing' : 'Share your screen'
   const recordLabel = recording ? 'Stop recording' : 'Record the call'
   const blurLabel = blurToggleLabel(blur)
-  const chatName = chatOpen ? 'Close chat' : 'Open chat'
+  const chatKey = shortcutKey('toggleChat')
+  const fullscreenKey = shortcutKey('toggleFullscreen')
   const [revealed, setRevealed] = useState(true)
   const visible = !fullscreen || revealed
   const hideTimer = useRef<number | undefined>(undefined)
@@ -202,27 +205,31 @@ export const ControlsBar = memo(function ControlsBar({
           </Hint>
           <DropdownMenuContent side="top" align="center">
             {canShare && (
-              <DropdownMenuItem className="sm:hidden" onSelect={onShare} aria-label={shareLabel}>
+              <DropdownMenuItem className="sm:hidden" onSelect={onShare}>
                 {sharing ? <MonitorX /> : <MonitorUp />}
                 {shareLabel}
               </DropdownMenuItem>
             )}
             {canBlur && (
-              <DropdownMenuItem onSelect={onBlur} disabled={!cam} aria-label={blurLabel}>
+              <DropdownMenuItem onSelect={onBlur} disabled={!cam}>
                 <Contrast />
                 {blurLabel}
               </DropdownMenuItem>
             )}
-            <DropdownMenuItem onSelect={onToggleFullscreen} aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
-              {fullscreen ? <Minimize2 /> : <Maximize2 />}
-              {fullscreen ? 'Exit full screen (F)' : 'Full screen (F)'}
-            </DropdownMenuItem>
+            {onToggleFullscreen && (
+              <DropdownMenuItem onSelect={onToggleFullscreen} aria-keyshortcuts={fullscreenKey}>
+                {fullscreen ? <Minimize2 /> : <Maximize2 />}
+                <span>
+                  {fullscreen ? 'Exit full screen' : 'Full screen'} <span aria-hidden>({fullscreenKey})</span>
+                </span>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator className="sm:hidden" />
-            <DropdownMenuItem className="sm:hidden" onSelect={onTogglePeople} aria-label="People">
+            <DropdownMenuItem className="sm:hidden" onSelect={onTogglePeople}>
               <Users />
               People ({peopleCount})
             </DropdownMenuItem>
-            <DropdownMenuItem className="sm:hidden" onSelect={onToggleChat} aria-label={chatName}>
+            <DropdownMenuItem className="sm:hidden" onSelect={onToggleChat} aria-keyshortcuts={chatKey}>
               <MessageSquare />
               Chat{unread > 0 ? ` (${unreadBadge(unread)} new)` : ''}
             </DropdownMenuItem>
@@ -251,12 +258,13 @@ export const ControlsBar = memo(function ControlsBar({
             </span>
           </Button>
         </Hint>
-        <Hint label={chatOpen ? 'Close chat (C)' : 'Chat with everyone (C)'} name={chatName}>
+        <Hint label={`${chatOpen ? 'Close chat' : 'Chat with everyone'} (${chatKey})`} name={chatOpen ? 'Close chat' : 'Open chat'}>
           <Button
             variant={chatOpen ? 'secondary' : 'ghost'}
             size="icon"
             className={cn(SIDE, 'relative hidden sm:inline-flex')}
             onClick={onToggleChat}
+            aria-keyshortcuts={chatKey}
           >
             <MessageSquare />
             {unread > 0 && (

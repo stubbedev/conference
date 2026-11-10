@@ -1,5 +1,5 @@
-import type { SpeechModels } from '@/lib/speech/models'
-import type { Language } from '@/lib/translate/languages'
+import type { SpeechModels } from './speech/models.ts'
+import type { Language } from './translate/languages.ts'
 
 export interface ServerConfig {
   createAuthRequired: boolean
@@ -69,14 +69,28 @@ export interface CreateRoomInput {
   maxMembers: number
 }
 
+/** The server wants a room's password or refused the one it got: another can be tried. */
+export class PasswordRefused extends Error {}
+
+const PASSWORD_REFUSALS: ReadonlySet<unknown> = new Set(['password-required', 'bad-password'])
+
+// Why the server refused: the message in its JSON, or the status when the
+// answer is not the server's own, as with a proxy's error page.
+async function refusal(res: Response): Promise<Error> {
+  const body: unknown = await res.json().catch(() => undefined)
+  const { error, message }: { error?: unknown; message?: unknown } = typeof body === 'object' && body !== null ? body : {}
+  const reason = typeof message === 'string' && message !== '' ? message : `The server answered ${res.status} ${res.statusText}`.trimEnd()
+  return PASSWORD_REFUSALS.has(error) ? new PasswordRefused(reason) : new Error(reason)
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)
-  const body: unknown = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    const message = (body as { message?: string }).message ?? res.statusText
-    throw new Error(message)
+  if (!res.ok) throw await refusal(res)
+  try {
+    return (await res.json()) as T
+  } catch (err) {
+    throw new Error(`The server answered ${path} with something that is not JSON`, { cause: err })
   }
-  return body as T
 }
 
 export const api = {

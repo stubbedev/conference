@@ -12,7 +12,8 @@ import {
   type SpeakerFocus,
 } from './recording-layout.ts'
 import { SPEAKING_HOLD_MS } from './speaking.ts'
-import { CAMERA_KIND, heardThrough, type Translations } from './tiles.ts'
+import { heardThrough, withoutVoice, withVoice, type Translations } from './tiles.ts'
+import { CAMERA_KIND } from './track-kind.ts'
 import { VoiceMeter } from './voice-meter.ts'
 
 const FRAME: Rect = { x: 0, y: 0, width: 1280, height: 720 }
@@ -251,3 +252,18 @@ for (const [source, exists] of VOICE_SOURCES) {
     assert.equal(spotlightAt(SPEAKING_HOLD_MS, translations), 'alice')
   })
 }
+
+test('a member whose translated voice is gone is recorded in their own voice again and can take the spotlight', () => {
+  const alice = new Line()
+  const translation = new Line()
+  const own = { alice, bob: new Line() }
+  const translated = listening({ voices: withVoice({}, 'alice', 'en', translation) })
+  const spotlightAt = recordedCall(own)
+
+  alice.level = VOICE
+  assert.equal(spotlightAt(0, translated), null, 'her own voice counted while her translation replaced it')
+
+  const stopped = { ...translated, voices: withoutVoice(translated.voices, 'alice', 'en', translation) }
+  assert.equal(recorderTiles(own, stopped).find((tile) => tile.key === 'alice')?.heard, alice)
+  assert.equal(spotlightAt(SPEAKING_HOLD_MS, stopped), 'alice')
+})

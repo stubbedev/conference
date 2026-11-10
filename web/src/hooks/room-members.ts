@@ -4,9 +4,10 @@ import { toast } from 'sonner'
 import { useLatest } from '@/hooks/latest'
 import type { Controls } from '@/hooks/local-media'
 import { tilesOfMembers } from '@/lib/reconnect'
-import { SCREEN_AUDIO_KIND, screenTracks } from '@/lib/screen'
-import { translationKindLang, type MemberInfo, type ModerateAction, type RoomClient } from '@/lib/sfu'
-import { CAMERA_KIND, LOCAL_SOURCE, SCREEN_KIND, type Tile } from '@/lib/tiles'
+import { screenTracks } from '@/lib/screen'
+import type { MemberInfo, ModerateAction, RoomClient } from '@/lib/sfu'
+import { LOCAL_SOURCE, type Tile } from '@/lib/tiles'
+import { SCREEN_KIND, tileOf } from '@/lib/track-kind'
 
 export function useRoomMembers(clientRef: RefObject<RoomClient | null>, displayName: string, controls: Controls) {
   const [members, setMembers] = useState<MemberInfo[]>([])
@@ -44,8 +45,8 @@ export function useRoomMembers(clientRef: RefObject<RoomClient | null>, displayN
         }
       })
       client.on('track', ({ sourceId, stream: incoming, kind }) => {
-        if (translationKindLang(kind) !== null) return
-        const tileKind = kind === SCREEN_KIND || kind === SCREEN_AUDIO_KIND ? SCREEN_KIND : CAMERA_KIND
+        const tileKind = tileOf(kind)
+        if (tileKind === null) return
         const key = `${sourceId}:${tileKind}`
         setTiles((prev) => {
           const existing = prev.find((t) => t.key === key)

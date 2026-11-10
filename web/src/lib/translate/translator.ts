@@ -15,9 +15,10 @@ export interface TranslatorEvents {
   onStatus?: (status: TranslatorStatus) => void
   /**
    * A translated voice this member plays on its own machine, which no
-   * other member needs: the browser's own engines make one per speaker.
+   * other member needs: the browser's own engines make one per speaker,
+   * in this member's language.
    */
-  onStream?: (speaker: string, lang: string, track: MediaStreamTrack) => void
+  onStream?: (speaker: string, track: MediaStreamTrack) => void
 }
 
 export interface Translator {

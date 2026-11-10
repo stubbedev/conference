@@ -13,6 +13,7 @@
 // the others show them, and translate a sentence themselves, as well as
 // they can, when no translation arrives.
 
+import { errorMessage } from '@/lib/errors'
 import type { RoomClient } from '@/lib/sfu'
 import { clauses } from '@/lib/speech/clauses'
 import { assignTranslators, translatorFor, type Candidate } from '@/lib/speech/election'
@@ -21,7 +22,6 @@ import { invented } from '@/lib/speech/invented'
 import { nextRunAt, Pace } from '@/lib/speech/pace'
 import { Recent } from '@/lib/speech/recent'
 import { ResourceSlot } from '@/lib/speech/resource-slot'
-import { message } from '@/lib/speech/runtime'
 import { Sentences, type Line } from '@/lib/speech/sentences'
 import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
 import { WarmUps } from '@/lib/speech/warm-ups'
@@ -118,9 +118,7 @@ export class LocalTranslator implements Translator {
     this.client = client
     client.setTranslates(this.translates)
     this.playbackContext ??= new AudioContext()
-    this.player ??= new VoicePlayer(this.playbackContext, (speaker, track) => {
-      this.events.onStream?.(speaker, this.selfPrefs.lang, track)
-    })
+    this.player ??= new VoicePlayer(this.playbackContext, this.events.onStream)
 
     this.unsubscribe = [
       client.on('lang', () => {
@@ -242,7 +240,7 @@ export class LocalTranslator implements Translator {
       await this.engines.mt(source, target)
     } catch (error) {
       console.warn(`live translation could not prepare translating ${source} into ${target}:`, error)
-      this.note(`Translating ${source} into ${target} could not be prepared, so those sentences may arrive untranslated: ${message(error)}`)
+      this.note(`Translating ${source} into ${target} could not be prepared, so those sentences may arrive untranslated: ${errorMessage(error)}`)
     }
   }
 
@@ -507,14 +505,14 @@ export class LocalTranslator implements Translator {
       console.warn('live translation has no voice for', prefs.lang, error)
       if (this.voiceless.has(prefs.lang)) return
       this.voiceless.add(prefs.lang)
-      this.note(`Translations are shown but not spoken: ${message(error)}`)
+      this.note(`Translations are shown but not spoken: ${errorMessage(error)}`)
     }
   }
 
   private fail(error: unknown): void {
     if (this.stopped) return
     console.warn('live translation:', error)
-    this.note(message(error))
+    this.note(errorMessage(error))
   }
 
   private note(warning: string): void {

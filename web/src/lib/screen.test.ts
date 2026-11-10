@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { SCREEN_SHARE_FPS } from './encodings.ts'
-import { SCREEN_AUDIO_KIND, SCREEN_CAPTURE, screenTracks } from './screen.ts'
+import { SCREEN_CAPTURE, screenTracks } from './screen.ts'
 
 const track = (id: string, kind: 'audio' | 'video', readyState: MediaStreamTrackState = 'live') =>
   ({ id, kind, readyState }) as MediaStreamTrack
@@ -26,10 +26,6 @@ test('a track that already ended is dropped', () => {
     merged.map((t) => t.id),
     ['v'],
   )
-})
-
-test('the announced kind for a share is audio to the server', () => {
-  assert.equal(SCREEN_AUDIO_KIND, 'screen-audio')
 })
 
 test('a screen is captured at the frame rate it is encoded at', () => {

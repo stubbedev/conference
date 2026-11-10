@@ -1,6 +1,7 @@
-// JSON values in localStorage. A blocked or full store fails on every
-// read and write, so each key reports each kind of failure once, and the
-// caller carries on with what it holds in memory.
+// The app's values in localStorage, and the only module that touches it.
+// A blocked or full store fails on every read and write, so each key
+// reports each kind of failure once, and the caller carries on with what
+// it holds in memory.
 const reported = new Set<string>()
 
 function reportOnce(attempt: string, err: unknown): void {
@@ -9,24 +10,52 @@ function reportOnce(attempt: string, err: unknown): void {
   console.warn(`storage: ${attempt}`, err)
 }
 
-// Whatever is stored under key, still to be parsed: an older build or a
-// hand edit may have left anything there. Undefined when nothing is
-// stored or it cannot be read.
-export function readStored(key: string): unknown {
+function read<T>(key: string, decode: (text: string) => T): T | undefined {
   try {
-    const raw = localStorage.getItem(key)
-    return raw === null ? undefined : JSON.parse(raw)
+    const text = localStorage.getItem(key)
+    return text === null ? undefined : decode(text)
   } catch (err) {
     reportOnce(`reading "${key}", so it starts from its default`, err)
     return undefined
   }
 }
 
-export function writeStored(key: string, value: unknown): void {
+function write(key: string, encode: () => string): void {
   try {
-    localStorage.setItem(key, JSON.stringify(value))
+    localStorage.setItem(key, encode())
   } catch (err) {
     reportOnce(`saving "${key}", so it lasts only until the page is closed`, err)
+  }
+}
+
+// Whatever JSON is stored under key, still to be parsed: an older build
+// or a hand edit may have left anything there. Undefined when nothing is
+// stored or it cannot be read.
+export function readStored(key: string): unknown {
+  return read(key, JSON.parse)
+}
+
+export function writeStored(key: string, value: unknown): void {
+  write(key, () => JSON.stringify(value))
+}
+
+// The same for a key that holds bare text rather than JSON.
+export function readStoredText(key: string): string | undefined {
+  return read(key, (text) => text)
+}
+
+export function writeStoredText(key: string, text: string): void {
+  write(key, () => text)
+}
+
+// Clears out every key that starts with prefix: a family of keys the app
+// no longer writes.
+export function removeStoredWithPrefix(prefix: string): void {
+  try {
+    const keys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+    for (const key of keys) if (key?.startsWith(prefix)) localStorage.removeItem(key)
+  } catch (err) {
+    reportOnce(`removing the keys that start with "${prefix}", so they stay stored`, err)
   }
 }
 

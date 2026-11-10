@@ -2,20 +2,20 @@ import { useEffect, useRef } from 'react'
 
 import { isMobileDevice, type TrackKind } from '@/hooks/media'
 import type { useLocalMedia } from '@/hooks/local-media'
+import { queryPermission, type QueriedPermission } from '@/lib/permission'
 
 const RECOVER_BACKOFF_MS = 5000
 const DEVICE_POLL_MS = 3000
 
 const PERMISSION_NAMES: Record<TrackKind, PermissionName> = { mic: 'microphone', cam: 'camera' }
 
-async function permission(kind: TrackKind): Promise<PermissionStatus | null> {
-  if (!navigator.permissions) return null
-  return navigator.permissions.query({ name: PERMISSION_NAMES[kind] }).catch(() => null)
+function permission(kind: TrackKind): Promise<QueriedPermission> {
+  return queryPermission(navigator.permissions, PERMISSION_NAMES[kind])
 }
 
 async function mayReopen(kind: TrackKind): Promise<boolean> {
   const status = await permission(kind)
-  return status === null || status.state === 'granted'
+  return status === 'unknown' || status.state === 'granted'
 }
 
 export function useMediaRecovery(active: boolean, media: ReturnType<typeof useLocalMedia>) {
@@ -72,7 +72,7 @@ export function useMediaRecovery(active: boolean, media: ReturnType<typeof useLo
     const onPermission = () => void refreshDevices()
     void Promise.all([permission('mic'), permission('cam')]).then((statuses) => {
       for (const status of statuses) {
-        if (!status) continue
+        if (status === 'unknown') continue
         if (disposed) return
         status.addEventListener('change', onPermission)
         watched.push(status)

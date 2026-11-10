@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { resumeAudio } from '@/hooks/media'
-import { api, type RoomInfo } from '@/lib/api'
+import { api, PasswordRefused, type RoomInfo } from '@/lib/api'
+import { errorMessage } from '@/lib/errors'
 import { deriveProof, fromB64, importPassword, openKeyblob, toB64 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
 
@@ -88,8 +89,8 @@ export function useRoomSession(slug: string, onReady: () => Promise<void>) {
         setPhase('prejoin')
         void onReady()
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Could not join the room.'
-        if (/password/i.test(message)) {
+        const message = errorMessage(err)
+        if (err instanceof PasswordRefused) {
           setGateError(message)
           setPhase('gate')
         } else {
@@ -126,7 +127,7 @@ export function useRoomSession(slug: string, onReady: () => Promise<void>) {
         await connect()
         setPhase('live')
       } catch (err) {
-        setFatalError(err instanceof Error ? err.message : 'Could not join the room.')
+        setFatalError(errorMessage(err))
         setPhase('error')
       }
     },

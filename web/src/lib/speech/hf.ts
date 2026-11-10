@@ -1,7 +1,8 @@
 import { env } from '@huggingface/transformers'
 
 import { fetchHeadFirst } from './loading'
-import { DownloadFailed, message } from './runtime'
+import { asError } from '../errors'
+import { DownloadFailed } from './runtime'
 import { configureOnnx, type Runtime } from './wasm'
 
 const NOT_FOUND = 404
@@ -21,7 +22,7 @@ async function fetchModelFile(input: string | URL, init?: RequestInit): Promise<
     unfetched.delete(url)
     return response
   } catch (err) {
-    unfetched.set(url, err instanceof Error ? err : new Error(message(err)))
+    unfetched.set(url, asError(err))
     throw err
   }
 }

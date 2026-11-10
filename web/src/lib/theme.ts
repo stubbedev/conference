@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react'
 
+import { readStoredText, writeStoredText } from '@/lib/storage'
 import { colorScheme, parseThemeChoice, resolveTheme, THEMES, type Theme, type ThemeChoice } from '@/lib/themes'
 
 export const STORAGE_KEY = 'theme'
@@ -14,19 +15,11 @@ export interface ThemeState {
 export const ThemeContext = createContext<ThemeState | null>(null)
 
 export function storedChoice(): ThemeChoice {
-  try {
-    return parseThemeChoice(localStorage.getItem(STORAGE_KEY))
-  } catch {
-    return parseThemeChoice(null)
-  }
+  return parseThemeChoice(readStoredText(STORAGE_KEY))
 }
 
 export function store(choice: ThemeChoice): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, choice)
-  } catch {
-    console.warn('the theme cannot be remembered: this browser refuses local storage')
-  }
+  writeStoredText(STORAGE_KEY, choice)
 }
 
 export function systemDark(): boolean {

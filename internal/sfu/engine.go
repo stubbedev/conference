@@ -21,6 +21,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/interceptor/pkg/report"
+	"github.com/pion/transport/v4"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/stubbe/conference/internal/relay"
@@ -40,7 +41,12 @@ type Engine struct {
 // externalIPs, when set, replace host candidates for NAT 1:1 setups.
 // The returned cleanup closes the UDP mux.
 func NewEngine(udpPort int, externalIPs []netip.Addr) (*Engine, func(), error) {
-	settingEngine, mediaAddrs, closeMux, err := newSettingEngine(udpPort, externalIPs)
+	sockets, err := newMediaNet()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	settingEngine, mediaAddrs, closeMux, err := newSettingEngine(sockets, udpPort, externalIPs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -120,10 +126,16 @@ func (e *Engine) MediaAddrs() []relay.MediaAddr {
 	return e.mediaAddrs
 }
 
-// newSettingEngine binds the shared UDP mux and applies NAT rewrite
-// rules. The returned cleanup releases the mux.
-func newSettingEngine(udpPort int, externalIPs []netip.Addr) (webrtc.SettingEngine, []relay.MediaAddr, func(), error) {
+// newSettingEngine opens every socket on sockets, binds the shared UDP
+// mux and applies NAT rewrite rules. The returned cleanup releases the
+// mux.
+func newSettingEngine(
+	sockets transport.Net,
+	udpPort int,
+	externalIPs []netip.Addr,
+) (webrtc.SettingEngine, []relay.MediaAddr, func(), error) {
 	settingEngine := webrtc.SettingEngine{}
+	settingEngine.SetNet(sockets)
 
 	noop := func() {}
 
@@ -147,7 +159,7 @@ func newSettingEngine(udpPort int, externalIPs []netip.Addr) (webrtc.SettingEngi
 		return settingEngine, nil, noop, nil
 	}
 
-	mux, err := ice.NewMultiUDPMuxFromPort(udpPort)
+	mux, err := ice.NewMultiUDPMuxFromPort(udpPort, ice.UDPMuxFromPortWithNet(sockets))
 	if err != nil {
 		return settingEngine, nil, noop, fmt.Errorf("sfu: ice mux on port %d: %w", udpPort, err)
 	}

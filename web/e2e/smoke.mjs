@@ -21,6 +21,7 @@ import { networkInterfaces, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import {
+  accessibleName,
   callJs,
   check,
   checkCall,
@@ -66,7 +67,7 @@ function lanAddress() {
 }
 
 async function controlPresent(label) {
-  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].some((b) => b.getAttribute('aria-label') === label)
+  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].some((b) => accessibleName(b) === label)
   if (find()) return true
   const more = document.querySelector('button[aria-label="More options"]')
   if (!more) return false
@@ -706,7 +707,7 @@ async function checkTooltips(failures, browser) {
   // Picking a menu item hands focus back to the menu's trigger. Into full
   // screen and out again, the one item every member always has; the bar
   // moves in full screen, so it is measured again each time.
-  for (const item of ['Enter fullscreen', 'Exit fullscreen']) {
+  for (const item of ['Full screen', 'Exit full screen']) {
     const layout = await callJs(browser, callBarLayout)
     const more = layout.controls.find((c) => c.label === 'More options')
     check(failures, label, more, `no "More options" button among the call bar controls: ${JSON.stringify(layout.controls)}`)
@@ -716,7 +717,7 @@ async function checkTooltips(failures, browser) {
     await press(browser, more)
     const target = await waitFor(
       browser,
-      `(() => { const r = document.querySelector('[role="menuitem"][aria-label=${JSON.stringify(item)}]')?.getBoundingClientRect(); return r && { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`,
+      `(() => { const r = [...document.querySelectorAll('[role="menuitem"]')].find((el) => (${accessibleName})(el) === ${JSON.stringify(item)})?.getBoundingClientRect(); return r && { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`,
       Boolean,
       TOOLTIP_WAIT_MS,
     )
@@ -734,6 +735,57 @@ async function checkTooltips(failures, browser) {
   await shown('moving keyboard focus to the next control')
   await press(browser, idle)
   await closed('after clicking away from a keyboard-focused control')
+}
+
+// The buttons, tabs and menu items on the page that a screen reader
+// would announce without a name, each as its own markup, and whether
+// what was to be looked at is on the page at all.
+function unnamedControls(proof) {
+  return {
+    shown: document.querySelector(proof) !== null,
+    unnamed: [...document.querySelectorAll('button, [role="button"], [role="tab"], [role^="menuitem"]')]
+      .filter((control) => accessibleName(control) === '')
+      .map((control) => control.outerHTML.replace(/\s+/g, ' ').slice(0, 200)),
+  }
+}
+
+const CONTROL_WAIT_MS = 2000
+
+// proof is a selector only that part of the page matches, so a part that
+// never appeared fails instead of passing with nothing to name.
+async function checkControlNames(failures, browser, where, proof) {
+  const appeared = await waitFor(browser, `document.querySelector(${JSON.stringify(proof)}) !== null`, Boolean, CONTROL_WAIT_MS)
+  const { shown, unnamed } = await callJs(browser, unnamedControls, proof)
+  check(failures, 'control names', appeared.ok && shown, `the ${where} did not appear (nothing matches ${proof})`)
+  check(failures, 'control names', unnamed.length === 0, `${unnamed.length} controls on the ${where} have no accessible name: ${unnamed.join(' | ')}`)
+}
+
+function pressMoreOptions() {
+  document.querySelector('button[aria-label="More options"]')?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }))
+}
+
+function pressEscape() {
+  document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+}
+
+// Everything a member can press in a call has a name: the call bar and
+// the tiles, the "More options" menu, and both tabs of the side panel.
+// The pre-join screen is checked as the member passes it.
+async function checkCallControlNames(failures, label, browser) {
+  const failed = (step) => check(failures, 'control names', false, `${label}: ${step}`)
+  await checkControlNames(failures, browser, `${label}'s call bar and tiles`, 'footer button')
+
+  await callJs(browser, pressMoreOptions)
+  await checkControlNames(failures, browser, `${label}'s "More options" menu`, '[role="menuitem"]')
+  await callJs(browser, pressEscape)
+
+  if (!(await clickButtonByTitle(browser, 'Participants'))) failed('no "Participants" button to open the side panel with')
+  await checkControlNames(failures, browser, `${label}'s people panel`, '[role="tabpanel"]:not(.hidden) [aria-label="People in the call"]')
+  if (!(await clickButtonByTitle(browser, 'Open chat'))) failed('no "Open chat" button to show the chat with')
+  await checkControlNames(failures, browser, `${label}'s chat panel`, '[role="tabpanel"]:not(.hidden) [aria-label="Message everyone"]')
+  if (!(await clickButtonByTitle(browser, 'Close chat'))) failed('no "Close chat" button to close the side panel with')
+  const closed = await waitFor(browser, `document.querySelector('[role="tablist"]') === null`, Boolean, CONTROL_WAIT_MS)
+  if (!closed.ok) failed('the side panel stayed open')
 }
 
 async function checkStillInRoom(failures, label, browsers) {
@@ -765,7 +817,7 @@ async function main() {
     // host the recording phase; the second joins like a normal guest.
     await joinRoom(browsers[0], privUrl)
     await sleep(stagger)
-    await joinRoom(browsers[1], url)
+    await joinRoom(browsers[1], url, null, (browser) => checkControlNames(failures, browser, 'pre-join screen', 'video'))
     await sleep(stagger)
 
     await checkCall(failures, browsers, ['browser 0', 'browser 1'], { seconds })
@@ -816,6 +868,13 @@ async function main() {
       check(failures, 'translation', !shown.button, `translate button offered on the ${label} browser with no engines configured`)
       check(failures, 'translation', !shown.settings, `translation settings offered on the ${label} browser`)
       check(failures, 'translation', !shown.variables, `server settings leaked to the ${label} browser`)
+    }
+
+    for (const [index, label] of [
+      [0, 'the host'],
+      [1, 'a member'],
+    ]) {
+      await checkCallControlNames(failures, label, browsers[index])
     }
 
     // Recording phase. Round one: the host records, a third browser

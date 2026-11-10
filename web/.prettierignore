@@ -1,0 +1,3 @@
+# Prettier reads the ignore file of the directory it is run from, so
+# this repeats the repository's .prettierignore for a run from here.
+*

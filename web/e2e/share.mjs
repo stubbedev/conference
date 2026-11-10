@@ -1,12 +1,12 @@
 // A shared screen as the tests see it: a stand-in for the screen picker,
 // which headless browsers do not have, and the counters both ends of a
 // share expose.
-import { callJs, sleep } from './browser.mjs'
+import { accessibleName, callJs, sleep } from './browser.mjs'
 
 // A control is a button on the bar or an item in its "More options"
 // menu, which Radix opens on pointerdown rather than click.
 function clickButtonByLabel(label) {
-  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].find((b) => b.getAttribute('aria-label') === label)
+  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].find((b) => accessibleName(b) === label)
   let control = find()
   if (!control) {
     const more = document.querySelector('button[aria-label="More options"]')
