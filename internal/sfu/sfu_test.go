@@ -98,6 +98,8 @@ func joinTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, req sfu.JoinRe
 		t.Fatalf("%s join: %v", req.MemberName, err)
 	}
 
+	t.Cleanup(peer.member.Leave)
+
 	go peer.pump()
 
 	return peer
