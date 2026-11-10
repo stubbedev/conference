@@ -192,9 +192,6 @@ export const VideoTile = memo(function VideoTile({
 
   return (
     <div className="group hud-tile relative isolate h-full w-full">
-      {speakingNow && (
-        <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-emerald-400" />
-      )}
       <div className="absolute inset-0 overflow-hidden rounded-xl bg-black [clip-path:inset(0_round_0.75rem)]">
         <video
           ref={videoRef}
@@ -227,6 +224,9 @@ export const VideoTile = memo(function VideoTile({
           </div>
         )}
       </div>
+      {speakingNow && (
+        <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-emerald-400 ring-inset" />
+      )}
       {!muted && audioBlocked && (
         <button
           type="button"

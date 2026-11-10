@@ -69,7 +69,7 @@ export function Stage({
       <main className="flex min-h-0 flex-1 flex-col gap-2 px-2 pb-2" style={{ paddingTop: STAGE_TOP }}>
         <div className="min-h-0 flex-1">{renderTile(pinnedTile)}</div>
         {stripTiles.length > 0 && (
-          <div className="no-scrollbar flex shrink-0 gap-2 overflow-x-auto pb-0.5">
+          <div className="no-scrollbar flex shrink-0 gap-2 overflow-x-auto">
             {stripTiles.map((tile) => (
               <div key={tile.key} className="aspect-video w-40 shrink-0 first:ml-auto last:mr-auto sm:w-52">
                 {renderTile(tile, true)}
