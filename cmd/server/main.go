@@ -133,9 +133,12 @@ func newLiveTranslation(cfg *config.Config) (liveTranslation, error) {
 
 	settings.LogEngines()
 
-	streams, models := service.Start(settings, func(r *http.Request) []string {
+	streams, models, err := service.Start(settings, func(r *http.Request) []string {
 		return ws.OriginPatterns(cfg.AllowedOrigins, r)
 	})
+	if err != nil {
+		return liveTranslation{}, fmt.Errorf("speech: %w", err)
+	}
 
 	return liveTranslation{status: settings.Status(), streams: streams, models: models}, nil
 }

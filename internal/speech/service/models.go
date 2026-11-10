@@ -5,12 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"maps"
-	"net/http"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,8 +15,9 @@ import (
 
 // The models a member's browser loads when the browsers run the engines:
 // transcription and translation through transformers.js, and a Piper
-// voice for each language. Every file comes from this server, never from
-// a model hub at call time.
+// voice for each language. Every file comes from this server, which
+// fetches it from the Hugging Face Hub the first time a browser asks for
+// it, never from the browser itself.
 
 const (
 	// ModelsPath is where this server serves the model directory the
@@ -123,12 +121,14 @@ type Models struct {
 	// run stand-in engines; problem says why they cannot load at all.
 	Base    string `json:"base"`
 	problem string
+	files   manifest
 }
 
 type modelFile struct {
-	ASR ASRChoice         `json:"asr"`
-	MT  MTChoice          `json:"mt"`
-	TTS map[string]string `json:"tts"`
+	ASR   ASRChoice                `json:"asr"`
+	MT    MTChoice                 `json:"mt"`
+	TTS   map[string]string        `json:"tts"`
+	Files map[string]manifestEntry `json:"files"`
 }
 
 func noModels(problem string) Models {
@@ -140,6 +140,7 @@ func noModels(problem string) Models {
 		Prompt:  nil,
 		Base:    "",
 		problem: problem,
+		files:   nil,
 	}
 }
 
@@ -157,12 +158,17 @@ func (env environment) loadModels(dir, modelsFile string, available languages, p
 		return noModels(fmt.Sprintf("%s: %v", envModelsFile, err))
 	}
 
-	sizes, err := checkModelFile(dir, file, available)
+	files, err := parseManifest(file.Files, dir, modelsFile)
 	if err != nil {
 		return noModels(fmt.Sprintf("%s: %v", envModelsFile, err))
 	}
 
-	models := Models{ASR: file.ASR, MT: file.MT, Voices: file.TTS, Sizes: sizes, Prompt: nil, Base: ModelsPath, problem: ""}
+	sizes, err := checkModelFile(files, file, available)
+	if err != nil {
+		return noModels(fmt.Sprintf("%s: %v", envModelsFile, err))
+	}
+
+	models := Models{ASR: file.ASR, MT: file.MT, Voices: file.TTS, Sizes: sizes, Prompt: nil, Base: ModelsPath, problem: "", files: files}
 	if file.MT.Kind == kindLLM {
 		translating := prompt.clone()
 		models.Prompt = &translating
@@ -194,27 +200,27 @@ func readModelFile(name string) (modelFile, error) {
 	return file, nil
 }
 
-func checkModelFile(dir string, file modelFile, available languages) (map[string]int64, error) {
+func checkModelFile(files manifest, file modelFile, available languages) (map[string]int64, error) {
 	sizes := make(map[string]int64)
 
-	err := checkTranscription(dir, "asr", file.ASR.ModelChoice, available, file.ASR.Fallback == nil, sizes)
+	err := checkTranscription(files, "asr", file.ASR.ModelChoice, available, file.ASR.Fallback == nil, sizes)
 	if err != nil {
 		return nil, err
 	}
 
 	if file.ASR.Fallback != nil {
-		err = checkTranscription(dir, "asr.fallback", *file.ASR.Fallback, available, true, sizes)
+		err = checkTranscription(files, "asr.fallback", *file.ASR.Fallback, available, true, sizes)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	err = checkTranslation(dir, file.MT, available, sizes)
+	err = checkTranslation(files, file.MT, available, sizes)
 	if err != nil {
 		return nil, err
 	}
 
-	err = checkVoices(dir, file.TTS, available, sizes)
+	err = checkVoices(files, file.TTS, available, sizes)
 	if err != nil {
 		return nil, err
 	}
@@ -222,8 +228,8 @@ func checkModelFile(dir string, file modelFile, available languages) (map[string
 	return sizes, nil
 }
 
-func checkTranscription(dir, purpose string, choice ModelChoice, available languages, cpu bool, sizes map[string]int64) error {
-	err := checkExport(dir, purpose, kindSeq2Seq, Export{Model: choice.Model, Dtype: choice.Dtype}, cpu, sizes)
+func checkTranscription(files manifest, purpose string, choice ModelChoice, available languages, cpu bool, sizes map[string]int64) error {
+	err := checkExport(files, purpose, kindSeq2Seq, Export{Model: choice.Model, Dtype: choice.Dtype}, cpu, sizes)
 	if err != nil {
 		return err
 	}
@@ -233,7 +239,7 @@ func checkTranscription(dir, purpose string, choice ModelChoice, available langu
 			return fmt.Errorf("%s %q %w", purpose, code, errModelsLanguage)
 		}
 
-		err = checkExport(dir, purpose+"."+code, kindSeq2Seq, Export{Model: choice.Languages[code], Dtype: choice.Dtype}, cpu, sizes)
+		err = checkExport(files, purpose+"."+code, kindSeq2Seq, Export{Model: choice.Languages[code], Dtype: choice.Dtype}, cpu, sizes)
 		if err != nil {
 			return err
 		}
@@ -242,12 +248,12 @@ func checkTranscription(dir, purpose string, choice ModelChoice, available langu
 	return nil
 }
 
-func checkTranslation(dir string, choice MTChoice, available languages, sizes map[string]int64) error {
+func checkTranslation(files manifest, choice MTChoice, available languages, sizes map[string]int64) error {
 	if !slices.Contains([]Kind{kindTranslator, kindSeq2Seq, kindLLM}, choice.Kind) {
 		return fmt.Errorf("mt kind %q %w", choice.Kind, errModelsKind)
 	}
 
-	err := checkExport(dir, "mt", choice.Kind, Export{Model: choice.Model, Dtype: choice.Dtype}, choice.Kind == kindSeq2Seq, sizes)
+	err := checkExport(files, "mt", choice.Kind, Export{Model: choice.Model, Dtype: choice.Dtype}, choice.Kind == kindSeq2Seq, sizes)
 	if err != nil {
 		return err
 	}
@@ -257,7 +263,7 @@ func checkTranslation(dir string, choice MTChoice, available languages, sizes ma
 			return fmt.Errorf("mt fallback %w", errModelsFallback)
 		}
 
-		err = checkExport(dir, "mt.fallback", kindSeq2Seq, *choice.Fallback, true, sizes)
+		err = checkExport(files, "mt.fallback", kindSeq2Seq, *choice.Fallback, true, sizes)
 		if err != nil {
 			return err
 		}
@@ -269,7 +275,7 @@ func checkTranslation(dir string, choice MTChoice, available languages, sizes ma
 			return err
 		}
 
-		err = checkExport(dir, "mt.pairs."+pair, kindSeq2Seq, choice.Pairs[pair], true, sizes)
+		err = checkExport(files, "mt.pairs."+pair, kindSeq2Seq, choice.Pairs[pair], true, sizes)
 		if err != nil {
 			return err
 		}
@@ -301,7 +307,7 @@ func exportFiles(kind Kind, suffix string) []string {
 	return []string{"onnx/encoder_model" + suffix + ".onnx", "onnx/decoder_model_merged" + suffix + ".onnx"}
 }
 
-func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes map[string]int64) error {
+func checkExport(files manifest, purpose string, kind Kind, export Export, cpu bool, sizes map[string]int64) error {
 	err := checkModelID(purpose, export.Model)
 	if err != nil {
 		return err
@@ -315,14 +321,13 @@ func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes 
 	}
 
 	what := fmt.Sprintf("%s %q", purpose, export.Model)
-	root := filepath.Join(dir, filepath.FromSlash(export.Model))
 
-	metadata, err := metadataSize(root, what)
+	metadata, err := metadataSize(files, export.Model, what)
 	if err != nil {
 		return err
 	}
 
-	onnx, err := exportBytes(root, exportFiles(kind, suffix), what)
+	onnx, err := exportBytes(files, export.Model, exportFiles(kind, suffix), what)
 	if err != nil {
 		return err
 	}
@@ -330,21 +335,21 @@ func checkExport(dir, purpose string, kind Kind, export Export, cpu bool, sizes 
 	sizes[exportKey(export.Model, export.Dtype)] = metadata + onnx
 
 	if cpu && export.Dtype != cpuDtype {
-		_, err = exportBytes(root, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
+		_, err = exportBytes(files, export.Model, exportFiles(kind, suffixes[cpuDtype]), what+" on the CPU")
 		if err != nil {
 			return err
 		}
 	}
 
-	return recordHostedExports(root, kind, export.Model, metadata, what, sizes)
+	return recordListedExports(files, kind, export.Model, metadata, what, sizes)
 }
 
-func recordHostedExports(root string, kind Kind, model string, metadata int64, what string, sizes map[string]int64) error {
+func recordListedExports(files manifest, kind Kind, model string, metadata int64, what string, sizes map[string]int64) error {
 	suffixes := dtypeSuffixes()
 
 	for _, dtype := range slices.Sorted(maps.Keys(suffixes)) {
-		onnx, err := exportBytes(root, exportFiles(kind, suffixes[dtype]), what)
-		if errors.Is(err, errModelsMissing) || errors.Is(err, errModelsTooLarge) {
+		onnx, err := exportBytes(files, model, exportFiles(kind, suffixes[dtype]), what)
+		if errors.Is(err, errModelsMissing) {
 			continue
 		}
 
@@ -362,11 +367,11 @@ func exportKey(model, dtype string) string {
 	return model + ":" + dtype
 }
 
-func exportBytes(root string, names []string, what string) (int64, error) {
+func exportBytes(files manifest, model string, names []string, what string) (int64, error) {
 	var size int64
 
 	for _, name := range names {
-		bytes, err := exportSize(root, name, what)
+		bytes, err := exportSize(files, model+"/"+name, what)
 		if err != nil {
 			return 0, err
 		}
@@ -392,63 +397,50 @@ func checkModelID(purpose, model string) error {
 	return nil
 }
 
-func metadataSize(root, what string) (int64, error) {
-	size, err := fileSize(filepath.Join(root, modelConfig), what)
+// metadataSize is what the config and every other JSON file at the top
+// of a model weigh, which the browsers load with each of its exports.
+func metadataSize(files manifest, model, what string) (int64, error) {
+	size, err := files.size(model+"/"+modelConfig, what)
 	if err != nil {
 		return 0, err
 	}
 
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", what, err)
-	}
-
-	for _, entry := range entries {
-		if entry.Name() == modelConfig || path.Ext(entry.Name()) != ".json" || !entry.Type().IsRegular() {
+	for name, file := range files {
+		rest, ok := strings.CutPrefix(name, model+"/")
+		if !ok || rest == modelConfig || strings.Contains(rest, "/") || path.Ext(rest) != ".json" {
 			continue
 		}
 
-		bytes, err := fileSize(filepath.Join(root, entry.Name()), what)
-		if err != nil {
-			return 0, err
-		}
-
-		size += bytes
+		size += file.size
 	}
 
 	return size, nil
 }
 
-func exportSize(root, name, what string) (int64, error) {
-	file := filepath.Join(root, filepath.FromSlash(name))
-
-	size, err := fileSize(file, what)
+func exportSize(files manifest, name, what string) (int64, error) {
+	size, err := files.size(name, what)
 	if err != nil {
 		return 0, err
 	}
 
 	for index := range maxDataShards {
-		shard := file + externalData
+		shard := name + externalData
 		if index > 0 {
 			shard += "_" + strconv.Itoa(index)
 		}
 
-		data, err := fileSize(shard, what)
-		if errors.Is(err, errModelsMissing) {
+		data, ok := files[shard]
+		if !ok {
 			return size, nil
 		}
 
-		if err != nil {
-			return 0, err
-		}
-
-		size += data
+		size += data.size
 	}
 
-	return 0, fmt.Errorf("%s %w, %d or more: %s", what, errModelsShards, maxDataShards, file)
+	return 0, fmt.Errorf("%s %w, %d or more: %s", what, errModelsShards, maxDataShards, name)
 }
 
-func checkVoices(dir string, voices map[string]string, available languages, sizes map[string]int64) error {
+func checkVoices(files manifest, voices map[string]string, available languages, sizes map[string]int64) error {
 	for _, code := range slices.Sorted(maps.Keys(voices)) {
 		if _, ok := available.get(code); !ok {
 			return fmt.Errorf("tts %q %w", code, errModelsLanguage)
@@ -464,7 +456,7 @@ func checkVoices(dir string, voices map[string]string, available languages, size
 		var size int64
 
 		for _, suffix := range []string{voiceModel, voiceJSON} {
-			bytes, err := fileSize(filepath.Join(dir, piperDir, voice+suffix), what)
+			bytes, err := files.size(piperDir+"/"+voice+suffix, what)
 			if err != nil {
 				return err
 			}
@@ -476,51 +468,4 @@ func checkVoices(dir string, voices map[string]string, available languages, size
 	}
 
 	return nil
-}
-
-func fileSize(file, what string) (int64, error) {
-	info, err := os.Stat(file)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrInvalid) {
-			return 0, fmt.Errorf("%s %w: %s", what, errModelsMissing, file)
-		}
-
-		return 0, fmt.Errorf("%s: %w: %s", what, err, file)
-	}
-
-	if !info.Mode().IsRegular() {
-		return 0, fmt.Errorf("%s %w: %s", what, errModelsMissing, file)
-	}
-
-	if info.Size() > maxBrowserFile {
-		return 0, fmt.Errorf("%s %w, %d bytes against %d: %s", what, errModelsTooLarge, info.Size(), maxBrowserFile, file)
-	}
-
-	return info.Size(), nil
-}
-
-// newModelFiles serves the model directory the browsers load from. A
-// model never changes under the same path, so a browser that has one
-// keeps it.
-func newModelFiles(dir string) http.Handler {
-	files := http.StripPrefix(ModelsPath, http.FileServerFS(os.DirFS(dir)))
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			w.Header().Set("Allow", "GET, HEAD")
-			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-
-			return
-		}
-
-		// A directory is not a model file, and listing one serves nobody.
-		if strings.HasSuffix(r.URL.Path, "/") {
-			http.NotFound(w, r)
-
-			return
-		}
-
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		files.ServeHTTP(w, r)
-	})
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/netip"
 	"net/url"
 	"os"
@@ -51,11 +52,15 @@ const (
 	openAIURL        = "https://api.openai.com/v1"
 	defaultOllamaURL = "http://localhost:11434"
 	defaultInterim   = 600 * time.Millisecond
+	// defaultCacheLimit is 15 GB, room for the default models' exports a
+	// browser starts on with several languages.
+	defaultCacheLimit = 15 * gigabyte
 
 	envRuntime           = "SPEECH_RUNTIME"
 	envEngines           = "SPEECH_ENGINES"
 	envModelDir          = "SPEECH_MODEL_DIR"
 	envModelsFile        = "SPEECH_MODELS_FILE"
+	envModelCacheMax     = "SPEECH_MODEL_CACHE_MAX"
 	envGlossary          = "GLOSSARY"
 	envLanguagesFile     = "LANGUAGES_FILE"
 	envOpenAIKey         = "OPENAI_API_KEY"
@@ -100,6 +105,8 @@ type Settings struct {
 	languages        languages
 	models           Models
 	modelDir         string
+	cacheLimit       int64
+	hub              *url.URL
 }
 
 // LogEngines says which runtime runs the engines, which engines are not
@@ -129,16 +136,6 @@ func (s Settings) LogEngines() {
 	}
 }
 
-// ModelDir is the directory the browsers load their models from, empty
-// when they load none from this server.
-func (s Settings) ModelDir() string {
-	if s.models.Base == "" {
-		return ""
-	}
-
-	return s.modelDir
-}
-
 func (s Settings) engines() []namedEngine {
 	return []namedEngine{
 		{purpose: transcription, engine: s.transcription},
@@ -156,8 +153,15 @@ func (s Settings) logBrowserRuntime() {
 		return
 	}
 
-	log.Printf("live translation runs in the browsers, which load %s transcribe and %s translate from %s, with voices for %d languages",
-		s.models.ASR.Model, s.models.MT.Model, envModelDir, len(s.models.Voices))
+	if s.models.problem != "" {
+		log.Printf("live translation runs in the browsers, but is unavailable: it needs %s", s.models.problem)
+
+		return
+	}
+
+	log.Printf("live translation runs in the browsers, which load %s transcribe and %s translate from %s, with voices for %d languages; "+
+		"this server fetches each file from %s once and keeps at most %d bytes of them",
+		s.models.ASR.Model, s.models.MT.Model, envModelDir, len(s.models.Voices), s.hub.Redacted(), s.cacheLimit)
 }
 
 // standIn reports whether the engines are stand-ins. In the browser they
@@ -190,6 +194,7 @@ var (
 	errNegative       = errors.New("must not be negative")
 	errEngineURL      = errors.New("must be an http:// or https:// URL with a host")
 	errDomain         = errors.New("must be domain names separated by commas")
+	errByteSize       = errors.New("must be a whole number of bytes with a unit, e.g. 15GB or 512MiB")
 )
 
 // FromEnv reads the settings from the environment that getenv looks up.
@@ -211,6 +216,11 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		return Settings{}, fmt.Errorf("%w, not %q", errFormatValue, format)
 	}
 
+	cacheLimit, hub, err := env.modelCache()
+	if err != nil {
+		return Settings{}, err
+	}
+
 	settings := Settings{
 		runtime:          mode,
 		transcription:    standIn(),
@@ -223,6 +233,8 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		languages:        langs,
 		models:           noModels(""),
 		modelDir:         env(envModelDir),
+		cacheLimit:       cacheLimit,
+		hub:              hub,
 	}
 
 	settings, err = env.chosenEngines(settings)
@@ -344,6 +356,66 @@ func (env environment) duration(name string, unit, fallback time.Duration) (time
 
 	return time.Duration(parsed * float64(unit)), nil
 }
+
+// modelCache reads how much of the model files the cache keeps, and the
+// hub it fetches them from.
+func (env environment) modelCache() (int64, *url.URL, error) {
+	limit, err := env.byteSize(envModelCacheMax, defaultCacheLimit)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	hub, err := url.Parse(huggingFace)
+	if err != nil {
+		return 0, nil, fmt.Errorf("the hub's address %s: %w", huggingFace, err)
+	}
+
+	return limit, hub, nil
+}
+
+// byteSize reads a number of bytes such as 15GB or 512MiB: a whole
+// number with a decimal (kB, MB, GB, TB) or binary (KiB, MiB, GiB, TiB)
+// unit, or none for bytes.
+func (env environment) byteSize(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(env(name))
+	if value == "" {
+		return fallback, nil
+	}
+
+	digits := strings.TrimRightFunc(value, func(r rune) bool { return r < '0' || r > '9' })
+	unit := strings.TrimSpace(value[len(digits):])
+
+	scale, ok := byteUnits()[unit]
+	if !ok || digits == "" {
+		return 0, fmt.Errorf("%s=%q %w", name, value, errByteSize)
+	}
+
+	number, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || number < 0 || number > math.MaxInt64/scale {
+		return 0, fmt.Errorf("%s=%q %w", name, value, errByteSize)
+	}
+
+	return number * scale, nil
+}
+
+func byteUnits() map[string]int64 {
+	return map[string]int64{
+		"": 1, "B": 1,
+		"kB": kilobyte, "KB": kilobyte, "MB": megabyte, "GB": gigabyte, "TB": terabyte,
+		"KiB": kibibyte, "MiB": mebibyte, "GiB": gibibyte, "TiB": tebibyte,
+	}
+}
+
+const (
+	kilobyte = 1000
+	megabyte = kilobyte * kilobyte
+	gigabyte = megabyte * kilobyte
+	terabyte = gigabyte * kilobyte
+	kibibyte = 1024
+	mebibyte = kibibyte * kibibyte
+	gibibyte = mebibyte * kibibyte
+	tebibyte = gibibyte * kibibyte
+)
 
 func (env environment) languages() (languages, error) {
 	path := env(envLanguagesFile)

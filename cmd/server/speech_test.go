@@ -41,7 +41,11 @@ func TestSpeechTokensOnlyFromARunningService(t *testing.T) {
 		t.Fatalf("settings: %v", err)
 	}
 
-	streams, models := service.Start(settings, nil)
+	streams, models, err := service.Start(settings, nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
 	if streams == nil || models != nil {
 		t.Fatalf("started %v and %v, want the speech service alone", streams, models)
 	}

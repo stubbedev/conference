@@ -69,18 +69,23 @@ func New(settings Settings, originPatterns func(*http.Request) []string) *Servic
 // Start builds what this server runs for live translation: its speech
 // service, nil when every browser runs the engines itself, and the
 // handler that serves the models the browsers load, nil when they load
-// none from here.
-func Start(settings Settings, originPatterns func(*http.Request) []string) (*Service, http.Handler) {
+// none from here. It fails when the model directory cannot be the cache
+// of those files.
+func Start(settings Settings, originPatterns func(*http.Request) []string) (*Service, http.Handler, error) {
 	if settings.runtime != runInBrowser {
-		return New(settings, originPatterns), nil
+		return New(settings, originPatterns), nil, nil
 	}
 
-	dir := settings.ModelDir()
-	if dir == "" {
-		return nil, nil
+	if settings.models.Base == "" {
+		return nil, nil, nil
 	}
 
-	return nil, newModelFiles(dir)
+	cache, err := newModelCache(settings.modelDir, settings.models.files, settings.cacheLimit, newHub(settings.hub))
+	if err != nil {
+		return nil, nil, fmt.Errorf("speech model cache: %w", err)
+	}
+
+	return nil, cache, nil
 }
 
 // Token admits member of room to a stream for the next hour.
