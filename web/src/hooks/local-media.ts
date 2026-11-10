@@ -363,8 +363,9 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         if (mode === 'enable') toast.error(message)
       }
       const prefs = prefsRef.current
+      const phoneCam = kind === 'cam' && isMobileDevice()
       const requestedFacing =
-        kind === 'cam' && isMobileDevice()
+        phoneCam
           ? (opts.facing ??
             (deviceId
               ? (facingFromLabel(
@@ -374,7 +375,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
                 (deviceId === prefs.cam ? (prefs.camFacing ?? undefined) : undefined))
               : undefined))
           : undefined
-      const previous = kind === 'cam' && isMobileDevice() ? (rawCamRef.current ?? undefined) : undefined
+      const previous = phoneCam ? (rawCamRef.current ?? undefined) : undefined
       let previousOpen: { deviceId: string; facing?: CameraFacing } | undefined
       if (previous) {
         previousOpen = {
@@ -456,7 +457,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       } else if (!fallback) {
         const effectiveFacing = usedFacing ?? requestedFacing
         let cam = usedId
-        if (effectiveFacing && isMobileDevice()) {
+        if (effectiveFacing && phoneCam) {
           const cams = devicesRef.current.cams
           if (!cam || !cams.some((device) => device.deviceId === cam)) {
             cam =
@@ -466,10 +467,10 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         }
         updateDevicePrefs({
           cam,
-          ...(isMobileDevice() ? { camFacing: effectiveFacing ?? null } : {}),
+          ...(phoneCam ? { camFacing: effectiveFacing ?? null } : {}),
           ...(resolution ? { resolution } : {}),
         })
-      } else if (isMobileDevice()) {
+      } else if (phoneCam) {
         if (resolution) updateDevicePrefs({ resolution })
       } else {
         updateDevicePrefs({ cam: usedId, ...(resolution ? { resolution } : {}) })

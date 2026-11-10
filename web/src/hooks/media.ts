@@ -93,9 +93,11 @@ export function blurToggleLabel(blur: boolean): string {
   return blur ? 'Turn off background blur' : 'Blur background'
 }
 
-// Mobile browsers have device lists full of entries the page cannot
-// actually select (Android exposes communication routes as inputs and has
-// no real output switching), so device pickers are desktop-only there.
+// A phone or tablet, told by its user agent because no API reveals what
+// it stands for here: one camera open at a time, cameras known by the
+// way they face while their ids repeat (Android) or rotate (iOS), and
+// listed microphones that cannot be opened. Anything a capability can
+// answer, the speaker choice for one, asks the capability instead.
 let mobileDevice: boolean | undefined
 
 export function isMobileDevice(): boolean {

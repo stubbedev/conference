@@ -145,7 +145,8 @@ interface SpeakerSelectProps {
 // Every browser gets a Speaker row: a list where the browser lists its
 // outputs, that list plus the browser's own picker where outputs are
 // only exposed through it (Firefox), and an explanation where pages
-// cannot choose at all (Safari).
+// cannot choose at all (Safari). What the browser can do decides, on a
+// phone as on a desktop.
 function SpeakerSelect({ devices, selected, onChange }: SpeakerSelectProps) {
   const outputs = audioOutputs
   switch (outputs.picking) {
@@ -170,7 +171,7 @@ function SpeakerSelect({ devices, selected, onChange }: SpeakerSelectProps) {
           label={DEVICE_LABELS.speaker}
           value={DEFAULT_DEVICE}
           disabled
-          note="This browser always plays through the system output. Change it in your computer's sound settings."
+          note="This browser always plays through the system output. Change it in your device's sound settings."
         >
           <SelectItem value={DEFAULT_DEVICE}>System output</SelectItem>
         </SelectField>
@@ -204,15 +205,15 @@ function DeviceSettings({
   onVolumeChange,
   onMicGainChange,
 }: DeviceSettingsProps) {
-  // Mobile device lists are full of entries the page cannot actually
-  // switch (Android communication routes, no output selection at all),
-  // so only the camera picker, quality and the volumes are offered there.
-  const mobile = isMobileDevice()
+  // A phone lists microphones the page cannot open (Android's
+  // communication routes, ids iOS has rotated away) and no API tells
+  // them from real ones, so the microphone picker is left out there.
+  const micsOpenable = !isMobileDevice()
   const micDb = Math.round(micGainToDb(selected.micGain))
 
   return (
     <div className="flex flex-col gap-3">
-      {!mobile && <DeviceSelect kind="mic" devices={devices.mics} selected={selected.mic} onChange={onChange} />}
+      {micsOpenable && <DeviceSelect kind="mic" devices={devices.mics} selected={selected.mic} onChange={onChange} />}
       {hasMic && (
         <VolumeSlider
           label="Mic volume"
@@ -224,7 +225,7 @@ function DeviceSettings({
           onChange={(db) => onMicGainChange(micDbToGain(db))}
         />
       )}
-      {!mobile && <SpeakerSelect devices={devices.speakers} selected={selected.speaker} onChange={onChange} />}
+      <SpeakerSelect devices={devices.speakers} selected={selected.speaker} onChange={onChange} />
       <VolumeSlider
         label="Speaker volume"
         shown={`${Math.round(selected.volume * 100)}%`}
