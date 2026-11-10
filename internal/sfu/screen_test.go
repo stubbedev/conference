@@ -428,6 +428,48 @@ func TestClosingShareConnectionKeepsTheCamera(t *testing.T) {
 	call.expectMarked(t, micID)
 }
 
+// mediaSections counts the media sections of a description.
+func mediaSections(sdp string) int {
+	return strings.Count(sdp, "\nm=")
+}
+
+// TestRestartedShareReusesItsMediaSections stops and starts a share over
+// and over and checks that the viewer is offered every new share in a
+// description no longer than the one the first share needed. Whether a
+// browser plays what arrives in a reused section is for the browser tests
+// to say: pion as a viewer does not start a receiver in a section it has
+// answered as inactive twice.
+func TestRestartedShareReusesItsMediaSections(t *testing.T) {
+	t.Parallel()
+
+	const restarts = 5
+
+	call := newShareCall(t)
+	withShare := mediaSections(call.viewerPC.RemoteDescription().SDP)
+	shared := []sfu.Kind{sfu.KindAudio, sfu.KindCamera, sfu.KindScreen, sfu.KindScreenAudio}
+	stopped := []sfu.Kind{sfu.KindAudio, sfu.KindCamera}
+
+	for restart := range restarts {
+		call.publisher.member.Handle(sfu.Message{Type: "close", PC: sfu.UpstreamScreen.PCID()})
+		call.answerUntil(t, "an offer without the share", func(offer sfu.Message) bool {
+			return offer.SDP != "" && slices.Equal(offeredKinds(offer), stopped)
+		})
+
+		for id, each := range publishOn(t, twccPublisherAPI(t), call.publisher, sfu.UpstreamScreen, screenAudioID, screenID) {
+			go pumpMarked(each.track, markerOf(id))
+		}
+
+		call.answerUntil(t, "an offer with the restarted share", func(offer sfu.Message) bool {
+			return offer.SDP != "" && slices.Equal(offeredKinds(offer), shared)
+		})
+
+		if sections := mediaSections(call.viewerPC.RemoteDescription().SDP); sections != withShare {
+			t.Fatalf("after %d restarts of the share the viewer's description has %d media sections, want the %d of the first share",
+				restart+1, sections, withShare)
+		}
+	}
+}
+
 // TestOfferMustNameItsConnection checks that an offer is refused before
 // its SDP is read when it names no known upstream, or carries a track
 // of no kind the client announces or one that belongs on the other one.

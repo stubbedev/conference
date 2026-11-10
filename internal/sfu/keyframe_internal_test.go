@@ -150,7 +150,7 @@ func TestViewerReportAppliesOnlyItsOwnBlock(t *testing.T) {
 	viewer := newMember(testRoom("reports"), 1, testJoin("reports", "bob"), func(Message) {})
 	viewer.ID = "bob"
 
-	down := &DownPeer{sourceID: "alice", pc: nil, sends: map[trackKey]*downSend{}, ice: newICEStash(), offerPending: false, offerDirty: false}
+	down := newDownPeer("alice", nil)
 
 	var relay feedbackRelay
 

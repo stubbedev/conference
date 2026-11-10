@@ -1402,11 +1402,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		local := newForwardTrack(
 			track.codec, track.first.ID(), track.first.StreamID())
 
-		sendOnly := webrtc.RTPTransceiverInit{
-			Direction: webrtc.RTPTransceiverDirectionSendonly,
-		}
-
-		transceiver, trackErr := down.pc.AddTransceiverFromTrack(local, sendOnly)
+		sender, trackErr := down.addSender(m.room.cfg.Engine, local)
 		if trackErr != nil {
 			m.fail("track-add", trackErr)
 
@@ -1415,7 +1411,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 
 		down.sends[track.key] = &downSend{local: local, kind: track.kind}
 		track.addViewer(m.ID, local, m.layerPreference(sourceID, track.kind))
-		down.watchFeedback(transceiver.Sender(), local, m, track)
+		down.watchFeedback(sender, local, m, track)
 	}
 
 	added := len(down.sends) - beforeSends
@@ -1444,14 +1440,7 @@ func (m *Member) ensureDownConnection(sourceID string) *DownPeer {
 		return nil
 	}
 
-	down := &DownPeer{
-		sourceID:     sourceID,
-		pc:           connection,
-		sends:        map[trackKey]*downSend{},
-		ice:          newICEStash(),
-		offerPending: false,
-		offerDirty:   false,
-	}
+	down := newDownPeer(sourceID, connection)
 
 	connection.OnICECandidate(m.iceSender(down.pcID()))
 	m.downs[sourceID] = down
@@ -2445,9 +2434,96 @@ type DownPeer struct {
 	// the new tracks forever, so renegotiation is deferred to applyAnswer.
 	offerPending bool
 	offerDirty   bool
+
+	// transport is the connection's one media transport, known from its
+	// first sender on.
+	transport *webrtc.DTLSTransport
+
+	// A media section whose track was removed stays in every later
+	// description, inactive. It carries the next track of its kind once
+	// the viewer has answered an offer that left it without one: before
+	// that the viewer still takes it for the track that was removed, and
+	// would be shown the new one in its place without ever being told the
+	// old one ended. offeredIdle are the sections the offer that is out
+	// leaves idle, idle the ones the viewer has answered that way.
+	offeredIdle []*webrtc.RTPTransceiver
+	idle        []*webrtc.RTPTransceiver
+}
+
+func newDownPeer(sourceID string, connection *webrtc.PeerConnection) *DownPeer {
+	return &DownPeer{
+		sourceID:     sourceID,
+		pc:           connection,
+		sends:        map[trackKey]*downSend{},
+		ice:          newICEStash(),
+		offerPending: false,
+		offerDirty:   false,
+		transport:    nil,
+		offeredIdle:  nil,
+		idle:         nil,
+	}
 }
 
 func (dp *DownPeer) pcID() string { return "down-" + dp.sourceID }
+
+// carriesNothing reports whether a media section has no track to send.
+func carriesNothing(transceiver *webrtc.RTPTransceiver) bool {
+	return transceiver.Sender() == nil && transceiver.Direction() == webrtc.RTPTransceiverDirectionInactive
+}
+
+// addSender starts sending local to the viewer: on an idle media section
+// of its kind when there is one, so a call's description stays as long as
+// what it carries at once, on a new section otherwise. pion's own AddTrack
+// would not reuse these: it takes the inactive in the viewer's answer for
+// a viewer that refuses the section.
+func (dp *DownPeer) addSender(engine *Engine, local *forwardTrack) (*webrtc.RTPSender, error) {
+	index := slices.IndexFunc(dp.idle, func(transceiver *webrtc.RTPTransceiver) bool {
+		return transceiver.Kind() == local.Kind()
+	})
+	if index < 0 {
+		sendOnly := webrtc.RTPTransceiverInit{
+			Direction: webrtc.RTPTransceiverDirectionSendonly,
+		}
+
+		transceiver, err := dp.pc.AddTransceiverFromTrack(local, sendOnly)
+		if err != nil {
+			return nil, fmt.Errorf("sfu: add a media section for track %s: %w", local.ID(), err)
+		}
+
+		dp.transport = transceiver.Sender().Transport()
+
+		return transceiver.Sender(), nil
+	}
+
+	transceiver := dp.idle[index]
+
+	sender, err := engine.newDownstreamSender(local, dp.transport)
+	if err != nil {
+		return nil, err
+	}
+
+	err = transceiver.SetSender(sender, local)
+	if err != nil {
+		return nil, fmt.Errorf("sfu: send track %s on media section %s: %w", local.ID(), transceiver.Mid(), errors.Join(err, sender.Stop()))
+	}
+
+	dp.idle = slices.Delete(dp.idle, index, index+1)
+
+	return sender, nil
+}
+
+// idleSections lists the media sections that have no track to send.
+func (dp *DownPeer) idleSections() []*webrtc.RTPTransceiver {
+	var idle []*webrtc.RTPTransceiver
+
+	for _, transceiver := range dp.pc.GetTransceivers() {
+		if carriesNothing(transceiver) {
+			idle = append(idle, transceiver)
+		}
+	}
+
+	return idle
+}
 
 // removeSender stops sending local to the viewer.
 func (dp *DownPeer) removeSender(local *forwardTrack, viewer *Member) {
@@ -2635,6 +2711,7 @@ func (dp *DownPeer) negotiate(viewer *Member) {
 	}
 
 	dp.offerPending = true
+	dp.offeredIdle = dp.idleSections()
 
 	sdp := dp.pc.LocalDescription().SDP
 
@@ -2659,6 +2736,13 @@ func (dp *DownPeer) applyAnswer(sdp string, viewer *Member) {
 	}
 
 	dp.offerPending = false
+
+	// A section the answered offer left idle may have been given a track
+	// since, if it was idle before that offer too.
+	dp.idle = slices.DeleteFunc(dp.offeredIdle, func(transceiver *webrtc.RTPTransceiver) bool {
+		return !carriesNothing(transceiver)
+	})
+	dp.offeredIdle = nil
 
 	// Tracks added while the previous offer was in flight renegotiate now.
 	if dp.offerDirty {

@@ -375,3 +375,15 @@ func (e *Engine) NewDownstreamPeerConnection() (*webrtc.PeerConnection, error) {
 
 	return pc, nil
 }
+
+// newDownstreamSender creates a sender of track for a media section an
+// existing downstream connection already has; transport is that
+// connection's.
+func (e *Engine) newDownstreamSender(track webrtc.TrackLocal, transport *webrtc.DTLSTransport) (*webrtc.RTPSender, error) {
+	sender, err := e.downstream.NewRTPSender(track, transport)
+	if err != nil {
+		return nil, fmt.Errorf("sfu: new downstream sender: %w", err)
+	}
+
+	return sender, nil
+}
