@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { parseArgs, planPairs, retryAfterSeconds } from './fetch-speech-models.mjs'
+import { externalData, parseArgs, planPairs, retryAfterSeconds } from './fetch-speech-models.mjs'
 
 test('pair languages are their own list beside every language', () => {
   const options = parseArgs(['/srv/models', '--languages=all', '--pair-languages=en, de,da,en', '--pair-dtype=q4'])
@@ -75,4 +75,26 @@ test('a rate-limited hub call waits as long as the hub asks, within bounds', () 
   assert.equal(retryAfterSeconds('86400'), 330)
   assert.equal(retryAfterSeconds(null), 60)
   assert.equal(retryAfterSeconds('Wed, 21 Oct 2026 07:28:00 GMT'), 60)
+})
+
+test('an export takes every shard of its external data, in order', () => {
+  const tree = new Set(['onnx/model_q4.onnx', 'onnx/model_q4.onnx_data_1', 'onnx/model_q4.onnx_data', 'onnx/model_q4.onnx_data_3', 'onnx/model_q4f16.onnx_data'])
+
+  assert.deepEqual(externalData(tree, 'onnx/model_q4.onnx'), ['onnx/model_q4.onnx_data', 'onnx/model_q4.onnx_data_1'])
+  assert.deepEqual(externalData(tree, 'onnx/model_fp16.onnx'), [])
+})
+
+test('the translator is TranslateGemma, falling back to m2m100', () => {
+  const { mt } = parseArgs(['/srv/models', '--languages=en,de'])
+
+  assert.deepEqual(mt, {
+    kind: 'translator',
+    model: 'onnx-community/translategemma-text-4b-it-ONNX',
+    dtype: 'q4f16',
+    fallback: { model: 'Xenova/m2m100_418M', dtype: 'q4f16' },
+  })
+})
+
+test('an encoder-decoder translator needs no fallback', () => {
+  assert.equal(parseArgs(['/srv/models', '--mt-kind=seq2seq']).mt.fallback, null)
 })

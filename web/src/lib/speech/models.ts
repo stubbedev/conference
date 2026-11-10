@@ -14,7 +14,7 @@ export interface AsrChoice extends ModelChoice {
   fallback?: ModelChoice
 }
 
-export type MtKind = 'seq2seq' | 'llm'
+export type MtKind = 'translator' | 'seq2seq' | 'llm'
 
 export interface MtChoice extends Export {
   kind: MtKind

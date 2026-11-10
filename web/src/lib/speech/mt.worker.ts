@@ -2,7 +2,7 @@ import { pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers, loadingModel } from './hf'
-import { attempting, expectLoading, gpuCapabilities, reportLoading, reportRefused } from './loading'
+import { attempting, expectLoading, gpuCapabilities, reportLoading, reportRefused, reportWarning } from './loading'
 import { exportKey, hostedIn, loadsUpFront, pairFor, type Export, type MtChoice, type MtKind, type Sizes } from './models'
 import { firstThatRuns, message, rungsFor, type Capabilities, type Rung } from './runtime'
 import { serve } from './serve'
@@ -24,15 +24,23 @@ interface ChatMessage {
   content: string
 }
 
-interface Generator {
-  (
-    messages: ChatMessage[],
-    options: { max_new_tokens: number; do_sample: false; tokenizer_encode_kwargs: { enable_thinking: false } },
-  ): Promise<{ generated_text: ChatMessage[] }[]>
+interface TranslationRequest {
+  role: 'user'
+  content: [{ type: 'text'; source_lang_code: string; target_lang_code: string; text: string }]
+}
+
+interface GenerationOptions {
+  max_new_tokens: number
+  do_sample: false
+  tokenizer_encode_kwargs?: { enable_thinking: false }
+}
+
+interface Generator<Message> {
+  (messages: Message[], options: GenerationOptions): Promise<{ generated_text: (Message | ChatMessage)[] }[]>
   dispose(): Promise<void>
 }
 
-type Model = { kind: 'seq2seq'; run: Seq2Seq } | { kind: 'llm'; run: Generator }
+type Model = { kind: 'seq2seq'; run: Seq2Seq } | { kind: 'llm'; run: Generator<ChatMessage> } | { kind: 'translator'; run: Generator<TranslationRequest> }
 
 let choice: MtChoice | null = null
 let capabilities: Capabilities = { gpu: false, halves: false }
@@ -75,9 +83,11 @@ async function start(name: string, kind: MtKind, rung: Rung): Promise<Model> {
   expectLoading(exportKey({ model: name, dtype: rung.dtype }))
   const options = { device: rung.device, dtype: rung.dtype as DataType, progress_callback: reportLoading }
   const model: Model =
-    kind === 'llm'
-      ? { kind, run: (await loadingModel(() => pipeline('text-generation', name, options))) as unknown as Generator }
-      : { kind, run: (await loadingModel(() => pipeline('translation', name, options))) as unknown as Seq2Seq }
+    kind === 'seq2seq'
+      ? { kind, run: (await loadingModel(() => pipeline('translation', name, options))) as unknown as Seq2Seq }
+      : kind === 'llm'
+        ? { kind, run: (await loadingModel(() => pipeline('text-generation', name, options))) as unknown as Generator<ChatMessage> }
+        : { kind, run: (await loadingModel(() => pipeline('text-generation', name, options))) as unknown as Generator<TranslationRequest> }
 
   try {
     await translateWith(model, WARM_UP.text, WARM_UP.source, WARM_UP.target, '')
@@ -90,15 +100,7 @@ async function start(name: string, kind: MtKind, rung: Rung): Promise<Model> {
 
 async function prepare(mt: MtChoice): Promise<TranslationLevel> {
   if (!loadsUpFront(mt)) return 'plain'
-  try {
-    primary = await modelFor(mt, mt.kind)
-    return mt.kind === 'llm' ? 'prompted' : 'plain'
-  } catch (err) {
-    if (!mt.fallback) throw err
-    console.warn(`mt: ${message(err)}; translating with ${mt.fallback.model} instead`)
-    fallback = await modelFor(mt.fallback, 'seq2seq')
-    return 'plain'
-  }
+  return (await sharedModel()).kind === 'llm' ? 'prompted' : 'plain'
 }
 
 async function sharedModel(): Promise<Model> {
@@ -106,9 +108,15 @@ async function sharedModel(): Promise<Model> {
   if (ready) return ready
 
   const mt = chosen()
-  if (mt.kind !== 'seq2seq') throw new Error('translation has no model it can run')
-  primary = await modelFor(mt, 'seq2seq')
-  return primary
+  try {
+    primary = await modelFor(mt, mt.kind)
+    return primary
+  } catch (err) {
+    if (!mt.fallback) throw err
+    reportWarning(`${message(err)}, so translation uses ${mt.fallback.model} instead`)
+    fallback = await modelFor(mt.fallback, 'seq2seq')
+    return fallback
+  }
 }
 
 function modelForPair(source: string, target: string): Promise<Model> {
@@ -116,7 +124,21 @@ function modelForPair(source: string, target: string): Promise<Model> {
   return pair ? modelFor(pair, 'seq2seq') : sharedModel()
 }
 
+function answerOf(output: { generated_text: { role: string; content: unknown }[] } | undefined, target: string): string {
+  const reply = output?.generated_text.at(-1)
+  if (reply?.role !== 'assistant' || typeof reply.content !== 'string') throw new Error(`the translation model gave no answer for ${target}`)
+  return reply.content.replace(THINKING, '').trim()
+}
+
 async function translateWith(model: Model, text: string, source: string, target: string, system: string): Promise<string> {
+  if (model.kind === 'translator') {
+    const [output] = await model.run([{ role: 'user', content: [{ type: 'text', source_lang_code: source, target_lang_code: target, text }] }], {
+      max_new_tokens: MAX_NEW_TOKENS,
+      do_sample: false,
+    })
+    return answerOf(output, target)
+  }
+
   if (model.kind === 'llm') {
     const messages: ChatMessage[] = [
       { role: 'system', content: system },
@@ -127,9 +149,7 @@ async function translateWith(model: Model, text: string, source: string, target:
       do_sample: false,
       tokenizer_encode_kwargs: { enable_thinking: false },
     })
-    const reply = output?.generated_text.at(-1)
-    if (reply?.role !== 'assistant') throw new Error(`the translation model gave no answer for ${target}`)
-    return reply.content.replace(THINKING, '').trim()
+    return answerOf(output, target)
   }
 
   const type = model.run.model.config.model_type

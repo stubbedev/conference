@@ -143,20 +143,23 @@ exports and the voice for each language:
   Moonshine has a model for steps down to it (English, French and
   Ukrainian among these), since its cost follows the length of what was
   said rather than Whisper's fixed 30 seconds.
-- **Translation** (`mt`) is either an encoder-decoder model (`"kind":
-  "seq2seq"`) such as m2m100, or a language model (`"kind": "llm"`) such
-  as Qwen2.5. Only a language model follows the translation prompt the
+- **Translation** (`mt`) is a translator (`"kind": "translator"`), a
+  language model trained only to translate and prompted with nothing but
+  the two languages, such as TranslateGemma; an encoder-decoder model
+  (`"kind": "seq2seq"`) such as m2m100; or a general language model
+  (`"kind": "llm"`) such as Qwen2.5. Only a general language model follows the translation prompt the
   server runtime uses: the form of address of each language, `GLOSSARY`,
   and the sentences before the one it translates. `mt.pairs` gives a
   language pair, source-target, a smaller model of its own (OPUS-MT), and
   `mt.builtin` lets a browser with a built-in translator (Chrome's
-  `Translator`) translate first. With pairs, an encoder-decoder `mt.model`
-  is only downloaded by a member who needs a pair OPUS-MT does not have.
+  `Translator`) translate first. With pairs, a translator or
+  encoder-decoder `mt.model` is only downloaded by a member who needs a
+  pair OPUS-MT does not have.
   The pairs and the built-in translator follow no prompt, so a room that
   needs the glossary or the form of address leaves both out. `mt.fallback`
   names the encoder-decoder model a browser translates with when it cannot
-  run the language model on any GPU export, so every member translates as
-  well as their machine allows; the fetch script gives a language model
+  run the translator or language model on any GPU export, so every member
+  translates as well as their machine allows; the fetch script gives both
   m2m100 unless `--mt-fallback` says otherwise.
 - **The voice** (`tts`) is a Piper voice per language: the one voice that
   language is spoken in, so the choice between a male and a female voice
@@ -170,7 +173,8 @@ with `<model dir>/piper/<voice>.onnx.json` beside it. A model a browser
 without a usable GPU runs also needs its 8-bit export (`q8`, the
 `_quantized` files): every encoder-decoder translation model, the
 transcription fallback, and the transcription model itself when there is
-no fallback. No single file may be larger than a browser can load, 2 GiB.
+no fallback. No single file may be larger than a browser can load, 2 GiB;
+a large model splits its weights into `_data`, `_data_1` and onwards.
 The server checks every file at start, names the one that is missing or
 too large, and tells the browsers what each export on disk weighs.
 
@@ -193,6 +197,7 @@ hang in local storage, so later visits start on the CPU at once until
 the browser version or the model setup changes.
 
 The models are large: whisper-large-v3-turbo at q4f16 is about 570 MB,
+TranslateGemma 4B at q4f16 about 2.7 GB (3.1 GB at q4),
 m2m100_418M at q4f16 about 740 MB, Qwen2.5-1.5B-Instruct at q4f16 about 1.2 GB, a
 pair about 150 MB, and a Piper medium voice about 60 MB per language. A
 browser downloads what it uses once and caches it from then on.
@@ -225,9 +230,15 @@ in place with the right size is left alone.
 OPUS-MT pairs are the default: a pair model in both directions between
 each two of `--languages`. `--pair-languages` narrows them to a subset, or
 `none` turns them off, while transcription, the voices and the
-multilingual model still cover every language in `--languages`. Every
-model also comes with whichever exports of the GPU ladder its repository
-has, which is most of the disk space. A pair is the transformers.js export of
+multilingual model still cover every language in `--languages`. The
+multilingual model is TranslateGemma 4B, which translates between any two
+of the 35 languages directly, with m2m100 as its fallback; on an RTX 3060
+Ti without `shader-f16` its q4 export translated a sentence in about
+0.9 s, where m2m100 at q4 dropped clauses. A language model only runs on
+the GPU, so a browser without one translates the pairs and m2m100 on the
+CPU. Every model also comes with whichever exports of the GPU ladder its
+repository has and a browser can hold (4 GiB in all), which is most of
+the disk space. A pair is the transformers.js export of
 Helsinki-NLP's OPUS-MT model, `Xenova/opus-mt-<source>-<target>` or
 else `onnx-community/opus-mt-<source>-<target>`. A pair with neither, or
 whose repository lacks the `--pair-dtype` or 8-bit export, is left out of

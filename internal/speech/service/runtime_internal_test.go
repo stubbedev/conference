@@ -557,3 +557,36 @@ func TestBrowserRuntimeRefusesAFileNoBrowserCanLoad(t *testing.T) {
 		t.Fatalf("available %v reason %q, want a refusal naming the file", status.Available, status.Reason)
 	}
 }
+
+func TestBrowserRuntimeWeighsATranslatorWithEveryShard(t *testing.T) {
+	t.Parallel()
+
+	const translator = "onnx-community/translategemma-text-4b-it-ONNX"
+
+	dir := modelDir(t, asrModel, danish)
+	writeModel(t, dir, translator, kindTranslator, halvesDtype)
+	writeModel(t, dir, mtModel, kindSeq2Seq, "q4", cpuDtype)
+
+	weights := filepath.Join(dir, filepath.FromSlash(translator), "onnx", "model_q4f16.onnx")
+	writeFile(t, weights+"_data", "shard0")
+	writeFile(t, weights+"_data_1", "shard-1")
+	writeFile(t, weights+"_data_3", "stray")
+
+	choices := browserChoices()
+	fallback := &Export{Model: mtModel, Dtype: "q4"}
+	choices.MT = MTChoice{Kind: kindTranslator, Model: translator, Dtype: halvesDtype, Fallback: fallback, Pairs: nil, Builtin: false}
+
+	status := browserStatus(t, dir, choices)
+	if !status.Available {
+		t.Fatalf("unavailable: %s, though a translator needs no CPU export of its own", status.Reason)
+	}
+
+	want := int64(len("{}") + len("onnx") + len("shard0") + len("shard-1"))
+	if got := status.Models.Sizes[exportKey(translator, halvesDtype)]; got != want {
+		t.Errorf("the translator weighs %d, want %d with both shards in a row", got, want)
+	}
+
+	if status.Models.Prompt != nil {
+		t.Error("a translator has a prompt, though it only follows its own")
+	}
+}

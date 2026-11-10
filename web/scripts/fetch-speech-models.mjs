@@ -18,13 +18,18 @@
 // which is also what a language model falls back to (m2m100 unless
 // --mt-fallback says otherwise) on a browser that cannot run it. Every
 // model also comes with whichever exports of the GPU ladder its repository
-// has, so a browser whose GPU refuses one can try the next.
+// has and a browser can hold, so a browser whose GPU refuses one can try
+// the next.
+//
+// The default translator is TranslateGemma, a language model trained to
+// translate between any two of its languages, for every pair without an
+// OPUS-MT model of its own.
 //
 // Usage: node scripts/fetch-speech-models.mjs <target dir> [options]
 //   --languages=en,de,da or all, the server's own list
 //   --asr=owner/model --asr-dtype=q4f16
 //   --asr-fallback=owner/model|none --asr-fallback-dtype=q4
-//   --mt-kind=seq2seq|llm --mt=owner/model --mt-dtype=q4f16
+//   --mt-kind=translator|seq2seq|llm --mt=owner/model --mt-dtype=q4f16
 //   --mt-fallback=owner/model|none, what a language model falls back to
 //   --pair-languages=en,de,da, all or none, every --languages by default
 //   --pair-dtype=q4f16
@@ -48,6 +53,7 @@ const PINNED = {
   'onnx-community/whisper-base': '27a07b4b52b3a4c5886134bb4320e93e1a4bbc7c',
   'onnx-community/moonshine-base-ONNX': 'b1e9b6aae3c3c7298f10c3798393fdf38e8fbbad',
   'Xenova/m2m100_418M': '9c374f0b7aca709787cea97b047bfbbd1559d177',
+  'onnx-community/translategemma-text-4b-it-ONNX': 'f7874a1ac60758872a4f78aac0df95b17b776994',
   'onnx-community/Qwen2.5-1.5B-Instruct': 'd54957e3af1be04546436e874a60fe386041b244',
 }
 
@@ -55,6 +61,7 @@ const LANGUAGES_FILE =
   process.env.LANGUAGES_FILE ?? path.resolve(import.meta.dirname, '..', '..', 'internal', 'speech', 'service', 'languages.json')
 
 const MT_DEFAULTS = {
+  translator: { model: 'onnx-community/translategemma-text-4b-it-ONNX', dtype: 'q4f16' },
   seq2seq: { model: 'Xenova/m2m100_418M', dtype: 'q4f16' },
   llm: { model: 'onnx-community/Qwen2.5-1.5B-Instruct', dtype: 'q4f16' },
 }
@@ -73,6 +80,7 @@ const MODEL_FILES = [
 const ONNX_STEMS = {
   seq2seq: ['onnx/encoder_model', 'onnx/decoder_model_merged'],
   llm: ['onnx/model'],
+  translator: ['onnx/model'],
 }
 
 export const DTYPE_SUFFIXES = {
@@ -91,6 +99,7 @@ export const DTYPE_SUFFIXES = {
 }
 
 const MAX_BROWSER_FILE = 2 ** 31 - 1
+const MAX_BROWSER_EXPORT = 2 ** 32
 
 const MAX_PARALLEL = 4
 const DOWNLOAD_ATTEMPTS = 4
@@ -98,7 +107,7 @@ const REPORT_BYTES = 64e6
 
 const USAGE =
   'usage: node scripts/fetch-speech-models.mjs <target dir> [--languages=en,de,da] [--asr=owner/model] [--asr-dtype=q4f16] ' +
-  '[--asr-fallback=owner/model|none] [--asr-fallback-dtype=q4] [--mt-kind=seq2seq|llm] [--mt=owner/model] [--mt-dtype=q4f16] ' +
+  '[--asr-fallback=owner/model|none] [--asr-fallback-dtype=q4] [--mt-kind=translator|seq2seq|llm] [--mt=owner/model] [--mt-dtype=q4f16] ' +
   '[--mt-fallback=owner/model|none] ' +
   '[--pair-languages=en,de,da|all] [--pair-dtype=q4f16] [--builtin]'
 
@@ -133,7 +142,7 @@ export function parseArgs(argv) {
     'asr-dtype': 'q4f16',
     'asr-fallback': 'onnx-community/whisper-base',
     'asr-fallback-dtype': 'q4',
-    'mt-kind': 'seq2seq',
+    'mt-kind': 'translator',
     'pair-dtype': 'q4f16',
     builtin: false,
   }
@@ -186,7 +195,7 @@ export function parseArgs(argv) {
       model: options.mt ?? MT_DEFAULTS[kind].model,
       dtype: options['mt-dtype'] ?? MT_DEFAULTS[kind].dtype,
       fallback:
-        kind === 'llm' && options['mt-fallback'] !== 'none'
+        kind !== 'seq2seq' && options['mt-fallback'] !== 'none'
           ? { model: options['mt-fallback'] ?? MT_DEFAULTS.seq2seq.model, dtype: MT_DEFAULTS.seq2seq.dtype }
           : null,
     },
@@ -255,6 +264,13 @@ async function modelExists(model) {
   return true
 }
 
+export function externalData(tree, name) {
+  const shard = (index) => (index === 0 ? `${name}_data` : `${name}_data_${index}`)
+  const shards = []
+  for (let index = 0; tree.has(shard(index)); index++) shards.push(shard(index))
+  return shards
+}
+
 function exportNames(tree, model, kind, dtype, revision, treeURL) {
   const names = []
 
@@ -262,8 +278,7 @@ function exportNames(tree, model, kind, dtype, revision, treeURL) {
     const name = `${stem}${DTYPE_SUFFIXES[dtype]}.onnx`
     if (!tree.has(name)) throw new MissingExport(`${model} has no ${name} at ${revision}, so it has no ${dtype} export; ${treeURL}`)
 
-    names.push(name)
-    if (tree.has(`${name}_data`)) names.push(`${name}_data`)
+    names.push(name, ...externalData(tree, name))
   }
 
   for (const name of names) {
@@ -271,6 +286,11 @@ function exportNames(tree, model, kind, dtype, revision, treeURL) {
     if (size > MAX_BROWSER_FILE) {
       throw new MissingExport(`${model} has ${name} of ${(size / 1e6).toFixed(0)} MB at ${revision}, larger than a browser can load as one file; choose another export or model`)
     }
+  }
+
+  const total = names.reduce((sum, name) => sum + tree.get(name).size, 0)
+  if (total > MAX_BROWSER_EXPORT) {
+    throw new MissingExport(`${model} has a ${dtype} export of ${(total / 1e6).toFixed(0)} MB at ${revision}, more than a browser can hold; choose another export or model`)
   }
 
   return names

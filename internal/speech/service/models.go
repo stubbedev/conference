@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -33,6 +34,7 @@ const (
 	cpuDtype     = "q8"
 
 	maxBrowserFile = 2<<30 - 1
+	maxDataShards  = 64
 
 	modelIDParts = 2
 	pairParts    = 2
@@ -44,11 +46,12 @@ var (
 	errModelsDir      = errors.New("must be an owner and a name, e.g. onnx-community/whisper-large-v3-turbo")
 	errModelsDtype    = errors.New("is not an export transformers.js loads")
 	errModelsLanguage = errors.New("is not one of the languages live translation has")
-	errModelsKind     = errors.New("must be " + string(kindSeq2Seq) + " or " + string(kindLLM))
+	errModelsKind     = errors.New("must be " + string(kindTranslator) + ", " + string(kindSeq2Seq) + " or " + string(kindLLM))
 	errModelsPair     = errors.New("must be two different languages, source-target, e.g. en-de")
 	errVoiceName      = errors.New("must be a voice's name, letters, digits, dashes and dots")
 	errModelsTooLarge = errors.New("is larger than a browser can load as one file")
 	errModelsFallback = errors.New("is for a language model, which not every browser can run; an encoder-decoder model needs none")
+	errModelsShards   = errors.New("has more external data files than a model can have")
 )
 
 func dtypeSuffixes() map[string]string {
@@ -72,8 +75,9 @@ func dtypeSuffixes() map[string]string {
 type Kind string
 
 const (
-	kindSeq2Seq Kind = "seq2seq"
-	kindLLM     Kind = "llm"
+	kindTranslator Kind = "translator"
+	kindSeq2Seq    Kind = "seq2seq"
+	kindLLM        Kind = "llm"
 )
 
 // Export is a model and the export of it the browsers load.
@@ -239,7 +243,7 @@ func checkTranscription(dir, purpose string, choice ModelChoice, available langu
 }
 
 func checkTranslation(dir string, choice MTChoice, available languages, sizes map[string]int64) error {
-	if choice.Kind != kindSeq2Seq && choice.Kind != kindLLM {
+	if !slices.Contains([]Kind{kindTranslator, kindSeq2Seq, kindLLM}, choice.Kind) {
 		return fmt.Errorf("mt kind %q %w", choice.Kind, errModelsKind)
 	}
 
@@ -249,7 +253,7 @@ func checkTranslation(dir string, choice MTChoice, available languages, sizes ma
 	}
 
 	if choice.Fallback != nil {
-		if choice.Kind != kindLLM {
+		if choice.Kind == kindSeq2Seq {
 			return fmt.Errorf("mt fallback %w", errModelsFallback)
 		}
 
@@ -290,7 +294,7 @@ func checkPair(pair string, available languages) error {
 }
 
 func exportFiles(kind Kind, suffix string) []string {
-	if kind == kindLLM {
+	if kind != kindSeq2Seq {
 		return []string{"onnx/model" + suffix + ".onnx"}
 	}
 
@@ -423,16 +427,25 @@ func exportSize(root, name, what string) (int64, error) {
 		return 0, err
 	}
 
-	data, err := fileSize(file+externalData, what)
-	if errors.Is(err, errModelsMissing) {
-		return size, nil
+	for index := range maxDataShards {
+		shard := file + externalData
+		if index > 0 {
+			shard += "_" + strconv.Itoa(index)
+		}
+
+		data, err := fileSize(shard, what)
+		if errors.Is(err, errModelsMissing) {
+			return size, nil
+		}
+
+		if err != nil {
+			return 0, err
+		}
+
+		size += data
 	}
 
-	if err != nil {
-		return 0, err
-	}
-
-	return size + data, nil
+	return 0, fmt.Errorf("%s %w, %d or more: %s", what, errModelsShards, maxDataShards, file)
 }
 
 func checkVoices(dir string, voices map[string]string, available languages, sizes map[string]int64) error {
