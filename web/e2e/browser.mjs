@@ -617,10 +617,13 @@ export async function checkCall(failures, browsers, labels, { seconds, wantPaths
     const b = second[i]
     const label = labels[i]
     const before = failures.length
+    // The line carries the worker's totals; how many transforms it pipes
+    // stands in for the counters of each.
+    const e2ee = a.e2ee && { ...a.e2ee, transforms: a.e2ee.transforms.length }
     console.log(
       `${label}: videos=${a.videos.length} frames=[${a.videos.map((v) => v.frames).join(',')}]→[${b.videos.map((v) => v.frames).join(',')}] ` +
         `audioPkts=${a.audioPackets}→${b.audioPackets} videoDecoded=${a.videoDecoded}→${b.videoDecoded} ` +
-        `paths=${a.pcs.map((pc) => pc.path).join(',')} e2ee=${JSON.stringify(a.e2ee)}`,
+        `paths=${a.pcs.map((pc) => pc.path).join(',')} e2ee=${JSON.stringify(e2ee)}`,
     )
     check(failures, label, a.videos.length === 2, `expected 2 video elements (self + one remote), found ${a.videos.length}`)
     check(failures, label, a.e2ee !== null, 'no E2EE worker stats received')

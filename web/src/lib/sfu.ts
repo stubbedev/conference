@@ -5,6 +5,7 @@
 // When the room is end-to-end encrypted, encoded frames are transformed
 // through the E2EE worker, so the server only ever relays ciphertext.
 
+import { isE2EEStats, type E2EEStats, type TransformOptions, type WorkerMessage } from '@/lib/e2ee'
 import { errorText } from '@/lib/errors'
 import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
@@ -290,21 +291,6 @@ interface Events {
 
 type AnyHandler = (payload: never) => void
 
-// E2EEStats is what the worker posts every couple of seconds: frames
-// processed and dropped per direction plus the last error text.
-export interface E2EEStats {
-  type: 'e2ee-stats'
-  send: number
-  recv: number
-  dropSend: number
-  dropRecv: number
-  lastError: string
-}
-
-function isE2EEStats(data: unknown): data is E2EEStats {
-  return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'e2ee-stats'
-}
-
 // preferCodec pins a video transceiver to a codec end-to-end encryption
 // can carry. H.264 and AV1 packetizers parse NAL units and OBUs out of
 // the payload and would choke on ciphertext. The SFU mirrors the offer's
@@ -373,7 +359,8 @@ export class RoomClient {
     inCall: (member) => member === this.selfId || this.members.has(member),
     translated: (member, lang, speaker, segId) => this.election.translated(member, lang, speaker, segId),
   }
-  private transformed = new WeakSet<object>()
+  private transformed = new WeakMap<RTCRtpSender | RTCRtpReceiver, number>()
+  private transforms = 0
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
   private resumeToken = ''
@@ -406,7 +393,7 @@ export class RoomClient {
     this.worker.onerror = (ev: ErrorEvent) => {
       this.emit('error', { code: 'e2ee', text: `Media encryption worker failed: ${ev.message}` })
     }
-    this.worker.postMessage({ keyBytes: opts.mediaKey.slice() })
+    this.tellWorker({ type: 'key', keyBytes: opts.mediaKey.slice() })
   }
 
   // reportE2EEFailure turns a transform that drops everything into a
@@ -539,7 +526,7 @@ export class RoomClient {
     this.micSender = this.localMic ? pc.addTrack(this.localMic, stream) : null
     this.camSender = this.localCam ? this.addCamera(pc, this.localCam, stream) : null
 
-    for (const sender of pc.getSenders()) this.installSenderTransform(sender)
+    for (const sender of pc.getSenders()) this.installTransform(sender)
     if (pc.getSenders().length > 0) await this.sendUpOffer(MEDIA_UP)
 
     this.state = {
@@ -562,7 +549,7 @@ export class RoomClient {
     try {
       for (const track of stream.getTracks()) {
         const sender = track.kind === 'video' ? await this.addScreenVideo(pc, track, stream) : pc.addTrack(track, stream)
-        this.installSenderTransform(sender)
+        this.installTransform(sender)
 
         if (track.kind === 'video') await tuneScreenSender(sender)
       }
@@ -605,7 +592,7 @@ export class RoomClient {
 
     this.ups.delete(id)
     this.pendingIce.delete(id)
-    up.pc.close()
+    this.closePC(up.pc)
     return true
   }
 
@@ -648,7 +635,7 @@ export class RoomClient {
     if (!sender) {
       const stream = new MediaStream([track])
       sender = kind === 'mic' ? pc.addTrack(track, stream) : this.addCamera(pc, track, stream)
-      this.installSenderTransform(sender)
+      this.installTransform(sender)
       if (kind === 'mic') this.micSender = sender
       else this.camSender = sender
       await this.sendUpOffer(MEDIA_UP)
@@ -779,7 +766,7 @@ export class RoomClient {
     this.translationTrackLangs.set(track.id, lang)
     const sender = pc.addTrack(track, new MediaStream([track]))
     this.translationSenders.push(sender)
-    this.installSenderTransform(sender)
+    this.installTransform(sender)
     await this.sendUpOffer(MEDIA_UP)
   }
 
@@ -903,16 +890,25 @@ export class RoomClient {
   // The encoded transform is attached through the standard
   // RTCRtpScriptTransform API only. Room.tsx refuses to join without
   // it, so no untyped fallback path exists here.
-  private installSenderTransform(sender: RTCRtpSender): void {
-    if (this.transformed.has(sender)) return
-    this.transformed.add(sender)
-    sender.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'send' })
+  private installTransform(end: RTCRtpSender | RTCRtpReceiver): void {
+    if (this.transformed.has(end)) return
+
+    const options: TransformOptions = { purpose: end instanceof RTCRtpSender ? 'send' : 'recv', id: this.transforms++ }
+    this.transformed.set(end, options.id)
+    end.transform = new RTCRtpScriptTransform(this.worker, options)
   }
 
-  private installReceiverTransform(receiver: RTCRtpReceiver): void {
-    if (this.transformed.has(receiver)) return
-    this.transformed.add(receiver)
-    receiver.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'recv' })
+  // closePC closes a connection and has the worker end the transforms
+  // attached on it: their streams stay open in the worker otherwise, and
+  // every share and every member that left would stay in its counters.
+  private closePC(pc: RTCPeerConnection): void {
+    const ids = [...pc.getSenders(), ...pc.getReceivers()].flatMap((end) => this.transformed.get(end) ?? [])
+    pc.close()
+    this.tellWorker({ type: 'closed', ids })
+  }
+
+  private tellWorker(message: WorkerMessage): void {
+    this.worker.postMessage(message)
   }
 
   private async addScreenVideo(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): Promise<RTCRtpSender> {
@@ -1132,7 +1128,7 @@ export class RoomClient {
     this.downs.set(sourceId, down)
     this.startQualityWatch()
     down.pc.ontrack = (ev) => {
-      this.installReceiverTransform(ev.receiver)
+      this.installTransform(ev.receiver)
       const mid = ev.transceiver.mid
       const kind = mid === null ? undefined : down.kinds.get(mid)
       if (mid === null || kind === undefined || isAudioKind(kind) !== (ev.track.kind === 'audio')) {
@@ -1161,7 +1157,7 @@ export class RoomClient {
     if (!down) return
 
     this.downs.delete(sourceId)
-    down.pc.close()
+    this.closePC(down.pc)
     this.removeTracks(down, [...down.tracks])
   }
 
@@ -1183,7 +1179,7 @@ export class RoomClient {
     await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp ?? '' })
     this.flushIce(`down-${sourceId}`, pc)
 
-    for (const receiver of pc.getReceivers()) this.installReceiverTransform(receiver)
+    for (const receiver of pc.getReceivers()) this.installTransform(receiver)
 
     const answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
@@ -1268,8 +1264,10 @@ export class RoomClient {
   // counters plus WebRTC transport statistics for every peer connection.
   // Built to be read from the debug overlay on a phone screen.
   async debugStats(): Promise<string> {
+    const { transforms = [], ...totals } = this.e2eeStats ?? {}
     const lines: string[] = [
-      `e2ee ${this.e2eeStats ? JSON.stringify(this.e2eeStats) : 'no stats yet'}`,
+      `e2ee ${this.e2eeStats ? JSON.stringify(totals) : 'no stats yet'}`,
+      `e2ee transforms ${transforms.map((t) => `${t.purpose}#${t.id} ${t.written}/${t.read}`).join(' ') || '-'}`,
       `self ${this.selfId || '-'}`,
     ]
 
