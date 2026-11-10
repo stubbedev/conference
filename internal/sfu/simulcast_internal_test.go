@@ -3,8 +3,6 @@ package sfu
 import (
 	"bytes"
 	"encoding/binary"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -382,16 +380,8 @@ func TestScreenShareKeepsItsFluidLayerWithNobodyWatchingIt(t *testing.T) {
 	start := time.Unix(1000, 0)
 
 	for _, kind := range []Kind{KindScreen, KindCamera} {
-		thumbnail := &upViewer{
-			local: nil, rate: newViewerRate(), mu: sync.Mutex{}, current: layerLow, target: layerLow,
-			preferred: layerLow, steps: newLadder(), mung: newMunger(), buf: nil, received: unreported,
-		}
-		track := &UpTrack{
-			key: trackKey{up: UpstreamMedia, mid: "1"}, kind: kind, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP8,
-			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{}, viewers: map[string]*upViewer{"thumbnail": thumbnail},
-			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
-			delivered: atomic.Uint64{},
-		}
+		track := simulcastTrack(trackKey{up: UpstreamMedia, mid: "1"}, kind)
+		track.viewers["thumbnail"] = newUpViewer(nil, layerLow, layerLow)
 
 		wanted, _ := track.updateDemand(start)
 		if kind == KindScreen && wanted != [layerCount]bool{true, false, true} {
@@ -515,13 +505,8 @@ func TestAStillScreenKeepsItsLayersWhileACameraLosesThem(t *testing.T) {
 	} {
 		layer := newUpLayer(nil, sparse)
 
-		track := &UpTrack{
-			key: trackKey{up: UpstreamMedia, mid: "1"}, kind: tc.kind,
-			first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP9,
-			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{layer, nil, nil}, viewers: map[string]*upViewer{},
-			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
-			delivered: atomic.Uint64{},
-		}
+		track := simulcastTrack(trackKey{up: UpstreamMedia, mid: "1"}, tc.kind)
+		track.layers[layerLow] = layer
 
 		if got := track.activeLayers(now)[layerLow]; got != tc.active {
 			t.Errorf("%s layer silent for 2 s counts as active=%v, want %v", tc.kind, got, tc.active)

@@ -79,6 +79,10 @@ const (
 	minPublisherBitrate = 100_000
 	rembInterval        = time.Second
 
+	// The SSRC the server names itself by in the feedback it sends a
+	// publisher, on a connection where it sends no media of its own.
+	feedbackSenderSSRC = 1
+
 	// A simulcast layer without packets for this long counts as paused.
 	// A camera sends at a steady rate, so a second of silence means its
 	// encoder stopped the layer. A shared screen that does not change is
@@ -689,7 +693,7 @@ func (up *UpPeer) openUplink(ssrc webrtc.SSRC) {
 
 func (up *UpPeer) writeRemb(bitrate uint64, ssrcs []uint32) {
 	packet := &rtcp.ReceiverEstimatedMaximumBitrate{
-		SenderSSRC: 1,
+		SenderSSRC: feedbackSenderSSRC,
 		Bitrate:    float32(bitrate),
 		SSRCs:      ssrcs,
 	}
@@ -1986,10 +1990,16 @@ func (ut *UpTrack) updateDemand(now time.Time) ([layerCount]bool, bool) {
 	return ut.demand.update(desired, now)
 }
 
-func (ut *UpTrack) setViewerPreference(viewerID string, layer int) {
+// viewer is one viewer of the track, nil when it does not watch it.
+func (ut *UpTrack) viewer(viewerID string) *upViewer {
 	ut.mu.RLock()
-	viewer := ut.viewers[viewerID]
-	ut.mu.RUnlock()
+	defer ut.mu.RUnlock()
+
+	return ut.viewers[viewerID]
+}
+
+func (ut *UpTrack) setViewerPreference(viewerID string, layer int) {
+	viewer := ut.viewer(viewerID)
 
 	if viewer == nil {
 		return
@@ -1998,6 +2008,15 @@ func (ut *UpTrack) setViewerPreference(viewerID string, layer int) {
 	viewer.mu.Lock()
 	viewer.preferred = layer
 	viewer.mu.Unlock()
+}
+
+// newUpViewer is a viewer starting at layer current, -1 for none yet.
+func newUpViewer(local *forwardTrack, current, preferred int) *upViewer {
+	return &upViewer{
+		local: local, rate: newViewerRate(),
+		mu: sync.Mutex{}, current: current, target: current, preferred: preferred,
+		steps: newLadder(), mung: newMunger(), buf: nil, received: unreported,
+	}
 }
 
 // addViewer starts forwarding to a viewer. A single-layer track flows
@@ -2020,11 +2039,7 @@ func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int
 		current = -1
 	}
 
-	viewer := &upViewer{
-		local: local, rate: newViewerRate(),
-		mu: sync.Mutex{}, current: current, target: current, preferred: preferred,
-		steps: newLadder(), mung: newMunger(), buf: nil, received: unreported,
-	}
+	viewer := newUpViewer(local, current, preferred)
 	ut.viewers[viewerID] = viewer
 
 	ut.mu.Unlock()
@@ -2071,9 +2086,7 @@ func (ut *UpTrack) measure() receiveTotals {
 }
 
 func (ut *UpTrack) setViewerREMB(viewerID string, bitrate float64) {
-	ut.mu.RLock()
-	viewer := ut.viewers[viewerID]
-	ut.mu.RUnlock()
+	viewer := ut.viewer(viewerID)
 
 	if viewer != nil {
 		viewer.rate.setREMB(bitrate)
@@ -2083,9 +2096,7 @@ func (ut *UpTrack) setViewerREMB(viewerID string, bitrate float64) {
 // updateViewerReport applies one receiver report block a viewer sent
 // about this track.
 func (ut *UpTrack) updateViewerReport(viewerID string, report rtcp.ReceptionReport, elapsed time.Duration) {
-	ut.mu.RLock()
-	viewer := ut.viewers[viewerID]
-	ut.mu.RUnlock()
+	viewer := ut.viewer(viewerID)
 
 	if viewer == nil {
 		return
@@ -2104,9 +2115,7 @@ func (ut *UpTrack) updateViewerReport(viewerID string, report rtcp.ReceptionRepo
 // publisher must answer, rather than its decoder timing out on a still
 // stream.
 func (ut *UpTrack) needsKeyframe(viewerID string, now time.Time) bool {
-	ut.mu.RLock()
-	viewer := ut.viewers[viewerID]
-	ut.mu.RUnlock()
+	viewer := ut.viewer(viewerID)
 
 	if viewer == nil {
 		return false
@@ -2199,11 +2208,11 @@ func (up *UpPeer) requestKeyframe() {
 
 func (up *UpPeer) sendPLI(ssrcs []uint32) {
 	for _, ssrc := range ssrcs {
-		pli := &rtcp.PictureLossIndication{SenderSSRC: 1, MediaSSRC: ssrc}
+		pli := &rtcp.PictureLossIndication{SenderSSRC: feedbackSenderSSRC, MediaSSRC: ssrc}
 
 		err := up.pc.WriteRTCP([]rtcp.Packet{pli})
 		if err != nil {
-			log.Printf("pli: %v", err)
+			log.Printf("room %s member %.6s %s: pli ssrc=%d: %v", up.member.room.slug, up.member.ID, up.which, ssrc, err)
 		}
 	}
 }
