@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test, type TestContext } from 'node:test'
 
-import { api } from './api.ts'
+import { api, PasswordRefused } from './api.ts'
 
 function answering(t: TestContext, body: string, init: ResponseInit): void {
   t.mock.method(globalThis, 'fetch', async () => new Response(body, init))
@@ -13,8 +13,28 @@ test('an answer comes back as the JSON the server sent', async (t) => {
 })
 
 test('a refusal fails with the message the server gave', async (t) => {
-  answering(t, '{"error":"wrong-password","message":"That password is not right."}', { status: 403 })
-  await assert.rejects(api.auth('abc-def-ghi', { proof: 'x' }), { message: 'That password is not right.' })
+  answering(t, '{"error":"rate-limited","message":"Too many attempts; try again later."}', { status: 429 })
+  await assert.rejects(api.auth('abc-def-ghi', { proof: 'x' }), (err: Error) => {
+    assert.equal(err.message, 'Too many attempts; try again later.')
+    assert.ok(!(err instanceof PasswordRefused))
+    return true
+  })
+})
+
+test('a refused or missing password is told apart by the server\'s code, not by its wording', async (t) => {
+  for (const [code, message] of [
+    ['bad-password', 'Wrong password.'],
+    ['password-required', 'This room requires a password.'],
+  ]) {
+    answering(t, JSON.stringify({ error: code, message }), { status: 401 })
+    await assert.rejects(api.auth('abc-def-ghi', { proof: 'x' }), (err: Error) => {
+      assert.ok(err instanceof PasswordRefused)
+      assert.equal(err.message, message)
+      return true
+    })
+  }
+  answering(t, '{"error":"bad-request","message":"Name or password too long."}', { status: 400 })
+  await assert.rejects(api.createRoom({ name: 'x', password: 'y', maxMembers: 0 }, ''), (err: Error) => !(err instanceof PasswordRefused))
 })
 
 test('a refusal that is not the server\'s own fails with its status', async (t) => {

@@ -67,17 +67,23 @@ export interface CreateRoomInput {
   maxMembers: number
 }
 
+/** The server wants a room's password or refused the one it got: another can be tried. */
+export class PasswordRefused extends Error {}
+
+const PASSWORD_REFUSALS: ReadonlySet<unknown> = new Set(['password-required', 'bad-password'])
+
 // Why the server refused: the message in its JSON, or the status when the
 // answer is not the server's own, as with a proxy's error page.
-async function refusal(res: Response): Promise<string> {
+async function refusal(res: Response): Promise<Error> {
   const body: unknown = await res.json().catch(() => undefined)
-  const message = typeof body === 'object' && body !== null && 'message' in body ? body.message : undefined
-  return typeof message === 'string' && message !== '' ? message : `The server answered ${res.status} ${res.statusText}`.trimEnd()
+  const { error, message }: { error?: unknown; message?: unknown } = typeof body === 'object' && body !== null ? body : {}
+  const reason = typeof message === 'string' && message !== '' ? message : `The server answered ${res.status} ${res.statusText}`.trimEnd()
+  return PASSWORD_REFUSALS.has(error) ? new PasswordRefused(reason) : new Error(reason)
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)
-  if (!res.ok) throw new Error(await refusal(res))
+  if (!res.ok) throw await refusal(res)
   try {
     return (await res.json()) as T
   } catch (err) {

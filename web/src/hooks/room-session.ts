@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { resumeAudio } from '@/hooks/media'
-import { api, type RoomInfo } from '@/lib/api'
+import { api, PasswordRefused, type RoomInfo } from '@/lib/api'
 import { errorMessage } from '@/lib/errors'
 import { deriveProof, fromB64, importPassword, openKeyblob, toB64 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
@@ -90,7 +90,7 @@ export function useRoomSession(slug: string, onReady: () => Promise<void>) {
         void onReady()
       } catch (err) {
         const message = errorMessage(err)
-        if (/password/i.test(message)) {
+        if (err instanceof PasswordRefused) {
           setGateError(message)
           setPhase('gate')
         } else {
