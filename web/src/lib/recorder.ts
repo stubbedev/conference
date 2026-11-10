@@ -21,9 +21,9 @@ export interface RecorderTile {
   pinned: boolean
   screen: boolean
   /**
-   * The sound the tile is recorded with and its speaker spotlighted by.
-   * Live translation replaces a speaker's own voice, so the file plays
-   * as one conversation in the recorder's language.
+   * The sound the tile is recorded with and its speaker spotlighted by:
+   * what the recording member hears, so a speaker's translated voice
+   * where it replaces their own.
    */
   heard: MediaStream | null
 }

@@ -12,7 +12,7 @@ import {
   type SpeakerFocus,
 } from './recording-layout.ts'
 import { SPEAKING_HOLD_MS } from './speaking.ts'
-import { CAMERA_KIND, heardThrough } from './tiles.ts'
+import { CAMERA_KIND, heardThrough, type Translations } from './tiles.ts'
 import { VoiceMeter } from './voice-meter.ts'
 
 const FRAME: Rect = { x: 0, y: 0, width: 1280, height: 720 }
@@ -29,24 +29,38 @@ class Line {
 }
 
 /**
- * recordedCall is where the spotlight sits at each moment the recorder
- * listens, for members with these voices, the translated among them
- * heard through translations instead.
+ * listening is what an English listener who wants translations spoken
+ * gets while Alice speaks Danish and Bob English, changed by extra.
  */
-function recordedCall(
-  voices: Readonly<Record<string, Line>>,
-  translated: ReadonlySet<string>,
-  translations: ReadonlyMap<string, Line>,
-): (now: number) => string | null {
+const listening = (extra: Partial<Translations<Line>> = {}): Translations<Line> => ({
+  on: true,
+  lang: 'en',
+  voice: true,
+  spoken: { alice: 'da', bob: 'en' },
+  voices: {},
+  ...extra,
+})
+
+/** recorderTiles is the recording's tiles for members with these own voices. */
+const recorderTiles = (voices: Readonly<Record<string, Line>>, translations: Translations<Line>) =>
+  Object.entries(voices).map(([sourceId, stream]) => ({
+    key: sourceId,
+    pinned: false,
+    screen: false,
+    heard: heardThrough({ sourceId, kind: CAMERA_KIND, stream }, translations).stream,
+  }))
+
+/**
+ * recordedCall is where the spotlight sits each time the recorder
+ * listens, for members with these own voices and what the recording
+ * member gets from live translation at that moment.
+ */
+function recordedCall(voices: Readonly<Record<string, Line>>): (now: number, translations: Translations<Line>) => string | null {
   let focus: SpeakerFocus = null
-  return (now) => {
-    for (const line of [...Object.values(voices), ...translations.values()]) line.meter.sample(now)
-    const tiles = Object.entries(voices).map(([sourceId, stream]) => ({
-      key: sourceId,
-      pinned: false,
-      screen: false,
-      heard: heardThrough({ sourceId, kind: CAMERA_KIND, stream }, translated.has(sourceId), translations),
-    }))
+  return (now, translations) => {
+    const translated = Object.values(translations.voices).flatMap((byLang) => Object.values(byLang))
+    for (const line of [...Object.values(voices), ...translated]) line.meter.sample(now)
+    const tiles = recorderTiles(voices, translations)
     focus = nextSpeakerFocus(
       focus,
       speakingKeys(tiles, (line) => line.meter.speaking(now)),
@@ -164,48 +178,76 @@ test('a share’s sound and a member heard through nothing are not speaking', ()
 test('a translated member takes the spotlight while their translation plays, not while their own voice does', () => {
   const alice = new Line()
   const translation = new Line()
-  const spotlightAt = recordedCall({ alice, bob: new Line() }, new Set(['alice']), new Map([['alice', translation]]))
+  const translations = listening({ voices: { alice: { en: translation } } })
+  const spotlightAt = recordedCall({ alice, bob: new Line() })
 
   alice.level = VOICE
-  assert.equal(spotlightAt(0), null, 'her own voice is replaced, so nobody is heard yet')
+  assert.equal(spotlightAt(0, translations), null, 'her own voice is replaced, so nobody is heard yet')
 
   alice.level = SILENCE
   translation.level = VOICE
-  assert.equal(spotlightAt(2000), 'alice')
+  assert.equal(spotlightAt(2000, translations), 'alice')
 })
 
 test('someone speaking over a translated member’s own voice takes the spotlight', () => {
   const alice = new Line()
   const bob = new Line()
-  const spotlightAt = recordedCall({ alice, bob }, new Set(['alice']), new Map([['alice', new Line()]]))
+  const spotlightAt = recordedCall({ alice, bob })
 
   alice.level = VOICE
   bob.level = VOICE
-  assert.equal(spotlightAt(0), 'bob')
+  assert.equal(spotlightAt(0, listening({ voices: { alice: { en: new Line() } } })), 'bob')
 })
 
-test('a translated member is not spotlighted before their translation arrives', () => {
+test('a member is recorded with their own voice until their translated one exists', () => {
   const alice = new Line()
-  const translations = new Map<string, Line>()
-  const spotlightAt = recordedCall({ alice, bob: new Line() }, new Set(['alice']), translations)
+  const translation = new Line()
+  const spotlightAt = recordedCall({ alice, bob: new Line() })
 
   alice.level = VOICE
-  assert.equal(spotlightAt(0), null)
+  assert.equal(spotlightAt(0, listening()), 'alice')
 
-  const translation = new Line()
+  const translated = listening({ voices: { alice: { en: translation } } })
+  const quiet = SPEAKING_HOLD_MS + SPEAKER_HOLD_MS
+  assert.equal(spotlightAt(quiet, translated), null, 'her own voice still counted once her translation replaced it')
+
   translation.level = VOICE
-  translations.set('alice', translation)
-  assert.equal(spotlightAt(500), 'alice')
+  assert.equal(spotlightAt(quiet + 500, translated), 'alice')
 })
 
 test('the spotlight leaves a translated member once their translation has been quiet for long enough', () => {
   const translation = new Line()
-  const spotlightAt = recordedCall({ alice: new Line(), bob: new Line() }, new Set(['alice']), new Map([['alice', translation]]))
+  const translations = listening({ voices: { alice: { en: translation } } })
+  const spotlightAt = recordedCall({ alice: new Line(), bob: new Line() })
 
   translation.level = VOICE
-  assert.equal(spotlightAt(0), 'alice')
+  assert.equal(spotlightAt(0, translations), 'alice')
 
   translation.level = SILENCE
-  assert.equal(spotlightAt(SPEAKING_HOLD_MS), 'alice')
-  assert.equal(spotlightAt(SPEAKER_HOLD_MS + 1), null)
+  assert.equal(spotlightAt(SPEAKING_HOLD_MS, translations), 'alice')
+  assert.equal(spotlightAt(SPEAKER_HOLD_MS + 1, translations), null)
 })
+
+const VOICE_SOURCES = [
+  ['the browser’s engines, which then make no translated voice', false],
+  ['the speech service, which sends one all the same', true],
+] as const
+
+for (const [source, exists] of VOICE_SOURCES) {
+  test(`with translated voices off and ${source}, another language is recorded in its own voice and can take the spotlight`, () => {
+    const alice = new Line()
+    const translation = new Line()
+    const own = { alice, bob: new Line() }
+    const translations = listening({ voice: false, voices: exists ? { alice: { en: translation } } : {} })
+    const spotlightAt = recordedCall(own)
+
+    assert.equal(recorderTiles(own, translations).find((tile) => tile.key === 'alice')?.heard, alice)
+
+    translation.level = VOICE
+    assert.equal(spotlightAt(0, translations), null, 'a translated voice nobody hears took the spotlight')
+
+    translation.level = SILENCE
+    alice.level = VOICE
+    assert.equal(spotlightAt(SPEAKING_HOLD_MS, translations), 'alice')
+  })
+}

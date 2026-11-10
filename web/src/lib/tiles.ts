@@ -21,20 +21,44 @@ export function tileLabel(tile: Tile, displayName: string, members: readonly { i
   return tile.kind === SCREEN_KIND ? `${name}'s screen` : name
 }
 
+/** What live translation gives one listener to hear. */
+export interface Translations<Stream> {
+  /** Whether live translation is on in the call. */
+  on: boolean
+  /** The listener's language. */
+  lang: string
+  /** Whether the listener wants other languages spoken in theirs. */
+  voice: boolean
+  /** The language each other member speaks, by member id. */
+  spoken: Readonly<Record<string, string>>
+  /** The translated voices that exist, by member id and then language. */
+  voices: Readonly<Record<string, Readonly<Record<string, Stream>>>>
+}
+
+/** The stream a tile is heard through, and whether that is its own. */
+export type Heard<Stream> = { through: 'own'; stream: Stream | null } | { through: 'translation'; stream: Stream }
+
 /**
- * heardThrough is the stream a tile is heard through, which is what every
- * speaking signal measures: the live translation while it replaces the
- * member's own voice, null until its first sentence arrives, and the
- * tile's own stream otherwise. A share's sound is never translated.
+ * heardThrough is what a tile is heard through: the one rule behind what
+ * plays, what every speaking signal measures and what a recording holds.
+ * A translated voice replaces a member's own only when the listener
+ * wants translations spoken, the member speaks another language and that
+ * voice exists. Everyone else, and every share, is heard through their
+ * own stream, so no preference leaves a member silent.
  */
 export function heardThrough<Stream>(
   tile: { sourceId: string; kind: TileKind; stream: Stream | null },
-  translated: boolean,
-  translations: ReadonlyMap<string, Stream>,
-): Stream | null {
-  if (!translated || tile.kind === SCREEN_KIND) return tile.stream
+  translations: Translations<Stream>,
+): Heard<Stream> {
+  const own: Heard<Stream> = { through: 'own', stream: tile.stream }
+  if (!translations.on || !translations.voice || tile.kind === SCREEN_KIND) return own
 
-  return translations.get(tile.sourceId) ?? null
+  const spoken: string | undefined = translations.spoken[tile.sourceId]
+  const voices: Readonly<Record<string, Stream>> | undefined = translations.voices[tile.sourceId]
+  const voice: Stream | undefined = voices?.[translations.lang]
+  if (!spoken || spoken === translations.lang || voice === undefined) return own
+
+  return { through: 'translation', stream: voice }
 }
 
 export function layoutLayer(tile: Pick<Tile, 'key' | 'kind'>, pinnedKey: string | null, tileCount: number): Layer {

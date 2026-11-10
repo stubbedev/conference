@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { CAMERA_KIND, heardThrough, layoutLayer, SCREEN_KIND, type Tile } from './tiles.ts'
+import { CAMERA_KIND, heardThrough, layoutLayer, SCREEN_KIND, type Tile, type Translations } from './tiles.ts'
 
 const screen: Pick<Tile, 'key' | 'kind'> = { key: 'bob:screen', kind: SCREEN_KIND }
 const camera: Pick<Tile, 'key' | 'kind'> = { key: 'bob:cam', kind: CAMERA_KIND }
@@ -31,17 +31,39 @@ const OWN = 'own voice'
 const TRANSLATION = 'translated voice'
 const bobCamera = { sourceId: 'bob', kind: CAMERA_KIND, stream: OWN } as const
 const bobScreen = { sourceId: 'bob', kind: SCREEN_KIND, stream: OWN } as const
-const translations = new Map([['bob', TRANSLATION]])
+const HEARD_OWN = { through: 'own', stream: OWN }
 
-test('a member is heard through their own stream until translation replaces their voice', () => {
-  assert.equal(heardThrough(bobCamera, false, translations), OWN)
-  assert.equal(heardThrough(bobCamera, true, translations), TRANSLATION)
+/** What an English listener gets while Bob speaks German and his English voice exists. */
+const translations: Translations<string> = {
+  on: true,
+  lang: 'en',
+  voice: true,
+  spoken: { bob: 'de' },
+  voices: { bob: { en: TRANSLATION } },
+}
+
+test('a translated voice replaces the own voice of a member who speaks another language', () => {
+  assert.deepEqual(heardThrough(bobCamera, translations), { through: 'translation', stream: TRANSLATION })
 })
 
-test('a replaced voice is heard through nothing until its translation arrives', () => {
-  assert.equal(heardThrough(bobCamera, true, new Map<string, string>()), null)
+test('a member is heard through their own voice while live translation is off', () => {
+  assert.deepEqual(heardThrough(bobCamera, { ...translations, on: false }), HEARD_OWN)
+})
+
+test('a listener who turned translated voices off hears everyone’s own voice', () => {
+  assert.deepEqual(heardThrough(bobCamera, { ...translations, voice: false }), HEARD_OWN)
+})
+
+test('a member who speaks the listener’s language, or none known yet, keeps their own voice', () => {
+  assert.deepEqual(heardThrough(bobCamera, { ...translations, spoken: { bob: 'en' } }), HEARD_OWN)
+  assert.deepEqual(heardThrough(bobCamera, { ...translations, spoken: {} }), HEARD_OWN)
+})
+
+test('a member keeps their own voice until a translated one exists in the listener’s language', () => {
+  assert.deepEqual(heardThrough(bobCamera, { ...translations, voices: {} }), HEARD_OWN)
+  assert.deepEqual(heardThrough(bobCamera, { ...translations, voices: { bob: { fr: TRANSLATION } } }), HEARD_OWN)
 })
 
 test('a share keeps its own sound while its member is translated', () => {
-  assert.equal(heardThrough(bobScreen, true, translations), OWN)
+  assert.deepEqual(heardThrough(bobScreen, translations), HEARD_OWN)
 })

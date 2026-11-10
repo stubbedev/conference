@@ -2,7 +2,7 @@ import { VideoTile } from '@/components/VideoTile'
 import type { ShownCaption } from '@/hooks/live-translation'
 import { STAGE_TOP, TILE_GAP, type StageLayout } from '@/hooks/stage-layout'
 import type { MemberInfo } from '@/lib/sfu'
-import { heardThrough, LOCAL_SOURCE, SCREEN_KIND, tileLabel, type Tile } from '@/lib/tiles'
+import { heardThrough, LOCAL_SOURCE, SCREEN_KIND, tileLabel, type Tile, type Translations } from '@/lib/tiles'
 
 interface StageProps {
   layout: StageLayout
@@ -11,9 +11,7 @@ interface StageProps {
   selfId: string
   displayName: string
   captions: Record<string, ShownCaption>
-  translations: ReadonlyMap<string, MediaStream>
-  translatedVoice: boolean
-  speaksOtherLanguage: (sourceId: string) => boolean
+  translations: Translations<MediaStream>
   speaker: string
   volume: number
 }
@@ -26,8 +24,6 @@ export function Stage({
   displayName,
   captions,
   translations,
-  translatedVoice,
-  speaksOtherLanguage,
   speaker,
   volume,
 }: StageProps) {
@@ -40,13 +36,13 @@ export function Stage({
     const playsAudio = !isLocal && !isScreen
     const speakerId = isLocal ? selfId : tile.sourceId
     const caption = isScreen ? undefined : captions[speakerId]?.text
-    const replaced = translatedVoice && speaksOtherLanguage(tile.sourceId)
+    const heard = heardThrough(tile, translations)
     return (
       <VideoTile
         key={tile.key}
         tileKey={tile.key}
         stream={tile.stream}
-        heard={heardThrough(tile, replaced, translations)}
+        heard={heard.stream}
         name={tileLabel(tile, displayName, members)}
         muted={isLocal}
         mirrored={isLocal && !isScreen}
@@ -54,7 +50,7 @@ export function Stage({
         camOff={!isScreen ? !(member?.cam ?? true) : false}
         sharing={isScreen}
         sinkId={playsAudio ? speaker : undefined}
-        volume={playsAudio ? (replaced ? 0 : volume) : undefined}
+        volume={playsAudio ? (heard.through === 'own' ? volume : 0) : undefined}
         caption={caption}
         pinned={pinnedKey === tile.key}
         onTogglePin={allTiles.length > 1 ? togglePin : undefined}

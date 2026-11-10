@@ -66,7 +66,7 @@ export default function Room() {
   const { members, selfMember, memberList } = people
   const panel = useSidePanel(clientRef)
   const translation = useLiveTranslation(clientRef, media.localStream, localStreamRef, people.membersRef)
-  const { config: translationConfig, langPrefs, changeLangPrefs, speaksOtherLanguage, voices: translatedVoices } = translation
+  const { config: translationConfig, langPrefs, changeLangPrefs, translations } = translation
   const translationAvailable = translationConfig.available
   const layout = useStageLayout(media.localStream, screenStream, people.tiles)
   const { allTiles, pinnedKey } = layout
@@ -80,9 +80,9 @@ export default function Room() {
         local: tile.sourceId === LOCAL_SOURCE,
         pinned: pinnedKey === tile.key,
         screen: tile.kind === SCREEN_KIND,
-        heard: heardThrough(tile, speaksOtherLanguage(tile.sourceId), translatedVoices),
+        heard: heardThrough(tile, translations).stream,
       })),
-    [allTiles, displayName, members, pinnedKey, speaksOtherLanguage, translatedVoices],
+    [allTiles, displayName, members, pinnedKey, translations],
   )
   const recording = useRecording(slug, clientRef, recorderTiles)
 
@@ -254,9 +254,7 @@ export default function Room() {
           selfId={people.selfId}
           displayName={displayName}
           captions={translation.captions}
-          translations={translatedVoices}
-          translatedVoice={langPrefs.voice}
-          speaksOtherLanguage={speaksOtherLanguage}
+          translations={translations}
           speaker={devicePrefs.speaker}
           volume={devicePrefs.volume}
         />
@@ -313,10 +311,11 @@ export default function Room() {
       >
         {settingsPopover}
       </ControlsBar>
-      {langPrefs.voice &&
-        Array.from(translatedVoices, ([sourceId, stream]) => (
-          <TranslationAudio key={sourceId} stream={stream} sinkId={devicePrefs.speaker} volume={devicePrefs.volume} />
-        ))}
+      {allTiles.map((tile) => {
+        const heard = heardThrough(tile, translations)
+        if (heard.through === 'own') return null
+        return <TranslationAudio key={tile.key} stream={heard.stream} sinkId={devicePrefs.speaker} volume={devicePrefs.volume} />
+      })}
       {meetingReady && (
         <MeetingReady
           link={inviteLink()}

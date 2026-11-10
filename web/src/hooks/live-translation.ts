@@ -10,7 +10,7 @@ import { message } from '@/lib/speech/runtime'
 import { StandInEngines } from '@/lib/speech/standin'
 import { translationKindLang, type MemberInfo, type RoomClient } from '@/lib/sfu'
 import { readStored, storedFields } from '@/lib/storage'
-import { LOCAL_SOURCE } from '@/lib/tiles'
+import type { Translations } from '@/lib/tiles'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
@@ -297,23 +297,16 @@ export function useLiveTranslation(
     [setLangPrefs, membersRef, translationRef],
   )
 
-  const speaksOtherLanguage = useCallback(
-    (sourceId: string) => {
-      if (!translationBy || sourceId === LOCAL_SOURCE) return false
-      const lang = memberLangs[sourceId]
-      return Boolean(lang) && lang !== langPrefs.lang
-    },
-    [translationBy, memberLangs, langPrefs.lang],
+  const translations = useMemo<Translations<MediaStream>>(
+    () => ({
+      on: translationBy !== null,
+      lang: langPrefs.lang,
+      voice: langPrefs.voice,
+      spoken: memberLangs,
+      voices: translationStreams,
+    }),
+    [translationBy, langPrefs.lang, langPrefs.voice, memberLangs, translationStreams],
   )
-
-  const voices = useMemo<ReadonlyMap<string, MediaStream>>(() => {
-    const byMember = new Map<string, MediaStream>()
-    for (const [sourceId, langs] of Object.entries(translationStreams)) {
-      const stream: MediaStream | undefined = langs[langPrefs.lang]
-      if (stream && speaksOtherLanguage(sourceId)) byMember.set(sourceId, stream)
-    }
-    return byMember
-  }, [translationStreams, speaksOtherLanguage, langPrefs.lang])
 
   return {
     config: translation,
@@ -328,8 +321,7 @@ export function useLiveTranslation(
     dismissFailure,
     toggleTranslation,
     stopTranslation,
-    speaksOtherLanguage,
-    voices,
+    translations,
     bind,
     listenLangSet,
   }
