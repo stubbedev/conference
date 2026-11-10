@@ -21,6 +21,7 @@ import (
 
 	"github.com/stubbe/conference/internal/api"
 	"github.com/stubbe/conference/internal/config"
+	"github.com/stubbe/conference/internal/recvbuf"
 	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
 	"github.com/stubbe/conference/internal/speech/service"
@@ -69,7 +70,9 @@ func run() error {
 
 	defer func() { _ = database.Close() }()
 
-	engine, closeEngine, err := sfu.NewEngine(cfg.ICEUDPPort, cfg.ExternalIPs)
+	sockets := recvbuf.NewSizer()
+
+	engine, closeEngine, err := sfu.NewEngine(cfg.ICEUDPPort, cfg.ExternalIPs, sockets)
 	if err != nil {
 		return fmt.Errorf("sfu engine: %w", err)
 	}

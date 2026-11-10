@@ -11,6 +11,7 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/stubbe/conference/internal/recvbuf"
 	"github.com/stubbe/conference/internal/sfu"
 )
 
@@ -33,7 +34,7 @@ func newEngine(t *testing.T, mux bool) (*sfu.Engine, int) {
 			port = freeUDPPort(t)
 		}
 
-		engine, closeEngine, err := sfu.NewEngine(port, []netip.Addr{testExternalIP()})
+		engine, closeEngine, err := sfu.NewEngine(port, []netip.Addr{testExternalIP()}, recvbuf.NewSizer())
 		if mux && errors.Is(err, syscall.EADDRINUSE) {
 			continue
 		}

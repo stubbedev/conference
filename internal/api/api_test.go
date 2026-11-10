@@ -15,6 +15,7 @@ import (
 
 	"github.com/stubbe/conference/internal/api"
 	"github.com/stubbe/conference/internal/config"
+	"github.com/stubbe/conference/internal/recvbuf"
 	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
 	"github.com/stubbe/conference/internal/speech/service"
@@ -65,7 +66,7 @@ func newTranslatingAPI(t *testing.T, cfg *config.Config, translation service.Sta
 
 	t.Cleanup(func() { _ = storage.Close() })
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	engine, closeEngine, err := sfu.NewEngine(0, nil, recvbuf.NewSizer())
 	if err != nil {
 		t.Fatal(err)
 	}
