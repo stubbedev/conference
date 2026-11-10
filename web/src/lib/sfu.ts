@@ -9,6 +9,7 @@ import { errorText } from '@/lib/errors'
 import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
 import { settled } from '@/lib/settled'
+import { Serial } from '@/lib/speech/serial'
 import {
   addCounts,
   countsSince,
@@ -240,6 +241,13 @@ interface WireMessage {
 /** A message as it arrives: what it says of tracks is still to be read. */
 type ReceivedMessage = Omit<WireMessage, 'tracks'> & { tracks?: unknown }
 
+// What the room's members and their sealed messages are read from. The
+// server relays each member's messages in the order that member sent
+// them, and opening one takes a turn of the event loop, so these are
+// handled one at a time: a member's announcement is known before the
+// line that member sent after it.
+const ORDERED_TYPES: ReadonlySet<string> = new Set(['member-joined', 'member-left', 'chat', 'lang', 'caption', 'forced'])
+
 interface Events {
   welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string; translatingBy: string }
   'member-joined': { member: MemberInfo; replaces: string }
@@ -340,6 +348,8 @@ export class RoomClient {
   private langPrefs: LangPrefs | null = null
   private memberLangs = new Map<string, LangAnnouncement>()
   private refusedLines = new Set<string>()
+  private sealing = new Serial()
+  private opening = new Serial()
   private translates: TranslationLevel = 'none'
   private transformed = new WeakSet<object>()
   private selfId = ''
@@ -449,7 +459,7 @@ export class RoomClient {
           this.emit('error', { code: msg.code ?? '', text: msg.text ?? '' })
           return
         }
-        void this.handle(msg)
+        void this.receive(msg)
       }
       ws.onerror = () => {
         clearTimeout(timeout)
@@ -692,9 +702,8 @@ export class RoomClient {
     return this.state
   }
 
-  async sendChat(text: string): Promise<void> {
-    const sealed = await encryptChat(this.opts.chatKey, text)
-    this.send({ type: 'chat', iv: sealed.iv, ct: sealed.ct })
+  sendChat(text: string): Promise<void> {
+    return this.sendSealed({ type: 'chat' }, text)
   }
 
   /** Sets and announces this member's language settings; re-sent to every joiner. */
@@ -721,9 +730,8 @@ export class RoomClient {
     this.send({ type: 'translate-token-request' })
   }
 
-  async sendCaption(caption: RoomMessage): Promise<void> {
-    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify(caption))
-    this.send({ type: 'caption', iv: sealed.iv, ct: sealed.ct })
+  sendCaption(caption: RoomMessage): Promise<void> {
+    return this.sendSealed({ type: 'caption' }, JSON.stringify(caption))
   }
 
   /** Publishes a translated-voice track, labelled translation-<lang> for the room. */
@@ -759,9 +767,8 @@ export class RoomClient {
   }
 
   /** Sets another member's live-translation language (host only); sealed like their own. */
-  async setMemberLanguage(target: string, lang: string): Promise<void> {
-    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify({ lang }))
-    this.send({ type: 'moderate', target, action: 'lang', iv: sealed.iv, ct: sealed.ct })
+  setMemberLanguage(target: string, lang: string): Promise<void> {
+    return this.sendSealed({ type: 'moderate', target, action: 'lang' }, JSON.stringify({ lang }))
   }
 
   // announceRecording claims (or releases) the room's recording badge.
@@ -801,10 +808,18 @@ export class RoomClient {
     this.ws.send(JSON.stringify(msg))
   }
 
+  // Sealing takes a turn of the event loop too, so what is sealed for
+  // the room leaves one at a time, in the order it was handed over.
+  private sendSealed(message: WireMessage, text: string): Promise<void> {
+    return this.sealing.run(async () => {
+      const sealed = await encryptChat(this.opts.chatKey, text)
+      this.send({ ...message, iv: sealed.iv, ct: sealed.ct })
+    })
+  }
+
   private async sendLang(): Promise<void> {
     if (!this.langPrefs) return
-    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify({ ...this.langPrefs, translates: this.translates }))
-    this.send({ type: 'lang', iv: sealed.iv, ct: sealed.ct })
+    await this.sendSealed({ type: 'lang' }, JSON.stringify({ ...this.langPrefs, translates: this.translates }))
   }
 
   private sendState(): void {
@@ -908,6 +923,10 @@ export class RoomClient {
     if (translationLang) return translationKind(translationLang)
     if (track.kind === 'audio') return AUDIO_KIND
     return CAMERA_KIND
+  }
+
+  private receive(msg: ReceivedMessage): Promise<void> {
+    return ORDERED_TYPES.has(msg.type) ? this.opening.run(() => this.handle(msg)) : this.handle(msg)
   }
 
   private async handle(msg: ReceivedMessage): Promise<void> {
