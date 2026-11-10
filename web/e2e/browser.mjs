@@ -532,8 +532,19 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
     }
     await sleep(250)
   }
-  throw new Error('Join call button never became clickable')
+  throw new Error(`"Join call" never became clickable on ${url}: ${JSON.stringify(await evalJs(browser, joinScreenState))}`)
 }
+
+// What the join screen shows when it cannot be passed: the preview's
+// tracks, the buttons and whether they are disabled, the page's text and
+// the errors it reported.
+const joinScreenState = `({
+  location: location.href,
+  preview: [...document.querySelectorAll('video')].map((v) => (v.srcObject ? v.srcObject.getVideoTracks().map((t) => t.readyState) : null)),
+  buttons: [...document.querySelectorAll('button')].map((b) => b.textContent.trim() + (b.disabled ? ' (disabled)' : '')).filter((text) => text !== ''),
+  text: document.body.innerText.slice(0, 400),
+  errors: window.__errors ?? [],
+})`
 
 // Both browsers answer the same calls (see launchChrome and launchFirefox):
 // an expression or a function evaluated in the page, awaited, and its
