@@ -80,13 +80,26 @@ relay. Make sure these ports are open:
 | 3478/udp+tcp | the network relay (TURN)       |
 
 Video arrives in bursts, so the server asks the kernel for a 4 MiB
-receive buffer on its media sockets. Linux grants at most
-`net.core.rmem_max`, 208 KiB on a stock kernel, and the server logs a
-warning when it gets less. Raise the limit on the host:
+receive buffer on its media sockets, the relay's included. Linux grants
+at most `net.core.rmem_max`, 208 KiB on a stock kernel. When the server
+gets less it logs a warning, and `GET /api/healthz` shows what it asked
+for next to the least it was granted:
+
+```json
+{"ok":true,"receiveBuffer":{"requested":4194304,"granted":212992}}
+```
+
+Raise the limit on the host, then restart the server, since a socket
+keeps the buffer it was opened with:
 
 ```bash
 sysctl -w net.core.rmem_max=4194304
 ```
+
+The kernel has one such limit for the whole host, read-only inside a
+container: Docker refuses to start a container that sets it under
+`sysctls`, so it cannot go into `docker-compose.yml`. A file in
+`/etc/sysctl.d` keeps it across reboots.
 
 Rooms are stored in SQLite under the `data` volume.
 
@@ -403,6 +416,7 @@ The response has everything you need to hand out links:
 | Endpoint                   | Purpose                                                           |
 | -------------------------- | ----------------------------------------------------------------- |
 | `GET /api/config`          | Whether creating needs a key, and whether the home page is join-only |
+| `GET /api/healthz`         | That the server answers, and the receive buffer its media sockets were granted |
 | `GET /api/rooms/{slug}`    | Public room info; password rooms include the salts the browser needs |
 | `GET /api/rooms`           | List rooms (API key)                                              |
 | `DELETE /api/rooms/{slug}` | Delete a room (API key)                                           |

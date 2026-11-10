@@ -39,6 +39,15 @@ type Sizer struct {
 	least int
 }
 
+// Status is what the media sockets asked the kernel for and what the one
+// that got the least was granted. Granted below Requested means bursts
+// of video can be dropped, and that net.core.rmem_max is what holds the
+// buffer down.
+type Status struct {
+	Requested int `json:"requested"`
+	Granted   int `json:"granted"`
+}
+
 // NewSizer is a Sizer no socket has been sized by yet.
 func NewSizer() *Sizer {
 	return &Sizer{mu: sync.Mutex{}, least: Requested}
@@ -68,6 +77,15 @@ func (s *Sizer) Size(conn net.PacketConn) error {
 	return nil
 }
 
+// Status reports the least any socket sized so far was granted: all that
+// was asked for, until one gets less.
+func (s *Sizer) Status() Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return Status{Requested: Requested, Granted: s.least}
+}
+
 func (s *Sizer) record(granted int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -79,6 +97,7 @@ func (s *Sizer) record(granted int) {
 	s.least = granted
 
 	log.Printf("recvbuf: the kernel grants media sockets a receive buffer of %d bytes, not the %d asked for: "+
-		"bursts of video beyond it are dropped while the server is busy; raise net.core.rmem_max to %d",
+		"bursts of video beyond it are dropped while the server is busy; "+
+		"raise net.core.rmem_max to %d on the host and restart the server",
 		granted, Requested, Requested)
 }

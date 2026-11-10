@@ -100,7 +100,7 @@ func run() error {
 
 	go reapLoop(database, hub, cfg.RoomTTL)
 
-	mux, err := buildMux(database, hub, cfg, speech)
+	mux, err := buildMux(database, hub, cfg, speech, sockets)
 	if err != nil {
 		return err
 	}
@@ -171,10 +171,16 @@ func newHub(cfg *config.Config, engine *sfu.Engine, creds *relay.Credentials, tr
 }
 
 // buildMux assembles the API, signaling, speech, and embedded UI routes.
-func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config, translation liveTranslation) (*http.ServeMux, error) {
+func buildMux(
+	database *store.Store,
+	hub *sfu.Hub,
+	cfg *config.Config,
+	translation liveTranslation,
+	sockets *recvbuf.Sizer,
+) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
-	api.New(database, hub, cfg, translation.status).Routes(mux)
+	api.New(database, hub, cfg, translation.status, sockets).Routes(mux)
 
 	mux.Handle("GET "+signalingPath, &ws.Handler{
 		Hub:            hub,
