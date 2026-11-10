@@ -380,7 +380,7 @@ export class RoomClient {
   private e2eeStats: E2EEStats | null = null
   private e2eeFailureReported = { send: false, recv: false }
 
-  readonly worker: Worker
+  private readonly worker: Worker
 
   constructor(opts: RoomClientOptions) {
     this.opts = opts
