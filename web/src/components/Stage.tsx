@@ -2,7 +2,7 @@ import { VideoTile } from '@/components/VideoTile'
 import type { ShownCaption } from '@/hooks/live-translation'
 import { STAGE_TOP, TILE_GAP, type StageLayout } from '@/hooks/stage-layout'
 import type { MemberInfo } from '@/lib/sfu'
-import { LOCAL_SOURCE, SCREEN_KIND, tileLabel, type Tile } from '@/lib/tiles'
+import { heardThrough, LOCAL_SOURCE, SCREEN_KIND, tileLabel, type Tile } from '@/lib/tiles'
 
 interface StageProps {
   layout: StageLayout
@@ -11,7 +11,7 @@ interface StageProps {
   selfId: string
   displayName: string
   captions: Record<string, ShownCaption>
-  voicePlaying: Record<string, true>
+  translations: ReadonlyMap<string, MediaStream>
   translatedVoice: boolean
   speaksOtherLanguage: (sourceId: string) => boolean
   speaker: string
@@ -25,7 +25,7 @@ export function Stage({
   selfId,
   displayName,
   captions,
-  voicePlaying,
+  translations,
   translatedVoice,
   speaksOtherLanguage,
   speaker,
@@ -46,6 +46,7 @@ export function Stage({
         key={tile.key}
         tileKey={tile.key}
         stream={tile.stream}
+        heard={heardThrough(tile, replaced, translations)}
         name={tileLabel(tile, displayName, members)}
         muted={isLocal}
         mirrored={isLocal && !isScreen}
@@ -55,7 +56,6 @@ export function Stage({
         sinkId={playsAudio ? speaker : undefined}
         volume={playsAudio ? (replaced ? 0 : volume) : undefined}
         caption={caption}
-        speaking={replaced ? speakerId in voicePlaying : undefined}
         pinned={pinnedKey === tile.key}
         onTogglePin={allTiles.length > 1 ? togglePin : undefined}
         compact={compact}

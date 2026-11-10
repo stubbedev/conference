@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { audioContext } from '@/hooks/media'
-import { heard, holdLeft, SPEAKING_SAMPLE_MS, type LastVoiced } from '@/lib/speaking'
+import { SPEAKING_SAMPLE_MS } from '@/lib/speaking'
 import { VoiceMeter } from '@/lib/voice-meter'
 
 // Speaking detection for every tile in the call runs on one loop. A
@@ -75,7 +75,7 @@ function probeFor(stream: MediaStream, ctx: AudioContext): Probe {
  * watchSpeaking calls listener whenever stream starts or stops carrying a
  * voice, and returns the function that stops watching it.
  */
-export function watchSpeaking(stream: MediaStream, listener: (active: boolean) => void): () => void {
+function watchSpeaking(stream: MediaStream, listener: (active: boolean) => void): () => void {
   const ctx = audioContext()
   if (!ctx) return () => {}
 
@@ -102,7 +102,7 @@ export function watchSpeaking(stream: MediaStream, listener: (active: boolean) =
   }
 }
 
-/** Whether this member is speaking right now, for the tile's ring. */
+/** Whether the voice heard on this stream is speaking right now, for the tile's ring. */
 export function useIsSpeaking(stream: MediaStream | null): boolean {
   const [speaking, setSpeaking] = useState<{ source: MediaStream | null; active: boolean }>({
     source: null,
@@ -116,35 +116,4 @@ export function useIsSpeaking(stream: MediaStream | null): boolean {
   }, [stream])
 
   return speaking.source === stream && speaking.active
-}
-
-/**
- * useHeldSpeaking is active held on for as long as a voice measured by
- * the probes would be, for a voice that is only known to be playing or
- * not, such as a member's translation.
- */
-export function useHeldSpeaking(active: boolean): boolean {
-  const [lastVoiced, setLastVoiced] = useState<LastVoiced>(null)
-  const [now, setNow] = useState(0)
-
-  useEffect(() => {
-    if (!active) return
-
-    return () => {
-      const stoppedAt = performance.now()
-      setLastVoiced((last) => heard(last, true, stoppedAt))
-      setNow(stoppedAt)
-    }
-  }, [active])
-
-  const left = holdLeft(lastVoiced, now)
-
-  useEffect(() => {
-    if (active || left === 0) return
-
-    const timer = window.setTimeout(() => setNow(performance.now()), left)
-    return () => window.clearTimeout(timer)
-  }, [active, left])
-
-  return active || left > 0
 }

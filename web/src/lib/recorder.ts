@@ -7,7 +7,7 @@
 import { audioContext, playMediaElement } from '@/hooks/media'
 import { ElementSource, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
 import { initials } from './names.ts'
-import { focusKey, gridRects, nextSpeakerFocus, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
+import { focusKey, gridRects, nextSpeakerFocus, speakingKeys, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
 import { SPEAKING_SAMPLE_MS } from './speaking.ts'
 import { VoiceMeter } from './voice-meter.ts'
 import { withDuration } from './webm.ts'
@@ -20,8 +20,12 @@ export interface RecorderTile {
   /** Spotlights the tile, mirroring the recorder's pinned view. */
   pinned: boolean
   screen: boolean
-  /** Left out of the mix: live translation replaces this speaker's voice. */
-  audioMuted?: boolean
+  /**
+   * The sound the tile is recorded with and its speaker spotlighted by.
+   * Live translation replaces a speaker's own voice, so the file plays
+   * as one conversation in the recorder's language.
+   */
+  heard: MediaStream | null
 }
 
 const CANVAS_WIDTH = 1280
@@ -71,8 +75,9 @@ interface RecorderEntry {
 
 type Canvas2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
 
-// One track mixed into the recording. In WebKit browsers remote tracks
-// route through a detached <audio> element and a
+// One track mixed into the recording and measured for the speaker
+// spotlight. In WebKit browsers remote tracks, a translated voice among
+// them, route through a detached <audio> element and a
 // MediaElementAudioSourceNode, because WebKit's MediaStreamAudioSourceNode
 // produces silence for WebRTC streams. Once an element is captured by the
 // graph its audio only flows through it, so the mix never leaks to the
@@ -82,29 +87,16 @@ type Canvas2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
 // Every iOS browser is WebKit too; Chrome and Edge say "Chrome/" besides "AppleWebKit".
 const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\//.test(navigator.userAgent)
 
-interface MixedSource {
+interface MixedVoice {
   source: AudioNode
-  gain: GainNode
-  element?: HTMLAudioElement
-}
-
-// A tile track in the mix, measured for the speaker spotlight.
-interface TileAudio extends MixedSource {
   meter: VoiceMeter
+  element?: HTMLAudioElement
 }
 
 const TILE_GAP = 8
 const TILE_RADIUS = 10
 const PLACEHOLDER_FILL = '#26262b'
 const INITIALS_FONT = '600 40px system-ui, sans-serif'
-
-// A translated voice in the recorder's language, so the file plays as
-// one conversation in that language. A remote (received) stream takes
-// the <audio> element path in WebKit; a stream made in this browser is local.
-interface TranslationAudio {
-  stream: MediaStream
-  local: boolean
-}
 
 // Chunked data streams into the origin-private file system where the
 // browser has it (Chrome, Firefox, Safari 16.4+), keeping memory flat
@@ -136,9 +128,7 @@ export class CallRecorder {
   private writing = false
   private entries = new Map<string, RecorderEntry>()
   private latest: RecorderTile[] = []
-  private mixed = new Map<MediaStreamTrack, TileAudio>()
-  private translations: TranslationAudio[] = []
-  private translationsMixed: MixedSource[] = []
+  private mixed = new Map<MediaStreamTrack, MixedVoice>()
   private mixer: MediaStreamAudioDestinationNode | null = null
   private storageRoot: FileSystemDirectoryHandle | null = null
   private canvasStream: MediaStream | null = null
@@ -243,16 +233,6 @@ export class CallRecorder {
     return this.starting
   }
 
-  /** Mixes these translated voices (one per other-language speaker) into the recording. */
-  setTranslations(translations: TranslationAudio[]): void {
-    const same =
-      translations.length === this.translations.length &&
-      translations.every((t, i) => t.stream === this.translations[i].stream && t.local === this.translations[i].local)
-    if (same) return
-    this.translations = translations
-    this.connectTranslations()
-  }
-
   private async doStart(): Promise<void> {
     if (this.active) return
 
@@ -260,7 +240,6 @@ export class CallRecorder {
     if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => {})
     this.mixer = ctx ? ctx.createMediaStreamDestination() : null
     this.connectAudio(this.latest)
-    this.connectTranslations()
 
     const mime = MIME_CANDIDATES.find((candidate) => MediaRecorder.isTypeSupported(candidate))
 
@@ -504,43 +483,25 @@ export class CallRecorder {
     const mixer = this.mixer
     if (!ctx || !mixer) return
 
-    for (const [track, mixed] of this.mixed) {
-      if (track.readyState !== 'ended') continue
-      this.disconnectTileAudio(mixed)
+    const heard = new Map<MediaStreamTrack, boolean>()
+    for (const tile of tiles) {
+      for (const track of tile.heard?.getAudioTracks() ?? []) {
+        if (track.readyState !== 'ended') heard.set(track, tile.local)
+      }
+    }
+
+    for (const [track, voice] of this.mixed) {
+      if (heard.has(track)) continue
+      this.disconnectVoice(voice)
       this.mixed.delete(track)
     }
 
-    for (const tile of tiles) {
-      const volume = tile.audioMuted ? 0 : 1
-      for (const track of tile.stream?.getAudioTracks() ?? []) {
-        const existing = this.mixed.get(track)
-        if (existing) {
-          existing.gain.gain.value = volume
-          continue
-        }
-        const mixedSource = this.mixSource(ctx, mixer, track, tile.local)
-        mixedSource.gain.gain.value = volume
-        const meter = new VoiceMeter(ctx)
-        mixedSource.source.connect(meter.input)
-        this.mixed.set(track, { ...mixedSource, meter })
-      }
+    for (const [track, local] of heard) {
+      if (!this.mixed.has(track)) this.mixed.set(track, this.mixVoice(ctx, mixer, track, local))
     }
   }
 
-  private connectTranslations(): void {
-    for (const mixed of this.translationsMixed) this.disconnectMixed(mixed)
-    this.translationsMixed = []
-    const ctx = audioContext()
-    const mixer = this.mixer
-    if (!ctx || !mixer) return
-    for (const translation of this.translations) {
-      const track = translation.stream.getAudioTracks()[0]
-      if (track) this.translationsMixed.push(this.mixSource(ctx, mixer, track, translation.local))
-    }
-  }
-
-
-  private mixSource(ctx: AudioContext, mixer: MediaStreamAudioDestinationNode, track: MediaStreamTrack, local: boolean): MixedSource {
+  private mixVoice(ctx: AudioContext, mixer: MediaStreamAudioDestinationNode, track: MediaStreamTrack, local: boolean): MixedVoice {
     let source: AudioNode
     let element: HTMLAudioElement | undefined
     if (local || !WEBKIT) {
@@ -551,23 +512,19 @@ export class CallRecorder {
       playMediaElement(element)
       source = ctx.createMediaElementSource(element)
     }
-    const gain = ctx.createGain()
-    source.connect(gain).connect(mixer)
-    return { source, gain, element }
+    const meter = new VoiceMeter(ctx)
+    source.connect(mixer)
+    source.connect(meter.input)
+    return { source, meter, element }
   }
 
-  private disconnectMixed(mixed: MixedSource): void {
-    mixed.source.disconnect()
-    mixed.gain.disconnect()
-    if (mixed.element) {
-      mixed.element.pause()
-      mixed.element.srcObject = null
+  private disconnectVoice(voice: MixedVoice): void {
+    voice.source.disconnect()
+    voice.meter.input.disconnect()
+    if (voice.element) {
+      voice.element.pause()
+      voice.element.srcObject = null
     }
-  }
-
-  private disconnectTileAudio(audio: TileAudio): void {
-    this.disconnectMixed(audio)
-    audio.meter.input.disconnect()
   }
 
   private draw = () => {
@@ -625,10 +582,10 @@ export class CallRecorder {
     const now = performance.now()
     if (now - this.lastListen < SPEAKING_SAMPLE_MS) return
     this.lastListen = now
-    for (const audio of this.mixed.values()) audio.meter.sample(now)
-    const speaking = this.latest
-      .filter((tile) => !tile.screen && (tile.stream?.getAudioTracks() ?? []).some((track) => this.mixed.get(track)?.meter.speaking(now) === true))
-      .map((tile) => tile.key)
+    for (const voice of this.mixed.values()) voice.meter.sample(now)
+    const speaking = speakingKeys(this.latest, (heard) =>
+      heard.getAudioTracks().some((track) => this.mixed.get(track)?.meter.speaking(now) === true),
+    )
     this.speaker = nextSpeakerFocus(this.speaker, speaking, now)
   }
 
@@ -697,11 +654,8 @@ export class CallRecorder {
     this.sink = null
     this.starting = null
     this.storageRoot = null
-    for (const audio of this.mixed.values()) this.disconnectTileAudio(audio)
+    for (const voice of this.mixed.values()) this.disconnectVoice(voice)
     this.mixed.clear()
-    for (const mixed of this.translationsMixed) this.disconnectMixed(mixed)
-    this.translationsMixed = []
-    this.translations = []
     this.mixer = null
     for (const entry of this.entries.values()) entry.source.close()
     this.entries.clear()

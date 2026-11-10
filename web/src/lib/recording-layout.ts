@@ -16,6 +16,22 @@ export interface LayoutTile {
   screen: boolean
 }
 
+/** A tile and the stream it is heard through, null while it has none. */
+export interface HeardTile<Stream> {
+  key: string
+  screen: boolean
+  heard: Stream | null
+}
+
+/**
+ * speakingKeys is the tiles whose member is heard speaking, where voiced
+ * tells whether a stream carries a voice. A share's sound is nobody's
+ * voice.
+ */
+export function speakingKeys<Stream>(tiles: readonly HeardTile<Stream>[], voiced: (heard: Stream) => boolean): string[] {
+  return tiles.filter((tile) => !tile.screen && tile.heard !== null && voiced(tile.heard)).map((tile) => tile.key)
+}
+
 /** The tile the spotlight follows and when it was last heard, or null for none. */
 export type SpeakerFocus = { readonly key: string; readonly heardAt: number } | null
 

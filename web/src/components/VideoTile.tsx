@@ -3,7 +3,7 @@ import { MicOff, MonitorUp, Pin, PinOff, VideoOff, VolumeX } from 'lucide-react'
 
 import { useAudioSink } from '@/hooks/audio-output'
 import { useLatest } from '@/hooks/latest'
-import { useHeldSpeaking, useIsSpeaking } from '@/hooks/speaking'
+import { useIsSpeaking } from '@/hooks/speaking'
 import { useTileDebug } from '@/hooks/tileDebug'
 import { Hint } from '@/components/Hint'
 import {
@@ -19,6 +19,11 @@ import { cn } from '@/lib/utils'
 interface VideoTileProps {
   tileKey: string
   stream: MediaStream | null
+  /**
+   * The stream this member is heard through, measured for the speaking
+   * ring: their own, or their translation while it replaces their voice.
+   */
+  heard: MediaStream | null
   name: string
   /** Local tile: no audio sink is rendered (video is always element-muted). */
   muted?: boolean
@@ -35,12 +40,6 @@ interface VideoTileProps {
   onAspectRatio?: (tileKey: string, ratio: number) => void
   /** Live-translation subtitle for what this member is saying. */
   caption?: string
-  /**
-   * Overrides voice detection for the speaking ring: set while this
-   * member is heard through their translation, which plays later than
-   * their own (muted) voice, to whether that translation is playing.
-   */
-  speaking?: boolean
 }
 
 // Mobile browsers suspend decoding in ways that leave elements paused
@@ -71,6 +70,7 @@ function watchVisibility(element: HTMLMediaElement, start: () => void): () => vo
 export const VideoTile = memo(function VideoTile({
   tileKey,
   stream,
+  heard,
   name,
   muted,
   mirrored,
@@ -85,7 +85,6 @@ export const VideoTile = memo(function VideoTile({
   fill = false,
   onAspectRatio,
   caption,
-  speaking: speakingOverride,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -94,9 +93,7 @@ export const VideoTile = memo(function VideoTile({
   const [audioBlocked, setAudioBlocked] = useState(false)
   const [debugStats, setDebugStats] = useState('')
   const debugOn = useTileDebug()
-  const voiceSpeaking = useIsSpeaking(stream)
-  const translationSpeaking = useHeldSpeaking(speakingOverride === true)
-  const speaking = speakingOverride === undefined ? voiceSpeaking : translationSpeaking
+  const speaking = useIsSpeaking(sharing ? null : heard)
   const { video: videoStream, audio: audioStream } = useSplitStreams(stream)
 
   useEffect(() => {
@@ -172,7 +169,7 @@ export const VideoTile = memo(function VideoTile({
   }
 
   const hideVideo = Boolean(camOff && !sharing)
-  const speakingNow = speaking && !micOff && !sharing
+  const speakingNow = speaking && !micOff
 
   useEffect(() => {
     if (!debugOn) return

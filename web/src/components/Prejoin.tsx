@@ -94,6 +94,7 @@ export function Prejoin({
               <VideoTile
                 tileKey="prejoin"
                 stream={stream}
+                heard={stream}
                 name={name || 'You'}
                 muted
                 mirrored

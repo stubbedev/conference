@@ -1,18 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { toast } from 'sonner'
 
-import type { TranslatedVoice } from '@/hooks/live-translation'
 import { CallRecorder, recorderKeepsPaceHidden, recorderSupported, type RecorderTile } from '@/lib/recorder'
 import type { RoomClient } from '@/lib/sfu'
 
 const RECORDING_HIDDEN_TOAST = 'recording-hidden'
 
-export function useRecording(
-  slug: string,
-  clientRef: RefObject<RoomClient | null>,
-  tiles: RecorderTile[],
-  voices: readonly TranslatedVoice[],
-) {
+export function useRecording(slug: string, clientRef: RefObject<RoomClient | null>, tiles: RecorderTile[]) {
   const [recorder, setRecorder] = useState<string | null>(null)
   const [recording, setRecording] = useState(false)
   const recorderRef = useRef<CallRecorder | null>(null)
@@ -104,11 +98,6 @@ export function useRecording(
     if (!recording) return
     recorderRef.current?.setTiles(tiles)
   }, [recording, tiles])
-
-  useEffect(() => {
-    if (!recording) return
-    recorderRef.current?.setTranslations(voices.map(({ stream }) => ({ stream, local: false })))
-  }, [recording, voices])
 
   useEffect(() => {
     if (!recording || recorderKeepsPaceHidden()) return

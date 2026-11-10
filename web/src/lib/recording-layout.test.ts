@@ -6,12 +6,55 @@ import {
   gridRects,
   nextSpeakerFocus,
   SPEAKER_HOLD_MS,
+  speakingKeys,
   spotlightRects,
   type Rect,
+  type SpeakerFocus,
 } from './recording-layout.ts'
+import { SPEAKING_HOLD_MS } from './speaking.ts'
+import { CAMERA_KIND, heardThrough } from './tiles.ts'
+import { VoiceMeter } from './voice-meter.ts'
 
 const FRAME: Rect = { x: 0, y: 0, width: 1280, height: 720 }
 const GAP = 8
+const VOICE = 0.3
+const SILENCE = 0
+
+/** A stand-in for a stream: the loudness it carries, and the meter listening to it. */
+class Line {
+  level = SILENCE
+  readonly meter = new VoiceMeter({
+    createAnalyser: () => ({ fftSize: 0, getFloatTimeDomainData: (frame: Float32Array) => frame.fill(this.level) }),
+  } as unknown as BaseAudioContext)
+}
+
+/**
+ * recordedCall is where the spotlight sits at each moment the recorder
+ * listens, for members with these voices, the translated among them
+ * heard through translations instead.
+ */
+function recordedCall(
+  voices: Readonly<Record<string, Line>>,
+  translated: ReadonlySet<string>,
+  translations: ReadonlyMap<string, Line>,
+): (now: number) => string | null {
+  let focus: SpeakerFocus = null
+  return (now) => {
+    for (const line of [...Object.values(voices), ...translations.values()]) line.meter.sample(now)
+    const tiles = Object.entries(voices).map(([sourceId, stream]) => ({
+      key: sourceId,
+      pinned: false,
+      screen: false,
+      heard: heardThrough({ sourceId, kind: CAMERA_KIND, stream }, translated.has(sourceId), translations),
+    }))
+    focus = nextSpeakerFocus(
+      focus,
+      speakingKeys(tiles, (line) => line.meter.speaking(now)),
+      now,
+    )
+    return focusKey(tiles, focus?.key ?? null)
+  }
+}
 
 const tile = (key: string, extra: Partial<{ pinned: boolean; screen: boolean }> = {}) => ({ key, pinned: false, screen: false, ...extra })
 
@@ -106,4 +149,63 @@ test('a pause does not drop the speaker at once, but silence does', () => {
 test('someone else speaking alone takes over the spotlight', () => {
   const focus = nextSpeakerFocus(null, ['a'], 1000)
   assert.equal(nextSpeakerFocus(focus, ['b'], 1200)?.key, 'b')
+})
+
+test('a share’s sound and a member heard through nothing are not speaking', () => {
+  const tiles = [
+    { key: 'share', screen: true, heard: 'sound' },
+    { key: 'awaiting', screen: false, heard: null },
+    { key: 'speaker', screen: false, heard: 'voice' },
+  ]
+  assert.deepEqual(speakingKeys(tiles, () => true), ['speaker'])
+  assert.deepEqual(speakingKeys(tiles, () => false), [])
+})
+
+test('a translated member takes the spotlight while their translation plays, not while their own voice does', () => {
+  const alice = new Line()
+  const translation = new Line()
+  const spotlightAt = recordedCall({ alice, bob: new Line() }, new Set(['alice']), new Map([['alice', translation]]))
+
+  alice.level = VOICE
+  assert.equal(spotlightAt(0), null, 'her own voice is replaced, so nobody is heard yet')
+
+  alice.level = SILENCE
+  translation.level = VOICE
+  assert.equal(spotlightAt(2000), 'alice')
+})
+
+test('someone speaking over a translated member’s own voice takes the spotlight', () => {
+  const alice = new Line()
+  const bob = new Line()
+  const spotlightAt = recordedCall({ alice, bob }, new Set(['alice']), new Map([['alice', new Line()]]))
+
+  alice.level = VOICE
+  bob.level = VOICE
+  assert.equal(spotlightAt(0), 'bob')
+})
+
+test('a translated member is not spotlighted before their translation arrives', () => {
+  const alice = new Line()
+  const translations = new Map<string, Line>()
+  const spotlightAt = recordedCall({ alice, bob: new Line() }, new Set(['alice']), translations)
+
+  alice.level = VOICE
+  assert.equal(spotlightAt(0), null)
+
+  const translation = new Line()
+  translation.level = VOICE
+  translations.set('alice', translation)
+  assert.equal(spotlightAt(500), 'alice')
+})
+
+test('the spotlight leaves a translated member once their translation has been quiet for long enough', () => {
+  const translation = new Line()
+  const spotlightAt = recordedCall({ alice: new Line(), bob: new Line() }, new Set(['alice']), new Map([['alice', translation]]))
+
+  translation.level = VOICE
+  assert.equal(spotlightAt(0), 'alice')
+
+  translation.level = SILENCE
+  assert.equal(spotlightAt(SPEAKING_HOLD_MS), 'alice')
+  assert.equal(spotlightAt(SPEAKER_HOLD_MS + 1), null)
 })

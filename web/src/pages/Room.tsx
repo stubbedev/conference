@@ -34,7 +34,7 @@ import { blurSupported } from '@/lib/blur'
 import { storedDisplayName } from '@/lib/names'
 import type { RecorderTile } from '@/lib/recorder'
 import type { RoomClient } from '@/lib/sfu'
-import { LOCAL_SOURCE, SCREEN_KIND, tileLabel } from '@/lib/tiles'
+import { heardThrough, LOCAL_SOURCE, SCREEN_KIND, tileLabel } from '@/lib/tiles'
 import type { Language } from '@/lib/translate/languages'
 
 const NO_LANGUAGES: Language[] = []
@@ -66,7 +66,7 @@ export default function Room() {
   const { members, selfMember, memberList } = people
   const panel = useSidePanel(clientRef)
   const translation = useLiveTranslation(clientRef, media.localStream, localStreamRef, people.membersRef)
-  const { config: translationConfig, langPrefs, changeLangPrefs, speaksOtherLanguage } = translation
+  const { config: translationConfig, langPrefs, changeLangPrefs, speaksOtherLanguage, voices: translatedVoices } = translation
   const translationAvailable = translationConfig.available
   const layout = useStageLayout(media.localStream, screenStream, people.tiles)
   const { allTiles, pinnedKey } = layout
@@ -80,11 +80,11 @@ export default function Room() {
         local: tile.sourceId === LOCAL_SOURCE,
         pinned: pinnedKey === tile.key,
         screen: tile.kind === SCREEN_KIND,
-        audioMuted: tile.kind !== SCREEN_KIND && speaksOtherLanguage(tile.sourceId),
+        heard: heardThrough(tile, speaksOtherLanguage(tile.sourceId), translatedVoices),
       })),
-    [allTiles, displayName, members, pinnedKey, speaksOtherLanguage],
+    [allTiles, displayName, members, pinnedKey, speaksOtherLanguage, translatedVoices],
   )
-  const recording = useRecording(slug, clientRef, recorderTiles, translation.voices)
+  const recording = useRecording(slug, clientRef, recorderTiles)
 
   const listenForced = useCallback(
     (client: RoomClient) =>
@@ -254,7 +254,7 @@ export default function Room() {
           selfId={people.selfId}
           displayName={displayName}
           captions={translation.captions}
-          voicePlaying={translation.voicePlaying}
+          translations={translatedVoices}
           translatedVoice={langPrefs.voice}
           speaksOtherLanguage={speaksOtherLanguage}
           speaker={devicePrefs.speaker}
@@ -314,7 +314,7 @@ export default function Room() {
         {settingsPopover}
       </ControlsBar>
       {langPrefs.voice &&
-        translation.voices.map(({ sourceId, stream }) => (
+        Array.from(translatedVoices, ([sourceId, stream]) => (
           <TranslationAudio key={sourceId} stream={stream} sinkId={devicePrefs.speaker} volume={devicePrefs.volume} />
         ))}
       {meetingReady && (

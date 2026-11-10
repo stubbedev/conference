@@ -45,11 +45,6 @@ export interface ShownCaption {
   at: number
 }
 
-export interface TranslatedVoice {
-  sourceId: string
-  stream: MediaStream
-}
-
 function storedLangChoice(): boolean {
   try {
     return localStorage.getItem(LANG_PREFS_KEY) !== null
@@ -103,10 +98,8 @@ export function useLiveTranslation(
   const [captions, setCaptions] = useState<Record<string, ShownCaption>>({})
   const [translationStreams, setTranslationStreams] = useState<Record<string, Record<string, MediaStream>>>({})
   const [memberLangs, setMemberLangs] = useState<Record<string, string>>({})
-  const [voicePlaying, setVoicePlaying] = useState<Record<string, true>>({})
   const [translatorStatus, setTranslatorStatus] = useState<TranslatorStatus | null>(null)
   const [translationFailure, setTranslationFailure] = useState('')
-  const voiceEndsRef = useRef(new Map<string, number>())
   const translatorRef = useRef<Translator | null>(null)
   const langChosenRef = useRef(storedLangChoice())
   const [langPrefs, setLangPrefs] = usePersistentState(LANG_PREFS_KEY, { parse: parseLangPrefs })
@@ -147,26 +140,14 @@ export function useLiveTranslation(
   const handleRoomCaption = useCallback(
     (caption: RoomCaption) => {
       const prefs = langPrefsRef.current
-      if (caption.lang !== prefs.lang) return
-      if (caption.k === 'caption') {
-        if (!prefs.subtitles) return
-        const shown: ShownCaption = {
-          segId: caption.segId,
-          text: caption.text,
-          final: caption.final,
-          at: Date.now(),
-        }
-        setCaptions((prev) => ({ ...prev, [caption.speaker]: shown }))
-        return
+      if (caption.k !== 'caption' || caption.lang !== prefs.lang || !prefs.subtitles) return
+      const shown: ShownCaption = {
+        segId: caption.segId,
+        text: caption.text,
+        final: caption.final,
+        at: Date.now(),
       }
-      const { speaker, startInMs, durationMs } = caption
-      const ends = Date.now() + startInMs + durationMs
-      voiceEndsRef.current.set(speaker, Math.max(voiceEndsRef.current.get(speaker) ?? 0, ends))
-      window.setTimeout(() => setVoicePlaying((prev) => ({ ...prev, [speaker]: true })), startInMs)
-      window.setTimeout(() => {
-        if (Date.now() < (voiceEndsRef.current.get(speaker) ?? 0) - 50) return
-        setVoicePlaying(({ [speaker]: _ended, ...rest }) => rest)
-      }, startInMs + durationMs)
+      setCaptions((prev) => ({ ...prev, [caption.speaker]: shown }))
     },
     [langPrefsRef],
   )
@@ -328,13 +309,14 @@ export function useLiveTranslation(
     [translationBy, memberLangs, langPrefs.lang],
   )
 
-  const voices = useMemo<TranslatedVoice[]>(
-    () =>
-      Object.entries(translationStreams)
-        .filter(([sourceId, langs]) => speaksOtherLanguage(sourceId) && langs[langPrefs.lang])
-        .map(([sourceId, langs]) => ({ sourceId, stream: langs[langPrefs.lang] })),
-    [translationStreams, speaksOtherLanguage, langPrefs.lang],
-  )
+  const voices = useMemo<ReadonlyMap<string, MediaStream>>(() => {
+    const byMember = new Map<string, MediaStream>()
+    for (const [sourceId, langs] of Object.entries(translationStreams)) {
+      const stream: MediaStream | undefined = langs[langPrefs.lang]
+      if (stream && speaksOtherLanguage(sourceId)) byMember.set(sourceId, stream)
+    }
+    return byMember
+  }, [translationStreams, speaksOtherLanguage, langPrefs.lang])
 
   return {
     config: translation,
@@ -344,7 +326,6 @@ export function useLiveTranslation(
     memberLangs,
     setMemberLanguage,
     captions,
-    voicePlaying,
     translatorStatus,
     translationFailure,
     dismissFailure,
