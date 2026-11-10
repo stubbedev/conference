@@ -8,6 +8,8 @@
 //   system:   no setSinkId, so every element plays through the system
 //             output (Safari).
 
+import { errorName, errorText } from './media-errors.ts'
+
 interface OutputPicker {
   selectAudioOutput(options: { deviceId?: string }): Promise<MediaDeviceInfo>
 }
@@ -53,14 +55,6 @@ export function planSink(
 }
 
 const ON_DEFAULT = 'Call audio plays through the system default.'
-
-function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : ''
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-}
 
 export function describeLostSpeaker(picking: OutputPicking): string {
   return picking === 'prompted'

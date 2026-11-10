@@ -1,6 +1,13 @@
-export function describeTrackOpenError(device: string, err: unknown): string {
-  const name = err instanceof Error ? err.name : ''
-  switch (name) {
+export function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : ''
+}
+
+export function errorText(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+}
+
+export function describeTrackOpenError(device: string, error: unknown): string {
+  switch (errorName(error)) {
     case 'NotAllowedError':
     case 'SecurityError':
       return `Your browser is blocking the ${device}. Allow it in the site settings next to the address bar, then try again.`
@@ -11,7 +18,7 @@ export function describeTrackOpenError(device: string, err: unknown): string {
       return `The ${device} could not be started; another app may be using it. Close that app, then try again.`
     case 'OverconstrainedError':
       return `The selected ${device} is not available.`
+    default:
+      return `The ${device} could not be opened (${errorText(error)}).`
   }
-  const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
-  return `The ${device} could not be opened (${detail}).`
 }
