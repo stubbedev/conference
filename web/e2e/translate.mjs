@@ -13,9 +13,17 @@
 // on, and translation outliving the host: after the host leaves, a
 // joiner still gets the guest's speech in its own language.
 //
+// A translated voice that stays in the call with nothing to say must
+// give way as well. Against the speech service the test takes the voice
+// of the host's sentences away, drops the host's connection once, and
+// at the end lets the guest's connection open and drop until the guest
+// gives up: each time the listener has to hear the speaker's own voice,
+// and the translated one again when it is back.
+//
 // SPEECH_RUNTIME=browser runs the same test against the browsers' own
 // engines, on the same stand-ins: no audio leaves either browser, the
-// subtitles and the tone come from the code that runs the models.
+// subtitles and the tone come from the code that runs the models. There
+// the test breaks the host's transcription and mends it again.
 //
 // Needs Chrome (CHROME=…) and Go, which builds the server.
 //
@@ -117,17 +125,73 @@ const translationAudio = `[...document.querySelectorAll('audio')]
 // own voice and the translated voices playing in its place.
 const heardOf = (name) => `({ own: ${tileState(name)}?.volume ?? null, translated: ${translationAudio} })`
 
-// Turns every later connection to the speech service away and drops the
-// one that is open, as a speech service that is gone for good would.
-const loseSpeechService = `(() => {
+const hearsOwn = (heard) => heard?.own > 0 && heard.translated.length === 0
+const hearsTranslation = (heard) => heard?.own === 0 && heard.translated.some((a) => a.tracks > 0 && !a.paused)
+
+const header = `document.querySelector('header')?.innerText ?? ''`
+
+const closeSpeechSockets = `for (const socket of window.__sockets) if (socket.url.includes('/ws/speech')) socket.close()`
+
+const dropSpeechConnection = `(() => {
+  ${closeSpeechSockets}
+})()`
+
+// Opens every later connection to the speech service through open, a
+// function of the page's WebSocket and the address, and drops the one
+// that is open.
+const speechSockets = (open) => `(() => {
   const Open = window.WebSocket
+  const open = ${open}
   window.WebSocket = function (url, ...rest) {
-    return new Open(String(url).replace('/ws/speech', '/ws/speech-gone'), ...rest)
+    return String(url).includes('/ws/speech') ? open(Open, String(url)) : new Open(url, ...rest)
   }
   window.WebSocket.prototype = Open.prototype
   Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 })
-  for (const socket of window.__sockets) if (socket.url.includes('/ws/speech')) socket.close()
+  ${closeSpeechSockets}
 })()`
+
+// Turns every later connection away, as a speech service that is gone
+// for good would.
+const loseSpeechService = speechSockets(`(Open, url) => new Open(url.replace('/ws/speech', '/ws/speech-gone'))`)
+
+// Lets every later connection open and drops it straight away, as a
+// speech service that accepts a member and then fails would.
+const flapSpeechService = speechSockets(`(Open, url) => {
+  const socket = new Open(url)
+  socket.addEventListener('open', () => setTimeout(() => socket.close(), 300))
+  return socket
+}`)
+
+// Takes the voice of every sentence away while window.__voiceless is
+// set: a frame of voice from the speech service reaches the page as the
+// notice the service sends when its voice engine fails for a sentence.
+const loseVoices = `(() => {
+  window.__voiceless = true
+  for (const socket of window.__sockets) {
+    if (!socket.url.includes('/ws/speech') || socket.readyState !== WebSocket.OPEN) continue
+    const deliver = socket.onmessage
+    socket.onmessage = (event) => {
+      if (!window.__voiceless || typeof event.data === 'string') return deliver.call(socket, event)
+      const header = JSON.parse(new TextDecoder().decode(new Uint8Array(event.data, 2, new DataView(event.data).getUint16(0))))
+      const notice = { type: 'notice', code: 'voice-failed', lang: header.lang }
+      deliver.call(socket, new MessageEvent('message', { data: JSON.stringify(notice) }))
+    }
+  }
+})()`
+const findVoices = `(() => { window.__voiceless = false })()`
+
+// Breaks what the browser's transcriber needs to tell speech from
+// invented text, so every transcription fails as it would with a model
+// that crashed, and puts it back.
+const breakTranscription = `(() => {
+  window.__CompressionStream = window.CompressionStream
+  window.CompressionStream = class {
+    constructor() {
+      throw new Error('the transcriber broke')
+    }
+  }
+})()`
+const mendTranscription = `(() => { window.CompressionStream = window.__CompressionStream })()`
 
 const consoles = {}
 
@@ -161,7 +225,7 @@ async function main() {
   // One click: a second one would toggle translation off again.
   await evalJs(host, `document.querySelector('[aria-label="Start live translation"]')?.click()`)
 
-  const live = await waitFor(host, `document.querySelector('header')?.innerText ?? ''`, (text) => text.includes('· live'), TIMEOUT_MS)
+  const live = await waitFor(host, header, (text) => text.includes('· live'), TIMEOUT_MS)
   check('host state', live.ok, `badge never reached "live": ${JSON.stringify(live.value)}`)
 
   const guestSees = await waitFor(guest, tileState('Hana'), (tile) => tile?.caption.startsWith('[de] en utterance'), TIMEOUT_MS)
@@ -171,7 +235,7 @@ async function main() {
   check('host subtitles', hostSees.ok, `no English subtitle on the guest's tile: ${JSON.stringify(hostSees.value)}`)
 
   const voice = await waitFor(guest, translationAudio, (list) => list?.some((a) => a.tracks > 0 && !a.paused), TIMEOUT_MS)
-  const guestHeader = voice.ok ? '' : await evalJs(guest, `document.querySelector('header')?.innerText ?? ''`)
+  const guestHeader = voice.ok ? '' : await evalJs(guest, header)
   check('guest voice', voice.ok, `no playing translated-voice track: ${JSON.stringify(voice.value)}; the guest's header reads ${JSON.stringify(guestHeader)}`)
 
   const muted = await waitFor(guest, tileState('Hana'), (tile) => tile?.volume === 0, 5_000)
@@ -183,13 +247,57 @@ async function main() {
   // service's voices travel as tracks; the browsers' own engines make
   // theirs where they are heard.
   if (runtime === 'server') {
+    // A sentence the speech service captions but cannot voice: the
+    // translated voice stays published, and the guest must hear the
+    // host's own voice until a sentence has a voice again.
+    await evalJs(host, loseVoices)
+    const unvoiced = await waitFor(guest, heardOf('Hana'), hearsOwn, TIMEOUT_MS)
+    check('sentence without a voice', unvoiced.ok, `the guest does not hear the host's own voice while the host's sentences get no voice: ${JSON.stringify(unvoiced.value)}`)
+    const stillLive = await evalJs(host, header)
+    check('translator alive', stillLive.includes('· live') && !stillLive.includes('failed'), `the host's translator did not stay live without its voice: ${JSON.stringify(stillLive)}`)
+    const shown = (await evalJs(guest, tileState('Hana')))?.caption ?? ''
+    const captioned = await waitFor(
+      guest,
+      `({ tile: ${tileState('Hana')}, heard: ${heardOf('Hana')} })`,
+      (state) => state.tile?.caption.startsWith('[de] en utterance') && state.tile.caption !== shown && hearsOwn(state.heard),
+      TIMEOUT_MS,
+    )
+    check('captions without a voice', captioned.ok, `no new German subtitle while the host's sentences get no voice: ${JSON.stringify(captioned.value)}`)
+    await evalJs(host, findVoices)
+    const voicedAgain = await waitFor(guest, heardOf('Hana'), hearsTranslation, TIMEOUT_MS)
+    check('voice again', voicedAgain.ok, `the guest does not hear the translated voice once the host's sentences have one again: ${JSON.stringify(voicedAgain.value)}`)
+
+    // The host's speech connection drops once: until it is back, nothing
+    // feeds the translated voice, and the guest must hear the host's own.
+    await evalJs(host, dropSpeechConnection)
+    const dropped = await waitFor(guest, heardOf('Hana'), hearsOwn, 15_000)
+    check('dropped connection', dropped.ok, `the guest does not hear the host's own voice while the host's speech connection is down: ${JSON.stringify(dropped.value)}`)
+    const reconnected = await waitFor(host, header, (text) => text.includes('· live'), TIMEOUT_MS)
+    check('reconnected', reconnected.ok && !reconnected.value.includes('failed'), `the host's translator did not reconnect: ${JSON.stringify(reconnected.value)}`)
+    const resumed = await waitFor(guest, heardOf('Hana'), hearsTranslation, TIMEOUT_MS)
+    check('voice after reconnecting', resumed.ok, `the guest does not hear the translated voice after the host reconnected: ${JSON.stringify(resumed.value)}`)
+
     await evalJs(host, loseSpeechService)
-    const gaveUp = await waitFor(host, `document.querySelector('header')?.innerText ?? ''`, (text) => text.includes('Live translation failed'), TIMEOUT_MS)
+    const gaveUp = await waitFor(host, header, (text) => text.includes('Live translation failed'), TIMEOUT_MS)
     check('host gives up', gaveUp.ok, `the host's translator never reported failing: ${JSON.stringify(gaveUp.value)}`)
 
-    const ownAgain = await waitFor(guest, heardOf('Hana'), (heard) => heard?.own > 0 && heard.translated.length === 0, TIMEOUT_MS)
+    const ownAgain = await waitFor(guest, heardOf('Hana'), hearsOwn, TIMEOUT_MS)
     check('own voice again', ownAgain.ok, `the guest does not hear the host's own voice after the host's translator stopped: ${JSON.stringify(ownAgain.value)}`)
     console.log(`after the host's translator stopped, guest hears: ${JSON.stringify(ownAgain.value)}`)
+  } else {
+    // The host's transcription breaks mid-call. The voice the guest's
+    // own engines made of the host has nothing more to say, so the guest
+    // must hear the host's own voice, and the translation again once the
+    // host is transcribed again.
+    const translated = await waitFor(guest, heardOf('Hana'), hearsTranslation, TIMEOUT_MS)
+    check('voice before the break', translated.ok, `the guest does not hear the host translated before the host's transcription breaks: ${JSON.stringify(translated.value)}`)
+    await evalJs(host, breakTranscription)
+    const uncaptioned = await waitFor(guest, heardOf('Hana'), hearsOwn, TIMEOUT_MS)
+    check('captions stopped', uncaptioned.ok, `the guest does not hear the host's own voice after the host's transcription broke: ${JSON.stringify(uncaptioned.value)}`)
+    await evalJs(host, mendTranscription)
+    const recaptioned = await waitFor(guest, heardOf('Hana'), hearsTranslation, TIMEOUT_MS)
+    check('captions back', recaptioned.ok, `the guest does not hear the host translated once the host is transcribed again: ${JSON.stringify(recaptioned.value)}`)
+    console.log(`while the host's transcription was broken, guest hears: ${JSON.stringify(uncaptioned.value)}`)
   }
 
   // A guest who never chose a language starts in the browser's own one,
@@ -218,6 +326,19 @@ async function main() {
   await joinRoom(late, room.url)
   const lateSees = await waitFor(late, tileState('Gerd'), (tile) => tile?.caption.startsWith('[en] de utterance'), TIMEOUT_MS)
   check('after the host left', lateSees.ok, `a joiner got no English subtitle from the guest: ${JSON.stringify(lateSees.value)}`)
+
+  // The guest's speech connection opens and drops, over and over. The
+  // guest must give up on it, and the joiner hear the guest's own voice.
+  if (runtime === 'server') {
+    const lateHears = await waitFor(late, heardOf('Gerd'), hearsTranslation, TIMEOUT_MS)
+    check('joiner voice', lateHears.ok, `the joiner does not hear the guest translated: ${JSON.stringify(lateHears.value)}`)
+    await evalJs(guest, flapSpeechService)
+    const flapped = await waitFor(guest, header, (text) => text.includes('Live translation failed'), TIMEOUT_MS)
+    check('dropping connection given up', flapped.ok && flapped.value.includes('keeps dropping'), `the guest never gave up on a speech connection that keeps dropping: ${JSON.stringify(flapped.value)}`)
+    const lateOwn = await waitFor(late, heardOf('Gerd'), hearsOwn, TIMEOUT_MS)
+    check('own voice of a given-up speaker', lateOwn.ok, `the joiner does not hear the guest's own voice after the guest gave up: ${JSON.stringify(lateOwn.value)}`)
+    console.log(`after the guest gave up on a dropping connection, joiner hears: ${JSON.stringify(lateOwn.value)}`)
+  }
 
   console.log(`host state: ${JSON.stringify(live.value)}`)
   console.log(`guest sees: ${JSON.stringify(guestSees.value)}`)
