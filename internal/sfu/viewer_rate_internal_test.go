@@ -371,6 +371,28 @@ func TestViewerRateDoesNotTrustARisingREMBWhileLosing(t *testing.T) {
 	}
 }
 
+// TestViewerRateDoesNotTrustARisingREMBAfterSomeLoss: loss too light to
+// lower the estimate is still loss. A viewer whose last report shows it
+// is not on a clean link, whatever the report before it said.
+func TestViewerRateDoesNotTrustARisingREMBAfterSomeLoss(t *testing.T) {
+	t.Parallel()
+
+	const someLoss = (lowLossFraction + highLossFraction) / 2
+
+	viewer := newReportingViewer()
+	viewer.lossReport(64, testDelivered)
+
+	limited := viewer.rate.limit().bps
+
+	viewer.lossReport(0, limited/4)
+	viewer.lossReport(someLoss, limited/4)
+	viewer.rate.setREMB(testDelivered * 4)
+
+	if got := viewer.rate.limit().bps; got != limited {
+		t.Fatalf("limit %d after a rising REMB on a link that lost %d/256 of its packets, want it held at %d", got, someLoss, limited)
+	}
+}
+
 func TestViewerRateClimbsFromTheFloorEventually(t *testing.T) {
 	t.Parallel()
 

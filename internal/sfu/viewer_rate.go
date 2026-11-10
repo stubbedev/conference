@@ -29,7 +29,7 @@ type viewerRate struct {
 	mu    sync.Mutex
 	loss  bitrateLimit // estimate from receiver reports, none before heavy loss
 	remb  bitrateLimit // the viewer's own REMB, none before one arrives
-	clean bool         // the last reports that told showed no loss
+	clean bool         // the last reports that told showed next to no loss
 	peak  uint64       // the highest rate the viewer has been delivered
 
 	// The viewer's latest report, and what the reports since the last
@@ -175,11 +175,10 @@ func (vr *viewerRate) updateLoss(report reportedCount, elapsed time.Duration, de
 func (vr *viewerRate) judge(sample linkSample, fraction uint8, waited time.Duration) {
 	rate := sample.bitrate()
 	vr.peak = max(vr.peak, rate)
+	vr.clean = fraction < lowLossFraction
 
 	switch {
 	case fraction > highLossFraction:
-		vr.clean = false
-
 		// Nothing measured yet: the track has not arrived for a full
 		// period, so there is no rate to back off from.
 		if vr.peak == 0 {
@@ -187,13 +186,7 @@ func (vr *viewerRate) judge(sample linkSample, fraction uint8, waited time.Durat
 		}
 
 		vr.loss = sample.backedOff(vr.loss, vr.peak, fraction, minViewerBitrate)
-	case fraction < lowLossFraction:
-		vr.clean = true
-
-		if !vr.loss.bound {
-			return
-		}
-
+	case vr.clean && vr.loss.bound:
 		grown := vr.loss.bps
 		if rate*probingDen >= grown*probingNum {
 			grown = viewerGain.grow(grown, waited)
