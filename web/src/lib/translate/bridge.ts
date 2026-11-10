@@ -14,14 +14,13 @@
 import { Refusals } from '@/lib/sealed'
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import { MicCapture } from '@/lib/translate/capture'
+import { afterEnd, CONNECT_TIMEOUT_MS, RECONNECT_DELAY_MS, type Ended } from '@/lib/translate/speech-link'
 import { PROVIDES_NOTHING, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
 import { packAudio, parseSpeechMessage, parseVoice } from '@/lib/translate/wire'
 
 const SPEECH_SERVICE = 'the speech service'
-const MAX_REFUSED_CONNECTS = 3
-const RECONNECT_DELAY_MS = 2_000
 // How long start() waits for the token the server sends on its own before asking.
 const TOKEN_GRACE_MS = 1_500
 
@@ -34,7 +33,9 @@ export class ServerTranslator implements Translator {
   private player: VoicePlayer | null = null
   /** The languages this member's last sentence went out in as a voice. */
   private voiced = new Set<string>()
-  private refusedConnects = 0
+  private failures = 0
+  private asking: ReturnType<typeof setTimeout> | null = null
+  private deadline: ReturnType<typeof setTimeout> | null = null
   private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
   private selfPrefs: LangPrefs
   private stopped = false
@@ -63,10 +64,7 @@ export class ServerTranslator implements Translator {
     if (this.playbackContext.state === 'suspended') void this.playbackContext.resume()
 
     this.unsubscribe = [
-      client.on('translate-token', ({ token }) => {
-        this.setStatus({ state: 'connecting', detail: '' })
-        this.openSpeech(token)
-      }),
+      client.on('translate-token', ({ token }) => this.openSpeech(token)),
       client.on('lang', () => this.sendTargets()),
       client.on('member-gone', () => this.sendTargets()),
     ]
@@ -79,15 +77,13 @@ export class ServerTranslator implements Translator {
    * so the audio contexts may start.
    */
   start(localMic: MediaStreamTrack | null): void {
-    const client = this.client
-    if (!client) return
+    if (!this.client) return
     void this.capture.start(localMic)
+    if (this.speech) return
     this.setStatus({ state: 'claiming', detail: '' })
     // The server sends a token when translation turns on, but a joiner's
     // may have come before its bridge existed: ask if none arrives.
-    setTimeout(() => {
-      if (!this.stopped && this.client === client && !this.speech) client.requestSpeechToken()
-    }, TOKEN_GRACE_MS)
+    this.attempt(TOKEN_GRACE_MS)
   }
 
   setLocalMic(track: MediaStreamTrack | null): void {
@@ -120,6 +116,7 @@ export class ServerTranslator implements Translator {
   private detach(): void {
     for (const off of this.unsubscribe) off()
     this.unsubscribe = []
+    this.clearAttempt()
     this.speech?.close()
     this.speech = null
     this.capture.stop()
@@ -133,19 +130,43 @@ export class ServerTranslator implements Translator {
     void this.client?.addTranslationTrack(lang, track)
   }
 
+  // An attempt at the speech connection asks for a token after
+  // askAfterMs, unless one has come by then, and is over when nothing
+  // has opened a while after that: a token that never comes and a
+  // connection that never opens must not leave the bridge waiting.
+  private attempt(askAfterMs: number): void {
+    this.clearAttempt()
+    this.asking = setTimeout(() => {
+      this.asking = null
+      if (!this.speech) this.client?.requestSpeechToken()
+    }, askAfterMs)
+    this.deadline = setTimeout(() => this.ended({ how: 'refused' }), askAfterMs + CONNECT_TIMEOUT_MS)
+  }
+
+  private clearAttempt(): void {
+    if (this.asking !== null) clearTimeout(this.asking)
+    if (this.deadline !== null) clearTimeout(this.deadline)
+    this.asking = null
+    this.deadline = null
+  }
+
   private openSpeech(token: string): void {
+    if (this.stopped) return
+    this.clearAttempt()
     this.speech?.close()
+    this.voiced.clear()
     const speech = new WebSocket(`${serverSocketURL('/ws/speech')}?token=${encodeURIComponent(token)}`)
     speech.binaryType = 'arraybuffer'
     this.speech = speech
+    this.setStatus({ state: 'connecting', detail: '' })
+    this.deadline = setTimeout(() => this.ended({ how: 'refused' }), CONNECT_TIMEOUT_MS)
 
-    let opened = false
+    let openedAt: number | null = null
     speech.onopen = () => {
-      opened = true
-      this.refusedConnects = 0
+      openedAt = performance.now()
+      this.clearAttempt()
       this.setStatus({ state: 'live', detail: '' })
       this.sendTargets()
-      this.announce()
     }
     speech.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
       if (typeof event.data === 'string') this.onSpeechText(event.data)
@@ -153,26 +174,30 @@ export class ServerTranslator implements Translator {
     }
     speech.onclose = () => {
       if (this.speech !== speech || this.stopped) return
-      this.speech = null
-      this.voiced.clear()
-      this.announce()
-      if (!opened && ++this.refusedConnects >= MAX_REFUSED_CONNECTS) {
-        const reason = 'The speech service cannot be reached or refused the connection.'
-        this.setStatus({ state: 'failed', detail: reason })
-        this.events.onFailure(reason)
-        return
-      }
-      this.setStatus({
-        state: 'retrying',
-        detail: opened
-          ? 'The speech connection dropped; reconnecting.'
-          : `The speech service did not answer (try ${this.refusedConnects} of ${MAX_REFUSED_CONNECTS}).`,
-      })
-      // A fresh token for the new connection (they expire after an hour).
-      setTimeout(() => {
-        if (!this.stopped) this.client?.requestSpeechToken()
-      }, RECONNECT_DELAY_MS)
+      this.ended(openedAt === null ? { how: 'refused' } : { how: 'dropped', lastedMs: performance.now() - openedAt })
     }
+  }
+
+  // The attempt at the speech connection is over. Nothing is captioned
+  // or voiced until the next one opens, and after too many in a row
+  // that did not last there is no next one.
+  private ended(end: Ended): void {
+    this.clearAttempt()
+    this.speech?.close()
+    this.speech = null
+    this.voiced.clear()
+    this.announce()
+
+    const verdict = afterEnd(this.failures, end)
+    this.failures = verdict.failures
+    if (verdict.next === 'give-up') {
+      this.setStatus({ state: 'failed', detail: verdict.detail })
+      this.events.onFailure(verdict.detail)
+      return
+    }
+    this.setStatus({ state: 'retrying', detail: verdict.detail })
+    // A fresh token for the new connection (they expire after an hour).
+    this.attempt(RECONNECT_DELAY_MS)
   }
 
   /** The languages this speech goes out in: its own (as subtitles) and every other member's. */
