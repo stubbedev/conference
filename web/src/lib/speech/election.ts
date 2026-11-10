@@ -32,6 +32,26 @@ export function assignTranslators(candidates: Iterable<Candidate>): Map<string, 
   return assigned
 }
 
-export function translatorFor(target: string, candidates: Iterable<Candidate>): string | null {
-  return assignTranslators(candidates).get(target) ?? null
+/**
+ * Election is who a room holds as the translator into each language, as
+ * one member works it out from what every member announced. No server
+ * runs it: each member holds it again whenever an announcement changes,
+ * and members who know the same announcements hold the same translators.
+ */
+export class Election {
+  private assigned: ReadonlyMap<string, string> = new Map()
+
+  /** Holds the election again, over the members as they are announced now. */
+  hold(candidates: Iterable<Candidate>): void {
+    this.assigned = assignTranslators(candidates)
+  }
+
+  /** The translator into each language that has one. */
+  get translators(): ReadonlyMap<string, string> {
+    return this.assigned
+  }
+
+  translatorFor(lang: string): string | null {
+    return this.assigned.get(lang) ?? null
+  }
 }

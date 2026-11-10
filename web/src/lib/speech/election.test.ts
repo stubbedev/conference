@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { assignTranslators, translatorFor, type Candidate } from './election.ts'
+import { assignTranslators, Election, type Candidate } from './election.ts'
 
 const shuffled = (room: Candidate[]): Candidate[][] => [room, [...room].reverse(), [...room.slice(1), room[0]]]
 
@@ -33,8 +33,7 @@ test('with equal load, a speaker of the language translates into it, then the lo
     { id: 'm0', lang: 'en', translates: 'plain' },
   ]
   for (const order of shuffled(room)) {
-    assert.equal(translatorFor('de', order), 'm3')
-    assert.equal(translatorFor('en', order), 'm0')
+    assert.deepEqual(Object.fromEntries(assignTranslators(order)), { de: 'm3', en: 'm0' })
   }
 })
 
@@ -46,6 +45,24 @@ test('every member computes the same translators from the same room, in any orde
 })
 
 test('a room where nobody can translate has no translator', () => {
-  assert.equal(translatorFor('da', [{ id: 'm1', lang: 'da', translates: 'none' }]), null)
-  assert.equal(translatorFor('da', []), null)
+  assert.equal(assignTranslators([{ id: 'm1', lang: 'da', translates: 'none' }]).size, 0)
+  assert.equal(assignTranslators([]).size, 0)
+})
+
+test('an election is held again whenever the room is announced anew', () => {
+  const election = new Election()
+  assert.equal(election.translatorFor('de'), null)
+
+  election.hold([
+    { id: 'm1', lang: 'de', translates: 'plain' },
+    { id: 'm2', lang: 'en', translates: 'none' },
+  ])
+  assert.deepEqual(Object.fromEntries(election.translators), { de: 'm1', en: 'm1' })
+
+  election.hold([
+    { id: 'm1', lang: 'de', translates: 'none' },
+    { id: 'm2', lang: 'en', translates: 'none' },
+  ])
+  assert.equal(election.translatorFor('de'), null)
+  assert.equal(election.translators.size, 0)
 })

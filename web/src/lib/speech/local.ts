@@ -16,7 +16,6 @@
 import { errorMessage } from '@/lib/errors'
 import type { RoomClient } from '@/lib/sfu'
 import { clauses } from '@/lib/speech/clauses'
-import { assignTranslators, translatorFor, type Candidate } from '@/lib/speech/election'
 import type { Engines, Segmenter } from '@/lib/speech/engines'
 import { invented } from '@/lib/speech/invented'
 import { nextRunAt, Pace } from '@/lib/speech/pace'
@@ -339,17 +338,11 @@ export class LocalTranslator implements Translator {
     return context
   }
 
-  private candidates(): Candidate[] {
-    const client = this.client
-    if (!client) return []
-    const others = [...client.memberLangPrefs].map(([id, prefs]) => ({ id, lang: prefs.lang, translates: prefs.translates }))
-    return [...others, { id: client.memberId, lang: this.selfPrefs.lang, translates: this.translates }]
-  }
-
   private translateForOthers(caption: CaptionLine, earlier: readonly string[]): void {
-    const self = this.client?.memberId
-    for (const [target, translator] of assignTranslators(this.candidates())) {
-      if (target === caption.lang || target === this.selfPrefs.lang || translator !== self) continue
+    const client = this.client
+    if (!client) return
+    for (const [target, translator] of client.translators) {
+      if (target === caption.lang || target === this.selfPrefs.lang || translator !== client.memberId) continue
       this.translateFor(caption, target, earlier, true)
     }
   }
@@ -364,8 +357,11 @@ export class LocalTranslator implements Translator {
       return
     }
 
-    const translator = translatorFor(mine, this.candidates())
-    if (translator === this.client?.memberId) {
+    const client = this.client
+    if (!client) return
+
+    const translator = client.translatorFor(mine)
+    if (translator === client.memberId) {
       this.translateFor(caption, mine, context, true)
       return
     }

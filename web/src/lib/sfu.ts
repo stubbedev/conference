@@ -10,6 +10,7 @@ import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
 import { parseChatText, Refusals, type Refused } from '@/lib/sealed'
 import { settled } from '@/lib/settled'
+import { Election } from '@/lib/speech/election'
 import { Serial } from '@/lib/speech/serial'
 import {
   addCounts,
@@ -352,6 +353,7 @@ export class RoomClient {
   private sealing = new Serial()
   private opening = new Serial()
   private translates: TranslationLevel = 'none'
+  private election = new Election()
   private transformed = new WeakSet<object>()
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
@@ -443,6 +445,7 @@ export class RoomClient {
           this.iceServers = msg.iceServers
           this.resumeToken = msg.resume ?? ''
           if (msg.self) this.selfId = msg.self.id
+          this.elect()
           for (const member of msg.members ?? []) this.members.set(member.id, member)
           this.emit('welcome', {
             self: msg.self as MemberInfo,
@@ -493,6 +496,15 @@ export class RoomClient {
   /** Language settings other members have announced so far. */
   get memberLangPrefs(): ReadonlyMap<string, LangAnnouncement> {
     return this.memberLangs
+  }
+
+  /** The member the room holds as the translator into each language that has one. */
+  get translators(): ReadonlyMap<string, string> {
+    return this.election.translators
+  }
+
+  translatorFor(lang: string): string | null {
+    return this.election.translatorFor(lang)
   }
 
   memberName(id: string): string {
@@ -710,12 +722,14 @@ export class RoomClient {
   /** Sets and announces this member's language settings; re-sent to every joiner. */
   setLangPrefs(prefs: LangPrefs): void {
     this.langPrefs = prefs
+    this.elect()
     void this.sendLang()
   }
 
   setTranslates(translates: TranslationLevel): void {
     if (this.translates === translates) return
     this.translates = translates
+    this.elect()
     void this.sendLang()
   }
 
@@ -817,6 +831,14 @@ export class RoomClient {
       const sealed = await encryptChat(this.opts.chatKey, text)
       this.send({ ...message, iv: sealed.iv, ct: sealed.ct })
     })
+  }
+
+  // This member stands with what it announces, from the moment it knows
+  // the id the room knows it by.
+  private elect(): void {
+    const others = [...this.memberLangs].map(([id, prefs]) => ({ id, lang: prefs.lang, translates: prefs.translates }))
+    const self = this.langPrefs && this.selfId ? [{ id: this.selfId, lang: this.langPrefs.lang, translates: this.translates }] : []
+    this.election.hold([...others, ...self])
   }
 
   private async sendLang(): Promise<void> {
@@ -1015,6 +1037,7 @@ export class RoomClient {
         const prefs = this.read(what, from, parseAnnouncement(opened.value))
         if (!prefs) return
         this.memberLangs.set(from, prefs)
+        this.elect()
         this.emit('lang', { from, prefs })
         return
       }
@@ -1073,7 +1096,7 @@ export class RoomClient {
       this.quality.delete(key)
       this.inbound.delete(key)
     }
-    this.memberLangs.delete(id)
+    if (this.memberLangs.delete(id)) this.elect()
     const known = this.members.delete(id)
     this.closeDown(id)
     return known
