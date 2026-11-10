@@ -17,7 +17,7 @@ export type CameraFacing = 'user' | 'environment'
 export interface DevicePrefs {
   mic: string
   cam: string
-  camFacing: CameraFacing | ''
+  camFacing: CameraFacing | null
   speaker: string
   resolution: CameraResolution
   volume: number
@@ -29,7 +29,7 @@ export interface DevicePrefs {
 export const DEFAULT_DEVICE_PREFS: DevicePrefs = {
   mic: '',
   cam: '',
-  camFacing: '',
+  camFacing: null,
   speaker: '',
   resolution: 'auto',
   volume: 1,
@@ -52,6 +52,10 @@ export const MAX_MIC_GAIN_DB = 12
 
 export function clampMicGain(gain: number): number {
   return Number.isFinite(gain) ? Math.min(4, Math.max(0, gain)) : 1
+}
+
+export function clampVolume(volume: number): number {
+  return Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 1
 }
 
 export function micGainToDb(gain: number): number {
@@ -83,10 +87,6 @@ export const DEVICE_LABELS: Record<DeviceKind, string> = {
   mic: 'Microphone',
   cam: 'Camera',
   speaker: 'Speaker',
-}
-
-export function supportsSinkSelection(): boolean {
-  return typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype
 }
 
 // Mobile browsers have device lists full of entries the page cannot
@@ -200,7 +200,8 @@ async function readDeviceGroups(): Promise<DeviceGroups | null> {
       cams: dedupeCameras(dedupeDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId !== ''))),
       speakers: dedupeDevices(all.filter((d) => d.kind === 'audiooutput' && d.deviceId !== '')),
     }
-  } catch {
+  } catch (err) {
+    console.error('media: listing the media devices', err)
     return null
   }
 }
@@ -430,12 +431,8 @@ export function validDeviceId(devices: MediaDeviceInfo[], deviceId: string): str
 // track: labels lie on some Android builds and deviceIds rotate on iOS,
 // so the track's own settings are the only trustworthy source.
 export function facingFromTrack(track: MediaStreamTrack): CameraFacing | undefined {
-  try {
-    const facing = track.getSettings().facingMode
-    return facing === 'user' || facing === 'environment' ? facing : undefined
-  } catch {
-    return undefined
-  }
+  const facing = track.getSettings().facingMode
+  return facing === 'user' || facing === 'environment' ? facing : undefined
 }
 
 // The picker highlights the entry matching the stored id, or on phones
@@ -468,7 +465,8 @@ export function audioContext(): AudioContext | null {
   try {
     sharedContext = new AudioContext()
     return sharedContext
-  } catch {
+  } catch (err) {
+    console.error('media: creating the shared audio context', err)
     return null
   }
 }
@@ -492,7 +490,7 @@ function retryAwaiting(): void {
         awaitingGesture.delete(element)
         onBlocked?.(false)
       })
-      .catch(() => {})
+      .catch((err: unknown) => console.warn('media: playback is still blocked after a gesture', err))
   }
 }
 
@@ -533,10 +531,12 @@ export function playMediaElement(
           awaitingGesture.set(element, onBlocked)
           installGestureRetry()
           onBlocked?.(true)
+          return
         }
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        console.error('media: starting playback', err)
       },
     )
-    .catch(() => {})
 }
 
 function resumeSuspended(ctx: AudioContext): void {

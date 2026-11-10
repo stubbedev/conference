@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from 'react'
 import { toast } from 'sonner'
 
-import { useDevicePrefs } from '@/hooks/device-prefs'
+import { useSpeaker } from '@/hooks/audio-output'
+import { parseAvPrefs, useDevicePrefs } from '@/hooks/device-prefs'
 import { useLatest } from '@/hooks/latest'
 import {
   createMicPipeline,
@@ -67,19 +68,23 @@ function useDeviceAvailable(queue: DeviceQueue<TrackKind>, stream: MediaStream |
   return useSyncExternalStore(queue.subscribe, () => queue.available(kind, open))
 }
 
-function migrateAvPrefs(stored: AvPrefs): AvPrefs {
-  return {
-    mic: typeof stored.mic === 'boolean' ? stored.mic : true,
-    cam: typeof stored.cam === 'boolean' ? stored.cam : true,
-  }
-}
-
 export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
   const { devices, refresh: refreshDevices } = useMediaDevices()
-  const { devicePrefs, prefsRef, updateDevicePrefs } = useDevicePrefs(devices)
+  const { devicePrefs: storedPrefs, prefsRef, updateDevicePrefs } = useDevicePrefs(devices)
   const devicesRef = useLatest(devices)
+  const [devicesKnown, setDevicesKnown] = useState(false)
+  // The devices are read again first: a speaker chosen through the
+  // browser's picker is only listed from then on.
+  const chooseSpeaker = useCallback(
+    (speaker: string) => void refreshDevices().then(() => updateDevicePrefs({ speaker })),
+    [refreshDevices, updateDevicePrefs],
+  )
+  const speaker = useSpeaker({ chosen: storedPrefs.speaker, speakers: devices.speakers, devicesKnown, choose: chooseSpeaker })
+  // Playback and the settings show the speaker actually in use, which
+  // trails the stored choice while that is being applied.
+  const devicePrefs = useMemo(() => ({ ...storedPrefs, speaker }), [storedPrefs, speaker])
 
-  const [avPrefs, setAvPrefs] = usePersistentState<AvPrefs>('conference:av', DEFAULT_AV_PREFS, migrateAvPrefs)
+  const [avPrefs, setAvPrefs] = usePersistentState<AvPrefs>('conference:av', DEFAULT_AV_PREFS, parseAvPrefs)
   const [controls, setControls] = useState<Controls>({ mic: avPrefs.mic, cam: avPrefs.cam, sharing: false })
   const controlsRef = useLatest(controls)
   const [localStream, setLocalStream] = useState<MediaStream | null>(null)
@@ -261,7 +266,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     const mobile = isMobileDevice()
     const chosenCam = devicesRef.current.cams.find((device) => device.deviceId === prefs.cam)
     const camFacing = mobile
-      ? prefs.camFacing || facingFromLabel(chosenCam?.label ?? '') || undefined
+      ? (prefs.camFacing ?? facingFromLabel(chosenCam?.label ?? '') ?? undefined)
       : undefined
     if (mobile) releaseAll()
     const opened = await openMicAndCamera(prefs, camFacing)
@@ -308,8 +313,8 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       if (facing && (!cam || !cams.some((device) => device.deviceId === cam))) {
         cam = cams.find((device) => facingFromLabel(device.label) === facing)?.deviceId ?? cam
       }
-      if (cam !== prefs.cam || (facing ?? '') !== prefs.camFacing) {
-        updateDevicePrefs({ cam, camFacing: facing ?? '' })
+      if (cam !== prefs.cam || (facing ?? null) !== prefs.camFacing) {
+        updateDevicePrefs({ cam, camFacing: facing ?? null })
       }
     }
     void refreshDevices()
@@ -331,8 +336,10 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
     } finally {
       acquiresRef.current -= 1
       if (acquiresRef.current === 0) setMediaBusy(false)
+      await refreshDevices()
+      setDevicesKnown(true)
     }
-  }, [queue, acquireNow])
+  }, [queue, acquireNow, refreshDevices])
 
   const dropCamera = useCallback(() => {
     lossGuardRef.current.cam = undefined
@@ -366,7 +373,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
                   devicesRef.current.cams.find((device) => device.deviceId === deviceId)?.label ??
                     '',
                 ) ??
-                (deviceId === prefs.cam ? prefs.camFacing || undefined : undefined))
+                (deviceId === prefs.cam ? (prefs.camFacing ?? undefined) : undefined))
               : undefined))
           : undefined
       const previous = kind === 'cam' && isMobileDevice() ? (rawCamRef.current ?? undefined) : undefined
@@ -461,7 +468,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
         }
         updateDevicePrefs({
           cam,
-          ...(isMobileDevice() ? { camFacing: effectiveFacing ?? '' } : {}),
+          ...(isMobileDevice() ? { camFacing: effectiveFacing ?? null } : {}),
           ...(resolution ? { resolution } : {}),
         })
       } else if (isMobileDevice()) {
@@ -510,12 +517,12 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
   const handleDeviceChange = useCallback(
     (kind: DeviceKind, deviceId: string) => {
       if (kind === 'speaker') {
-        updateDevicePrefs({ speaker: deviceId })
+        chooseSpeaker(deviceId)
         return
       }
       void switchDevice(kind, deviceId)
     },
-    [updateDevicePrefs, switchDevice],
+    [chooseSpeaker, switchDevice],
   )
 
   const handleResolutionChange = useCallback(

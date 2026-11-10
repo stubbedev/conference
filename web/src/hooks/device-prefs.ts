@@ -3,28 +3,56 @@ import { useCallback, useEffect, useRef } from 'react'
 import { useLatest } from '@/hooks/latest'
 import {
   CAMERA_RESOLUTIONS,
+  clampMicGain,
+  clampVolume,
+  DEFAULT_AV_PREFS,
   DEFAULT_DEVICE_PREFS,
   validDeviceId,
+  type AvPrefs,
+  type CameraFacing,
+  type CameraResolution,
   type DeviceGroups,
   type DevicePrefs,
 } from '@/hooks/media'
 import { usePersistentState } from '@/hooks/persistent'
 
-function migrateDevicePrefs(stored: DevicePrefs): DevicePrefs {
+function storedFields<T>(stored: unknown): Partial<Record<keyof T, unknown>> {
+  return typeof stored === 'object' && stored !== null ? stored : {}
+}
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function isResolution(value: unknown): value is CameraResolution {
+  return CAMERA_RESOLUTIONS.some((option) => option.value === value)
+}
+
+function isFacing(value: unknown): value is CameraFacing {
+  return value === 'user' || value === 'environment'
+}
+
+// Whatever an older build (or a hand edit) left in storage becomes
+// complete, valid prefs here, so nothing past this point checks.
+function parseDevicePrefs(stored: unknown): DevicePrefs {
+  const { mic, cam, speaker, resolution, volume, micGain, blur, camFacing } = storedFields<DevicePrefs>(stored)
   return {
-    mic: typeof stored.mic === 'string' ? stored.mic : '',
-    cam: typeof stored.cam === 'string' ? stored.cam : '',
-    speaker: typeof stored.speaker === 'string' ? stored.speaker : '',
-    resolution: CAMERA_RESOLUTIONS.some((option) => option.value === stored.resolution)
-      ? stored.resolution
-      : 'auto',
-    volume: typeof stored.volume === 'number' ? Math.min(1, Math.max(0, stored.volume)) : 1,
-    micGain: typeof stored.micGain === 'number' ? Math.min(4, Math.max(0, stored.micGain)) : 1,
-    blur: stored.blur === true,
-    camFacing:
-      stored.camFacing === 'user' || stored.camFacing === 'environment'
-        ? stored.camFacing
-        : '',
+    mic: text(mic),
+    cam: text(cam),
+    speaker: text(speaker),
+    resolution: isResolution(resolution) ? resolution : DEFAULT_DEVICE_PREFS.resolution,
+    volume: typeof volume === 'number' ? clampVolume(volume) : DEFAULT_DEVICE_PREFS.volume,
+    micGain: typeof micGain === 'number' ? clampMicGain(micGain) : DEFAULT_DEVICE_PREFS.micGain,
+    blur: blur === true,
+    camFacing: isFacing(camFacing) ? camFacing : null,
+  }
+}
+
+export function parseAvPrefs(stored: unknown): AvPrefs {
+  const { mic, cam } = storedFields<AvPrefs>(stored)
+  return {
+    mic: typeof mic === 'boolean' ? mic : DEFAULT_AV_PREFS.mic,
+    cam: typeof cam === 'boolean' ? cam : DEFAULT_AV_PREFS.cam,
   }
 }
 
@@ -32,7 +60,7 @@ export function useDevicePrefs(devices: DeviceGroups) {
   const [devicePrefs, setDevicePrefs] = usePersistentState<DevicePrefs>(
     'conference:devices',
     DEFAULT_DEVICE_PREFS,
-    migrateDevicePrefs,
+    parseDevicePrefs,
   )
   const prefsRef = useLatest(devicePrefs)
   const seenDeviceIdsRef = useRef<Set<string>>(new Set())
@@ -49,11 +77,11 @@ export function useDevicePrefs(devices: DeviceGroups) {
     [setDevicePrefs],
   )
 
+  // The speaker is left alone: useSpeaker decides whether it still works
+  // and says so when it does not.
   useEffect(() => {
     const seen = seenDeviceIdsRef.current
-    for (const device of [...devices.mics, ...devices.cams, ...devices.speakers]) {
-      seen.add(device.deviceId)
-    }
+    for (const device of [...devices.mics, ...devices.cams]) seen.add(device.deviceId)
     const sanitize = (list: MediaDeviceInfo[], deviceId: string) => {
       const validated = validDeviceId(list, deviceId)
       return validated === deviceId || seen.has(deviceId) ? deviceId : validated
@@ -61,10 +89,7 @@ export function useDevicePrefs(devices: DeviceGroups) {
     setDevicePrefs((prev) => {
       const mic = sanitize(devices.mics, prev.mic)
       const cam = sanitize(devices.cams, prev.cam)
-      const speaker = sanitize(devices.speakers, prev.speaker)
-      return mic === prev.mic && cam === prev.cam && speaker === prev.speaker
-        ? prev
-        : { ...prev, mic, cam, speaker }
+      return mic === prev.mic && cam === prev.cam ? prev : { ...prev, mic, cam }
     })
   }, [devices, setDevicePrefs])
 

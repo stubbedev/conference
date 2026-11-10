@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { MicOff, MonitorUp, Pin, PinOff, VideoOff, VolumeX } from 'lucide-react'
 
+import { useAudioSink } from '@/hooks/audio-output'
 import { useLatest } from '@/hooks/latest'
 import { useHeldSpeaking, useIsSpeaking } from '@/hooks/speaking'
 import { useTileDebug } from '@/hooks/tileDebug'
@@ -155,11 +156,7 @@ export const VideoTile = memo(function VideoTile({
     }
   }, [muted, audioStream])
 
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio || !sinkId) return
-    if ('setSinkId' in audio) audio.setSinkId(sinkId).catch(() => {})
-  }, [sinkId, stream])
+  useAudioSink(audioRef, sinkId)
 
   useEffect(() => {
     const audio = audioRef.current

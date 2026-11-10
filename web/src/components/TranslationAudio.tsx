@@ -1,10 +1,11 @@
 import { useEffect, useRef } from 'react'
 
-import { playMediaElement } from '@/hooks/media'
+import { useAudioSink } from '@/hooks/audio-output'
+import { clampVolume, playMediaElement } from '@/hooks/media'
 
 interface TranslationAudioProps {
   stream: MediaStream
-  sinkId?: string
+  sinkId: string
   volume: number
 }
 
@@ -23,13 +24,10 @@ export function TranslationAudio({ stream, sinkId, volume }: TranslationAudioPro
     }
   }, [stream])
 
-  useEffect(() => {
-    const audio = audioRef.current
-    if (audio && sinkId && 'setSinkId' in audio) audio.setSinkId(sinkId).catch(() => {})
-  }, [sinkId])
+  useAudioSink(audioRef, sinkId)
 
   useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = Math.min(1, Math.max(0, volume))
+    if (audioRef.current) audioRef.current.volume = clampVolume(volume)
   }, [volume])
 
   return <audio ref={audioRef} autoPlay playsInline className="hidden" />
