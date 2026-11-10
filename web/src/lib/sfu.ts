@@ -254,6 +254,8 @@ interface Events {
   welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string; translatingBy: string }
   'member-joined': { member: MemberInfo; replaces: string }
   'member-left': { id: string }
+  /** A member's id will not be heard from again: the member left, or rejoined under a new one. */
+  'member-gone': { id: string }
   'member-state': { id: string; mic: boolean; cam: boolean; sharing: boolean }
   /** A track of another member starts arriving. */
   track: RemoteTrack
@@ -1106,6 +1108,7 @@ export class RoomClient {
     if (this.memberLangs.delete(id)) this.elect()
     const known = this.members.delete(id)
     this.closeDown(id)
+    if (known) this.emit('member-gone', { id })
     return known
   }
 

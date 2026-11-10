@@ -15,13 +15,14 @@ import { translationLang } from '@/lib/track-kind'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
-import { isVoiceChoice, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
+import { isVoiceChoice, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
 
 const CAPTION_HOLD_MS = 5000
 const INTERIM_HOLD_MS = 10_000
 const CAPTION_PRUNE_MS = 500
 const LANG_PREFS_KEY = 'conference:translation'
 const NO_LOCAL_VOICES: Readonly<Record<string, MediaStream>> = {}
+const NOBODY: ReadonlyMap<string, LangAnnouncement> = new Map()
 
 const TRANSLATION_CHECKING: TranslationConfig = {
   available: false,
@@ -97,7 +98,7 @@ export function useLiveTranslation(
   const [captions, setCaptions] = useState<Record<string, ShownCaption>>({})
   const [publishedVoices, setPublishedVoices] = useState<Voices<MediaStream>>({})
   const [localVoices, setLocalVoices] = useState(NO_LOCAL_VOICES)
-  const [memberLangs, setMemberLangs] = useState<Record<string, string>>({})
+  const [announced, setAnnounced] = useState(NOBODY)
   const [translatorStatus, setTranslatorStatus] = useState<TranslatorStatus | null>(null)
   const [translationFailure, setTranslationFailure] = useState('')
   const translatorRef = useRef<Translator | null>(null)
@@ -238,13 +239,17 @@ export function useLiveTranslation(
       translatorRef.current?.attach(client)
       let translatingAtJoin = false
 
+      // The client keeps what the members announced; this is its record
+      // as of the last change, for the page to render from.
+      const readAnnounced = () => setAnnounced(new Map(client.memberLangPrefs))
+
       client.on('welcome', ({ translatingBy }) => {
         setTranslationBy(translatingBy || null)
         translatingAtJoin = Boolean(translatingBy)
-        setMemberLangs({})
+        readAnnounced()
       })
-      client.on('member-left', ({ id }) => {
-        setMemberLangs(({ [id]: _left, ...rest }) => rest)
+      client.on('member-gone', ({ id }) => {
+        readAnnounced()
         setLocalVoices(({ [id]: _gone, ...rest }) => rest)
       })
       client.on('track', ({ sourceId, stream, kind }) => {
@@ -260,7 +265,7 @@ export function useLiveTranslation(
         if (translator) translator.receive(caption)
         else if (caption.k === 'caption') handleRoomCaption(caption)
       })
-      client.on('lang', ({ from, prefs }) => setMemberLangs((prev) => ({ ...prev, [from]: prefs.lang })))
+      client.on('lang', readAnnounced)
       client.on('translating', ({ from, on }) => {
         setTranslationBy(on ? from : null)
         if (on) startTranslation(client)
@@ -299,6 +304,11 @@ export function useLiveTranslation(
         })
       }),
     [setLangPrefs, membersRef, translationRef],
+  )
+
+  const memberLangs = useMemo(
+    () => Object.fromEntries([...announced].map(([id, announcement]) => [id, announcement.lang])),
+    [announced],
   )
 
   const translations = useMemo<Translations<MediaStream>>(

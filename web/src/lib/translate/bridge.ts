@@ -32,8 +32,6 @@ export class ServerTranslator implements Translator {
   private capture: MicCapture
   private playbackContext: AudioContext | null = null
   private player: VoicePlayer | null = null
-  /** The other members' announced languages: what this speech is translated into. */
-  private otherLangs = new Map<string, string>()
   private refusedConnects = 0
   private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
   private selfPrefs: LangPrefs
@@ -62,23 +60,13 @@ export class ServerTranslator implements Translator {
     // Until a segment arrives there is no track to publish.
     if (this.playbackContext.state === 'suspended') void this.playbackContext.resume()
 
-    // Members announce their language once, on joining, so the ones that
-    // arrived before this bridge started come from the client's record.
-    for (const [memberId, prefs] of client.memberLangPrefs) this.otherLangs.set(memberId, prefs.lang)
-
     this.unsubscribe = [
       client.on('translate-token', ({ token }) => {
         this.setStatus({ state: 'connecting', detail: '' })
         this.openSpeech(token)
       }),
-      client.on('lang', ({ from, prefs }) => {
-        this.otherLangs.set(from, prefs.lang)
-        this.sendTargets()
-      }),
-      client.on('member-left', ({ id }) => {
-        this.otherLangs.delete(id)
-        this.sendTargets()
-      }),
+      client.on('lang', () => this.sendTargets()),
+      client.on('member-gone', () => this.sendTargets()),
     ]
   }
 
@@ -181,7 +169,8 @@ export class ServerTranslator implements Translator {
 
   /** The languages this speech goes out in: its own (as subtitles) and every other member's. */
   private targets(): string[] {
-    return [...new Set([this.selfPrefs.lang, ...this.otherLangs.values()])]
+    const others = [...(this.client?.memberLangPrefs.values() ?? [])].map((prefs) => prefs.lang)
+    return [...new Set([this.selfPrefs.lang, ...others])]
   }
 
   private sendTargets(): void {

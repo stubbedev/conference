@@ -111,7 +111,7 @@ export class LocalTranslator implements Translator {
         this.setSameLanguage()
         this.warmUpMembers()
       }),
-      client.on('member-left', ({ id }) => {
+      client.on('member-gone', ({ id }) => {
         this.player?.forget(id)
         this.earlier.delete(id)
         this.setSameLanguage()
