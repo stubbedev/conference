@@ -267,7 +267,7 @@ func addPublisherTracks(
 
 // trackKind labels a published track the way the client does: what a
 // share's connection carries is the screen and its sound.
-func trackKind(which sfu.Upstream, codecType webrtc.RTPCodecType) string {
+func trackKind(which sfu.Upstream, codecType webrtc.RTPCodecType) sfu.Kind {
 	audio := codecType == webrtc.RTPCodecTypeAudio
 
 	switch {

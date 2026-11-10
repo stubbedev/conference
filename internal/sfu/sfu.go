@@ -21,13 +21,35 @@ import (
 	"github.com/stubbe/conference/internal/relay"
 )
 
-// Track kinds as announced by the client in offer metadata.
+// Kind labels what a published track carries, as the client announces
+// it in offer metadata: one of the constants below, or a translated voice
+// (KindTranslationPrefix and a language).
+type Kind string
+
+// The kinds of a member's own microphone, camera and shared screen.
 const (
-	KindAudio       = "audio"
-	KindCamera      = "camera"
-	KindScreen      = "screen"
-	KindScreenAudio = "screen-audio"
+	KindAudio       Kind = "audio"
+	KindCamera      Kind = "camera"
+	KindScreen      Kind = "screen"
+	KindScreenAudio Kind = "screen-audio"
 )
+
+// known reports whether the client may announce a track as kind.
+func (k Kind) known() bool {
+	if k == KindAudio || k == KindCamera || k == KindScreen || k == KindScreenAudio {
+		return true
+	}
+
+	lang, translation := strings.CutPrefix(string(k), KindTranslationPrefix)
+
+	return translation && lang != ""
+}
+
+// layered reports whether a track of this kind is published as simulcast
+// layers a viewer can choose between.
+func (k Kind) layered() bool {
+	return k == KindCamera || k == KindScreen
+}
 
 // Moderation actions a privileged member can request for another member.
 const (
@@ -80,7 +102,7 @@ var (
 // client can label incoming transceivers without parsing the SDP.
 type TrackInfo struct {
 	Mid  string `json:"mid"`
-	Kind string `json:"kind"`
+	Kind Kind   `json:"kind"`
 }
 
 // MemberInfo is a member as seen by signaling peers.
@@ -178,7 +200,7 @@ type Message struct {
 
 	// layer (Member names the source, Kind its camera or screen, Layer
 	// is a simulcast rid)
-	Kind  string `json:"kind,omitempty"`
+	Kind  Kind   `json:"kind,omitempty"`
 	Layer string `json:"layer,omitempty"`
 
 	// layers: which encodings of the publisher's track (Mid on the
@@ -820,13 +842,7 @@ type Member struct {
 // its shared screen, which a layout sizes independently.
 type layeredStream struct {
 	source string
-	kind   string
-}
-
-// isLayeredKind reports whether a track of kind is published as simulcast
-// layers a viewer can choose between.
-func isLayeredKind(kind string) bool {
-	return kind == KindCamera || kind == KindScreen
+	kind   Kind
 }
 
 // State mirrors a member's UI toggles for remote indicators.
@@ -997,7 +1013,7 @@ func (m *Member) apply(msg Message) { //nolint:cyclop // one flat case per signa
 // less than a pinned tile) and retargets that stream at once.
 func (m *Member) handleLayer(msg Message) {
 	layer, ok := layerOf(msg.Layer)
-	if msg.Layer == "" || !ok || msg.Member == "" || !isLayeredKind(msg.Kind) {
+	if msg.Layer == "" || !ok || msg.Member == "" || !msg.Kind.layered() {
 		m.fail("bad-layer", fmt.Errorf("%w: layer %q of %q for source %q", ErrBadRequest, msg.Layer, msg.Kind, msg.Member))
 
 		return
@@ -1024,7 +1040,7 @@ func (m *Member) handleLayer(msg Message) {
 
 // layerPreference is the layout preference for one stream of a source,
 // defaulting to the highest layer.
-func (m *Member) layerPreference(sourceID, kind string) int {
+func (m *Member) layerPreference(sourceID string, kind Kind) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -1144,6 +1160,12 @@ func (m *Member) handleUpOffer(msg Message) {
 	}
 
 	for _, info := range msg.Tracks {
+		if !info.Kind.known() {
+			m.fail("bad-offer", fmt.Errorf("%w: a track of unknown kind %q offered on %s", ErrBadRequest, info.Kind, which))
+
+			return
+		}
+
 		if !which.carries(info.Kind) {
 			m.fail("bad-offer", fmt.Errorf("%w: a %q track offered on %s", ErrBadRequest, info.Kind, which))
 
@@ -1214,7 +1236,7 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		member:     m,
 		mu:         sync.RWMutex{},
 		tracks:     map[string]*UpTrack{},
-		labels:     map[string]string{},
+		labels:     map[string]Kind{},
 		ice:        newICEStash(),
 		sampledAt:  time.Now(),
 		uplink:     uplinkEstimate{limit: unlimited, peak: 0},
@@ -1545,7 +1567,7 @@ type UpPeer struct {
 	mu     sync.RWMutex
 	tracks map[string]*UpTrack
 
-	labels map[string]string
+	labels map[string]Kind
 	ice    iceStash
 
 	// The REMB ticker's own state: when it last measured, the estimate of
@@ -1567,7 +1589,7 @@ type UpPeer struct {
 // else has a single layer.
 type UpTrack struct {
 	key  trackKey
-	kind string
+	kind Kind
 
 	// first is the first layer to arrive; its stream IDs, shared by all
 	// layers, describe the track to viewers.
@@ -1776,10 +1798,9 @@ func (vr *viewerRate) limit() bitrateLimit {
 	return vr.loss.tighter(vr.remb)
 }
 
-// isVideo reports whether the track carries video (camera or screen);
-// everything that is not audio counts, including unknown kinds.
+// isVideo reports whether the track carries video: a camera or a screen.
 func (ut *UpTrack) isVideo() bool {
-	return !isAudioKind(ut.kind)
+	return !ut.kind.audio()
 }
 
 // addLayer stores a newly arrived encoding and starts forwarding it;
@@ -2375,7 +2396,7 @@ func (up *UpPeer) close() {
 // downSend pairs a forwarded local track with its logical kind.
 type downSend struct {
 	local *forwardTrack
-	kind  string
+	kind  Kind
 }
 
 // DownPeer carries one source member's tracks to one viewer. The server

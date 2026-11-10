@@ -381,7 +381,7 @@ func TestScreenShareKeepsItsFluidLayerWithNobodyWatchingIt(t *testing.T) {
 
 	start := time.Unix(1000, 0)
 
-	for _, kind := range []string{KindScreen, KindCamera} {
+	for _, kind := range []Kind{KindScreen, KindCamera} {
 		thumbnail := &upViewer{
 			local: nil, rate: newViewerRate(), mu: sync.Mutex{}, current: layerLow, target: layerLow,
 			preferred: layerLow, steps: newLadder(), mung: newMunger(), buf: nil, received: unreported,
@@ -507,7 +507,7 @@ func TestAStillScreenKeepsItsLayersWhileACameraLosesThem(t *testing.T) {
 	sparse := now.Add(-2 * time.Second)
 
 	for _, tc := range []struct {
-		kind   string
+		kind   Kind
 		active bool
 	}{
 		{kind: KindScreen, active: true},

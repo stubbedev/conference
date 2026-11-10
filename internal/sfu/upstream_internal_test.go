@@ -9,7 +9,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-func simulcastTrack(key trackKey, kind string) *UpTrack {
+func simulcastTrack(key trackKey, kind Kind) *UpTrack {
 	return &UpTrack{
 		key: key, kind: kind, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP8,
 		extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{}, viewers: map[string]*upViewer{},
@@ -40,7 +40,7 @@ func publishingOn(member *Member, which Upstream, tracks ...*UpTrack) {
 
 	member.ups[which] = &UpPeer{
 		which: which, pc: nil, member: member, mu: sync.RWMutex{},
-		tracks: byMid, labels: map[string]string{}, ice: newICEStash(),
+		tracks: byMid, labels: map[string]Kind{}, ice: newICEStash(),
 		sampledAt: time.Time{}, uplink: uplinkEstimate{limit: unlimited, peak: 0}, rembCapped: false,
 		opened: sync.Once{}, flowing: atomic.Pointer[time.Time]{},
 	}
@@ -102,12 +102,12 @@ func TestShareTracksBelongOnTheShareConnection(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		kind  string
+		kind  Kind
 		which Upstream
 	}{
 		{KindAudio, UpstreamMedia},
 		{KindCamera, UpstreamMedia},
-		{KindTranslationPrefix + "de", UpstreamMedia},
+		{translationDE, UpstreamMedia},
 		{KindScreen, UpstreamScreen},
 		{KindScreenAudio, UpstreamScreen},
 	} {

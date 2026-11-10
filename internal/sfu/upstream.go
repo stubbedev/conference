@@ -58,12 +58,12 @@ func (u Upstream) feedback() congestionFeedback {
 }
 
 // carries reports whether a track of kind belongs on this connection.
-func (u Upstream) carries(kind string) bool {
+func (u Upstream) carries(kind Kind) bool {
 	return (u == UpstreamScreen) == (kind == KindScreen || kind == KindScreenAudio)
 }
 
 // defaultKind labels a track the publisher's offer did not name.
-func (u Upstream) defaultKind(codecType webrtc.RTPCodecType) string {
+func (u Upstream) defaultKind(codecType webrtc.RTPCodecType) Kind {
 	audio := codecType == webrtc.RTPCodecTypeAudio
 
 	switch {

@@ -196,8 +196,8 @@ func (c *shareCall) expectMarked(t *testing.T, id string) {
 	}
 }
 
-func offeredKinds(offer sfu.Message) []string {
-	kinds := make([]string, 0, len(offer.Tracks))
+func offeredKinds(offer sfu.Message) []sfu.Kind {
+	kinds := make([]sfu.Kind, 0, len(offer.Tracks))
 	for _, info := range offer.Tracks {
 		kinds = append(kinds, info.Kind)
 	}
@@ -418,7 +418,7 @@ func TestClosingShareConnectionKeepsTheCamera(t *testing.T) {
 
 	call.publisher.member.Handle(sfu.Message{Type: "close", PC: sfu.UpstreamScreen.PCID()})
 
-	want := []string{sfu.KindAudio, sfu.KindCamera}
+	want := []sfu.Kind{sfu.KindAudio, sfu.KindCamera}
 
 	call.answerUntil(t, "an offer without the share", func(offer sfu.Message) bool {
 		return offer.SDP != "" && slices.Equal(offeredKinds(offer), want)
@@ -430,7 +430,7 @@ func TestClosingShareConnectionKeepsTheCamera(t *testing.T) {
 
 // TestOfferMustNameItsConnection checks that an offer is refused before
 // its SDP is read when it names no known upstream, or carries a track
-// that belongs on the other one.
+// of no kind the client announces or one that belongs on the other one.
 func TestOfferMustNameItsConnection(t *testing.T) {
 	const unparsedSDP = "v=0"
 
@@ -450,6 +450,7 @@ func TestOfferMustNameItsConnection(t *testing.T) {
 		{Type: msgOffer, PC: "up-camera", SDP: unparsedSDP},
 		{Type: msgOffer, PC: sfu.UpstreamMedia.PCID(), SDP: unparsedSDP, Tracks: []sfu.TrackInfo{{Mid: "0", Kind: sfu.KindScreen}}},
 		{Type: msgOffer, PC: sfu.UpstreamScreen.PCID(), SDP: unparsedSDP, Tracks: []sfu.TrackInfo{{Mid: "0", Kind: sfu.KindCamera}}},
+		{Type: msgOffer, PC: sfu.UpstreamMedia.PCID(), SDP: unparsedSDP, Tracks: []sfu.TrackInfo{{Mid: "0", Kind: "hologram"}}},
 	} {
 		publisher.member.Handle(offer)
 
