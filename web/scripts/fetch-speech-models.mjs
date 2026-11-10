@@ -93,6 +93,7 @@ export const DTYPE_SUFFIXES = {
 const MAX_BROWSER_FILE = 2 ** 31 - 1
 
 const MAX_PARALLEL = 4
+const DOWNLOAD_ATTEMPTS = 4
 const REPORT_BYTES = 64e6
 
 const USAGE =
@@ -466,6 +467,19 @@ async function download(file) {
 
   await mkdir(path.dirname(file.out), { recursive: true })
 
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await downloadOnce(file, name, size)
+      return
+    } catch (err) {
+      const failure = new Error(`downloading ${file.url} to ${file.out} failed on attempt ${attempt} of ${DOWNLOAD_ATTEMPTS}: ${err.message}`, { cause: err })
+      if (attempt === DOWNLOAD_ATTEMPTS) throw failure
+      process.stderr.write(`${failure.message}; trying again\n`)
+    }
+  }
+}
+
+async function downloadOnce(file, name, size) {
   const response = await hubFetch(file.url)
   if (!response.ok) throw new Error(`cannot download ${file.out}: ${response.status} from ${file.url}, wanted ${size}`)
 
