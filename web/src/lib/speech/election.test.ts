@@ -66,3 +66,91 @@ test('an election is held again whenever the room is announced anew', () => {
   assert.equal(election.translatorFor('de'), null)
   assert.equal(election.translators.size, 0)
 })
+
+const anna: Candidate = { id: 'anna', lang: 'de', translates: 'none' }
+const bob: Candidate = { id: 'bob', lang: 'en', translates: 'plain' }
+const cleo: Candidate = { id: 'cleo', lang: 'en', translates: 'prompted' }
+const idle = (member: Candidate): Candidate => ({ ...member, translates: 'none' })
+
+test('the translator into a language may translate any sentence, and nobody else may', () => {
+  const election = new Election()
+  election.hold([anna, bob, idle(cleo)])
+
+  assert.ok(election.translated('bob', 'en', 'anna', 'anna-1'))
+  assert.ok(!election.translated('cleo', 'en', 'anna', 'anna-1'))
+  assert.ok(!election.translated('bob', 'fr', 'anna', 'anna-1'))
+})
+
+test('a translator replaced while a sentence was being translated may still deliver it', () => {
+  const election = new Election()
+  election.hold([anna, bob, idle(cleo)])
+  election.hear('anna', 'anna-1')
+  election.hold([anna, bob, cleo])
+
+  assert.equal(election.translatorFor('en'), 'cleo')
+  assert.ok(election.translated('bob', 'en', 'anna', 'anna-1'), 'the line was on its way when the room changed its translator')
+  assert.ok(election.translated('cleo', 'en', 'anna', 'anna-1'))
+})
+
+test('a translator replaced before a sentence was heard may not translate it', () => {
+  const election = new Election()
+  election.hold([anna, bob, idle(cleo)])
+  election.hold([anna, bob, cleo])
+  election.hear('anna', 'anna-2')
+
+  assert.ok(!election.translated('bob', 'en', 'anna', 'anna-2'))
+  assert.ok(!election.translated('bob', 'en', 'anna', 'anna-never-heard'))
+})
+
+test('a sentence is first heard once: a later interim does not shorten who may translate it', () => {
+  const election = new Election()
+  election.hold([anna, bob, idle(cleo)])
+  election.hear('anna', 'anna-1')
+  election.hold([anna, bob, cleo])
+  election.hear('anna', 'anna-1')
+
+  assert.ok(election.translated('bob', 'en', 'anna', 'anna-1'))
+})
+
+test('a sentence is told apart by its speaker, so nobody can stand in for another member’s sentence', () => {
+  const election = new Election()
+  election.hold([anna, bob, idle(cleo)])
+  election.hear('bob', 'anna-1')
+  election.hold([anna, bob, cleo])
+
+  assert.ok(!election.translated('bob', 'en', 'anna', 'anna-1'))
+})
+
+test('a translator who stopped translating altogether may still deliver the sentence it was on', () => {
+  const election = new Election()
+  election.hold([anna, bob])
+  election.hear('anna', 'anna-1')
+  election.hold([anna, idle(bob)])
+
+  assert.equal(election.translatorFor('en'), null)
+  assert.ok(election.translated('bob', 'en', 'anna', 'anna-1'))
+})
+
+test('a member who left, or a language nobody speaks any more, leaves no past translator behind', () => {
+  const election = new Election()
+  election.hold([anna, bob, idle(cleo)])
+  election.hear('anna', 'anna-1')
+  election.hold([anna, cleo])
+  assert.ok(!election.translated('bob', 'en', 'anna', 'anna-1'), 'bob left the call')
+
+  election.hold([anna, bob, idle(cleo)])
+  election.hear('anna', 'anna-2')
+  election.hold([anna, { ...bob, lang: 'de' }, { ...cleo, lang: 'de' }])
+  assert.ok(!election.translated('bob', 'en', 'anna', 'anna-2'), 'nobody speaks English any more')
+})
+
+test('a translator elected again is the translator, whatever happened in between', () => {
+  const election = new Election()
+  election.hold([anna, bob, idle(cleo)])
+  election.hold([anna, bob, cleo])
+  election.hold([anna, bob, idle(cleo)])
+  election.hear('anna', 'anna-3')
+
+  assert.ok(election.translated('bob', 'en', 'anna', 'anna-3'))
+  assert.ok(!election.translated('cleo', 'en', 'anna', 'anna-3'))
+})

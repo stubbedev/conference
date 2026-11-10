@@ -134,14 +134,27 @@ export function parseCaption(fields: Record<string, unknown>, sender: string): C
   return { k: 'caption', ...line }
 }
 
+/** What a line is judged against: the room it arrived in. */
+export interface Room {
+  inCall(member: string): boolean
+  /**
+   * Whether member is the room's translator into lang, or was while the
+   * speaker's sentence segId was being translated.
+   */
+  translated(member: string, lang: string, speaker: string, segId: string): boolean
+}
+
 /**
  * parseRoomMessage reads what another member sealed for the room: every
  * field checked and nothing else kept, or the reason it is refused.
  * Everyone captions their own speech and a translation names its
  * translator, so a line claiming to come from anyone but its sender is
  * refused, and so is a translation of someone who is not in the call.
+ * A speaker's words are put into another language by the speaker or by
+ * the translator the room holds for that language, and by nobody else:
+ * what is shown under a member's name is not for any member to write.
  */
-export function parseRoomMessage(value: unknown, sender: string, inCall: (member: string) => boolean): RoomMessage | Refused {
+export function parseRoomMessage(value: unknown, sender: string, room: Room): RoomMessage | Refused {
   if (typeof value !== 'object' || value === null) return { refused: 'it is not an object' }
 
   const fields = value as Record<string, unknown>
@@ -152,7 +165,10 @@ export function parseRoomMessage(value: unknown, sender: string, inCall: (member
   if ('refused' in line) return line
 
   if (fields.by !== sender) return { refused: 'it names someone other than its sender as its translator' }
-  if (!inCall(line.speaker)) return { refused: 'it translates someone who is not in the call' }
+  if (!room.inCall(line.speaker)) return { refused: 'it translates someone who is not in the call' }
+  if (sender !== line.speaker && !room.translated(sender, line.lang, line.speaker, line.segId)) {
+    return { refused: 'its sender is not the translator into its language' }
+  }
   return { k: 'translation', by: sender, ...line }
 }
 

@@ -52,7 +52,7 @@ import {
   type TileKind,
   type TrackKind,
 } from '@/lib/track-kind'
-import { parseAnnouncement, parseLanguageSet, parseRoomMessage, type LangAnnouncement, type LangPrefs, type LanguageSet, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
+import { parseAnnouncement, parseLanguageSet, parseRoomMessage, type LangAnnouncement, type LangPrefs, type LanguageSet, type Room, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -354,6 +354,10 @@ export class RoomClient {
   private opening = new Serial()
   private translates: TranslationLevel = 'none'
   private election = new Election()
+  private room: Room = {
+    inCall: (member) => member === this.selfId || this.members.has(member),
+    translated: (member, lang, speaker, segId) => this.election.translated(member, lang, speaker, segId),
+  }
   private transformed = new WeakSet<object>()
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
@@ -746,6 +750,7 @@ export class RoomClient {
   }
 
   sendCaption(caption: RoomMessage): Promise<void> {
+    if (caption.k === 'caption') this.election.hear(caption.speaker, caption.segId)
     return this.sendSealed({ type: 'caption' }, JSON.stringify(caption))
   }
 
@@ -1047,8 +1052,10 @@ export class RoomClient {
         if (!opened) return
 
         const { from } = opened
-        const caption = this.read(what, from, parseRoomMessage(opened.value, from, (member) => member === this.selfId || this.members.has(member)))
-        if (caption) this.emit('caption', { from, caption })
+        const caption = this.read(what, from, parseRoomMessage(opened.value, from, this.room))
+        if (!caption) return
+        if (caption.k === 'caption') this.election.hear(caption.speaker, caption.segId)
+        this.emit('caption', { from, caption })
         return
       }
       case 'translating':

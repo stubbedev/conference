@@ -9,36 +9,42 @@ import {
   parseRoomMessage,
   type CaptionLine,
   type LangAnnouncement,
+  type Room,
   type TranslationLine,
 } from './types.ts'
 
 const CALL = ['anna', 'bob', 'cleo']
-const inCall = (member: string) => CALL.includes(member)
+
+/** A call of three where Bob is the translator into English. */
+const call: Room = {
+  inCall: (member) => CALL.includes(member),
+  translated: (member, lang) => member === 'bob' && lang === 'en',
+}
 
 const caption: CaptionLine = { k: 'caption', speaker: 'anna', segId: 'anna-3', sourceLang: 'de', lang: 'de', text: 'Guten Morgen.', final: true }
 const translation: TranslationLine = { ...caption, k: 'translation', by: 'bob', lang: 'en', text: 'Good morning.' }
 
 /** Why a message from sender is refused; fails when it is read instead. */
 function refusal(value: unknown, sender: string): string {
-  const parsed = parseRoomMessage(value, sender, inCall)
+  const parsed = parseRoomMessage(value, sender, call)
   if (!('refused' in parsed)) assert.fail(`read as a room message: ${JSON.stringify(value)}`)
   return parsed.refused
 }
 
 test('a caption from its own speaker is read as it was sent', () => {
-  assert.deepEqual(parseRoomMessage(caption, 'anna', inCall), caption)
+  assert.deepEqual(parseRoomMessage(caption, 'anna', call), caption)
 })
 
 test('a translation by its sender of someone in the call is read as it was sent', () => {
-  assert.deepEqual(parseRoomMessage(translation, 'bob', inCall), translation)
+  assert.deepEqual(parseRoomMessage(translation, 'bob', call), translation)
 })
 
 test('only the fields of a line are kept', () => {
-  assert.deepEqual(parseRoomMessage({ ...caption, by: 'bob', html: '<b>' }, 'anna', inCall), caption)
+  assert.deepEqual(parseRoomMessage({ ...caption, by: 'bob', html: '<b>' }, 'anna', call), caption)
 })
 
 test('a line may be empty and as long as the limit, and no longer', () => {
-  for (const text of ['', 'x'.repeat(LINE_TEXT_MAX)]) assert.deepEqual(parseRoomMessage({ ...caption, text }, 'anna', inCall), { ...caption, text })
+  for (const text of ['', 'x'.repeat(LINE_TEXT_MAX)]) assert.deepEqual(parseRoomMessage({ ...caption, text }, 'anna', call), { ...caption, text })
   assert.match(refusal({ ...caption, text: 'x'.repeat(LINE_TEXT_MAX + 1) }, 'anna'), /text is longer/)
 })
 
@@ -72,6 +78,24 @@ test('a translation names its sender as the translator', () => {
 
 test('a translation of someone who is not in the call is refused', () => {
   assert.match(refusal({ ...translation, speaker: 'mallory' }, 'bob'), /not in the call/)
+})
+
+test('a translation from a member who is not the translator into its language is refused', () => {
+  assert.match(refusal({ ...translation, by: 'cleo' }, 'cleo'), /not the translator into its language/)
+  assert.match(refusal({ ...translation, lang: 'fr' }, 'bob'), /not the translator into its language/)
+})
+
+test('the room is asked about the very sentence a translation names', () => {
+  const asked: string[][] = []
+  const room: Room = { inCall: () => true, translated: (...line) => asked.push(line) > 0 }
+
+  assert.deepEqual(parseRoomMessage(translation, 'bob', room), translation)
+  assert.deepEqual(asked, [['bob', 'en', 'anna', 'anna-3']])
+})
+
+test('a speaker may put their own words into another language without being the translator', () => {
+  const own = { ...translation, by: 'anna' }
+  assert.deepEqual(parseRoomMessage(own, 'anna', { ...call, translated: () => false }), own)
 })
 
 const announced: LangAnnouncement = { lang: 'de', voice: true, subtitles: false, voiceChoice: 'male', translates: 'plain' }
