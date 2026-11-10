@@ -33,8 +33,10 @@ import {
   screenSenderParameters,
 } from '@/lib/encodings'
 import {
+  announcedKinds,
   AUDIO_KIND,
   CAMERA_KIND,
+  isAudioKind,
   isTileKind,
   SCREEN_AUDIO_KIND,
   SCREEN_KIND,
@@ -222,6 +224,9 @@ interface WireMessage {
   token?: string
 }
 
+/** A message as it arrives: what it says of tracks is still to be read. */
+type ReceivedMessage = Omit<WireMessage, 'tracks'> & { tracks?: unknown }
+
 interface Events {
   welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string; translatingBy: string }
   'member-joined': { member: MemberInfo; replaces: string }
@@ -395,9 +400,9 @@ export class RoomClient {
         })
       }
       ws.onmessage = (ev) => {
-        let msg: WireMessage
+        let msg: ReceivedMessage
         try {
-          msg = JSON.parse(ev.data as string) as WireMessage
+          msg = JSON.parse(ev.data as string) as ReceivedMessage
         } catch {
           return
         }
@@ -889,7 +894,7 @@ export class RoomClient {
     return CAMERA_KIND
   }
 
-  private async handle(msg: WireMessage): Promise<void> {
+  private async handle(msg: ReceivedMessage): Promise<void> {
     switch (msg.type) {
       case 'answer': {
         const pc = isUpstreamId(msg.pc) ? this.ups.get(msg.pc)?.pc : undefined
@@ -1017,7 +1022,7 @@ export class RoomClient {
     return known
   }
 
-  private async handleDownOffer(sourceId: string, msg: WireMessage): Promise<void> {
+  private async handleDownOffer(sourceId: string, msg: ReceivedMessage): Promise<void> {
     let pc = this.downs.get(sourceId)
     if (!pc) {
       pc = this.newPC(`down-${sourceId}`)
@@ -1025,16 +1030,14 @@ export class RoomClient {
       this.startQualityWatch()
       pc.ontrack = (ev) => {
         this.installReceiverTransform(ev.receiver)
-        const key = `${sourceId}:${ev.transceiver.mid ?? ''}`
-        const labelled = this.downKinds.get(key)
-        const kind: TrackKind =
-          ev.track.kind === 'audio'
-            ? labelled !== undefined && translationLang(labelled) !== null
-              ? labelled
-              : labelled === SCREEN_AUDIO_KIND
-                ? SCREEN_AUDIO_KIND
-                : AUDIO_KIND
-            : (labelled ?? CAMERA_KIND)
+        const mid = ev.transceiver.mid
+        const kind = mid === null ? undefined : this.downKinds.get(`${sourceId}:${mid}`)
+        if (kind === undefined || isAudioKind(kind) !== (ev.track.kind === 'audio')) {
+          console.warn(
+            `sfu: dropping the ${ev.track.kind} track in section ${mid} from ${sourceId}: announced as ${kind ?? 'no kind this client knows'}`,
+          )
+          return
+        }
         // A translated voice and a share's sound are played on their own
         // terms, never as part of the speaker's camera stream, so each
         // gets a stream of its own.
@@ -1046,7 +1049,9 @@ export class RoomClient {
       }
     }
 
-    for (const t of msg.tracks ?? []) this.downKinds.set(`${sourceId}:${t.mid}`, t.kind)
+    const { kinds, refused } = announcedKinds(msg.tracks)
+    for (const [mid, kind] of kinds) this.downKinds.set(`${sourceId}:${mid}`, kind)
+    for (const entry of refused) console.warn(`sfu: ${sourceId} announced a track this client cannot place:`, entry)
 
     await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp ?? '' })
     this.flushIce(`down-${sourceId}`, pc)
@@ -1060,7 +1065,7 @@ export class RoomClient {
     this.send({ type: 'pli', member: sourceId })
   }
 
-  private handleIce(msg: WireMessage): void {
+  private handleIce(msg: ReceivedMessage): void {
     if (!msg.candidate || !msg.pc) return
 
     const id = msg.pc
@@ -1088,7 +1093,7 @@ export class RoomClient {
     }
   }
 
-  private async handleChat(msg: WireMessage): Promise<void> {
+  private async handleChat(msg: ReceivedMessage): Promise<void> {
     if (!msg.iv || !msg.ct) return
 
     try {
@@ -1106,7 +1111,7 @@ export class RoomClient {
   }
 
   /** Decrypts a sealed JSON message; undefined when it cannot be opened. */
-  private async openSealed(msg: WireMessage): Promise<unknown> {
+  private async openSealed(msg: ReceivedMessage): Promise<unknown> {
     if (!msg.iv || !msg.ct) return undefined
     try {
       return JSON.parse(await decryptChat(this.opts.chatKey, { iv: msg.iv, ct: msg.ct })) as unknown

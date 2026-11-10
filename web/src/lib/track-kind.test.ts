@@ -2,9 +2,12 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  announcedKinds,
   AUDIO_KIND,
   CAMERA_KIND,
+  isAudioKind,
   isTileKind,
+  parseTrackKind,
   SCREEN_AUDIO_KIND,
   SCREEN_KIND,
   tileOf,
@@ -35,4 +38,45 @@ test('a microphone is heard in its camera’s tile and a share’s sound in the 
 
 test('a translated voice has no tile of its own', () => {
   assert.equal(tileOf(GERMAN_VOICE), null)
+})
+
+test('every kind reads off the wire as itself', () => {
+  for (const kind of [...OWN_KINDS, GERMAN_VOICE]) assert.equal(parseTrackKind(kind), kind)
+})
+
+test('what the server would refuse in an offer is no kind', () => {
+  for (const wire of ['video', 'Camera', 'translation-', 'translation', '', 7, null, undefined]) {
+    assert.equal(parseTrackKind(wire), null, `${String(wire)} was read as a kind`)
+  }
+})
+
+test('a translated voice cannot be published without a language', () => {
+  assert.throws(() => translationKind(''), /language/)
+})
+
+test('a microphone, a share’s sound and a translated voice are sounds, a camera and a screen are not', () => {
+  assert.deepEqual([...OWN_KINDS, GERMAN_VOICE].filter(isAudioKind), [AUDIO_KIND, SCREEN_AUDIO_KIND, GERMAN_VOICE])
+})
+
+test('an offer’s track list is read into the kind of each section', () => {
+  const { kinds, refused } = announcedKinds([
+    { mid: '0', kind: 'audio' },
+    { mid: '1', kind: 'camera' },
+    { mid: '2', kind: 'translation-de' },
+  ])
+  assert.deepEqual([...kinds], [['0', AUDIO_KIND], ['1', CAMERA_KIND], ['2', GERMAN_VOICE]])
+  assert.deepEqual(refused, [])
+})
+
+test('a section announced with no mid or no known kind is refused, and the rest are kept', () => {
+  const unknown = { mid: '1', kind: 'hologram' }
+  const unplaced = { kind: 'audio' }
+  const { kinds, refused } = announcedKinds([{ mid: '0', kind: 'audio' }, unknown, unplaced, 'camera', null])
+  assert.deepEqual([...kinds], [['0', AUDIO_KIND]])
+  assert.deepEqual(refused, [unknown, unplaced, 'camera', null])
+})
+
+test('an offer that sends nothing announces nothing, and a track list that is no list is refused whole', () => {
+  assert.deepEqual(announcedKinds(undefined), { kinds: new Map(), refused: [] })
+  assert.deepEqual(announcedKinds({ mid: '0', kind: 'audio' }), { kinds: new Map(), refused: [{ mid: '0', kind: 'audio' }] })
 })
