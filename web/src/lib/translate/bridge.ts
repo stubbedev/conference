@@ -11,40 +11,19 @@
 // Each speaker's voice stays its own track, which is also where a
 // speaker's own (cloned) voice would come in.
 
+import { Refusals } from '@/lib/sealed'
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import { MicCapture } from '@/lib/translate/capture'
-import type { CaptionLine, LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
+import type { LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
+import { packAudio, parseSpeechMessage, parseVoice } from '@/lib/translate/wire'
 
-const HEADER_BYTES = 2
+const SPEECH_SERVICE = 'the speech service'
 const MAX_REFUSED_CONNECTS = 3
 const RECONNECT_DELAY_MS = 2_000
 // How long start() waits for the token the server sends on its own before asking.
 const TOKEN_GRACE_MS = 1_500
-
-interface VoiceHeader {
-  lang: string
-  rate: number
-}
-
-function pack(header: object, pcm: ArrayBuffer): ArrayBuffer {
-  const json = new TextEncoder().encode(JSON.stringify(header))
-  const frame = new Uint8Array(HEADER_BYTES + json.length + pcm.byteLength)
-  new DataView(frame.buffer).setUint16(0, json.length)
-  frame.set(json, HEADER_BYTES)
-  frame.set(new Uint8Array(pcm), HEADER_BYTES + json.length)
-  return frame.buffer
-}
-
-function unpack(frame: ArrayBuffer): { header: VoiceHeader; pcm: Float32Array } {
-  const size = new DataView(frame).getUint16(0)
-  const header = JSON.parse(new TextDecoder().decode(new Uint8Array(frame, HEADER_BYTES, size))) as VoiceHeader
-  const samples = new Int16Array(frame.slice(HEADER_BYTES + size))
-  const pcm = new Float32Array(samples.length)
-  for (let i = 0; i < samples.length; i++) pcm[i] = samples[i] / 0x8000
-  return { header, pcm }
-}
 
 export class ServerTranslator implements Translator {
   private client: RoomClient | null = null
@@ -60,6 +39,7 @@ export class ServerTranslator implements Translator {
   private selfPrefs: LangPrefs
   private stopped = false
   private readonly events: TranslatorEvents
+  private readonly refusals = new Refusals((line, ...detail) => console.warn(`translate: ${line}`, ...detail))
 
   constructor(selfPrefs: LangPrefs, events: TranslatorEvents) {
     this.selfPrefs = selfPrefs
@@ -226,42 +206,42 @@ export class ServerTranslator implements Translator {
   private sendAudio(pcm: ArrayBuffer): void {
     const speaker = this.client?.memberId
     if (!speaker || this.speech?.readyState !== WebSocket.OPEN) return
-    this.speech.send(pack({ speaker, lang: this.selfPrefs.lang, voice: this.selfPrefs.voiceChoice }, pcm))
+    this.speech.send(packAudio({ speaker, lang: this.selfPrefs.lang, voice: this.selfPrefs.voiceChoice }, pcm))
   }
 
   private onSpeechText(data: string): void {
-    let message: { type?: string; code?: string } & Partial<CaptionLine>
-    try {
-      message = JSON.parse(data) as typeof message
-    } catch (err) {
-      console.warn('translate: a speech-service message that is not JSON', err)
-      return
-    }
-    if (message.type === 'notice' && message.code === 'translation-failed') {
-      this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
-      return
-    }
-    if (message.type !== 'caption') return
+    const client = this.client
+    if (!client) return
 
-    const caption: CaptionLine = {
-      k: 'caption',
-      speaker: message.speaker ?? '',
-      segId: message.segId ?? '',
-      sourceLang: message.sourceLang ?? '',
-      lang: message.lang ?? '',
-      text: message.text ?? '',
-      final: message.final ?? false,
+    const message = parseSpeechMessage(data, client.memberId)
+    if ('refused' in message) {
+      this.refusals.report('a message', SPEECH_SERVICE, message.refused)
+      return
     }
-    void this.client?.sendCaption(caption)
-    this.events.onCaption(caption)
+    switch (message.type) {
+      case 'ready':
+        return
+      case 'translation-failed':
+        this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
+        return
+      case 'caption':
+        void client.sendCaption(message.caption)
+        this.events.onCaption(message.caption)
+        return
+    }
   }
 
   private onVoice(frame: ArrayBuffer): void {
     const player = this.player
     if (!player) return
-    const { header, pcm } = unpack(frame)
-    if (pcm.length === 0) return
 
-    player.play(header.lang, pcm, header.rate)
+    const voice = parseVoice(frame)
+    if ('refused' in voice) {
+      this.refusals.report('a voice', SPEECH_SERVICE, voice.refused)
+      return
+    }
+    if (voice.pcm.length === 0) return
+
+    player.play(voice.lang, voice.pcm, voice.rate)
   }
 }

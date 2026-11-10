@@ -101,11 +101,11 @@ export const LABEL_MAX = 128
  */
 export const LINE_TEXT_MAX = 1000
 
-function isLabel(value: unknown): value is string {
+export function isLabel(value: unknown): value is string {
   return typeof value === 'string' && value !== '' && value.length <= LABEL_MAX
 }
 
-function noLabel(field: string): Refused {
+export function noLabel(field: string): Refused {
   return { refused: `its ${field} is not a name of 1 to ${LABEL_MAX} characters` }
 }
 
@@ -122,6 +122,15 @@ function parseLine(fields: Record<string, unknown>): Omit<CaptionLine, 'k'> | Re
   return { speaker, segId, sourceLang, lang, text, final }
 }
 
+/** parseCaption reads the fields of a caption, which only its speaker sends. */
+export function parseCaption(fields: Record<string, unknown>, sender: string): CaptionLine | Refused {
+  const line = parseLine(fields)
+  if ('refused' in line) return line
+  if (line.speaker !== sender) return { refused: 'it captions someone other than its sender' }
+
+  return { k: 'caption', ...line }
+}
+
 /**
  * parseRoomMessage reads what another member sealed for the room: every
  * field checked and nothing else kept, or the reason it is refused.
@@ -133,15 +142,11 @@ export function parseRoomMessage(value: unknown, sender: string, inCall: (member
   if (typeof value !== 'object' || value === null) return { refused: 'it is not an object' }
 
   const fields = value as Record<string, unknown>
-  if (fields.k !== 'caption' && fields.k !== 'translation') return { refused: 'it is neither a caption nor a translation' }
+  if (fields.k === 'caption') return parseCaption(fields, sender)
+  if (fields.k !== 'translation') return { refused: 'it is neither a caption nor a translation' }
 
   const line = parseLine(fields)
   if ('refused' in line) return line
-
-  if (fields.k === 'caption') {
-    if (line.speaker !== sender) return { refused: 'it captions someone other than its sender' }
-    return { k: 'caption', ...line }
-  }
 
   if (fields.by !== sender) return { refused: 'it names someone other than its sender as its translator' }
   if (!inCall(line.speaker)) return { refused: 'it translates someone who is not in the call' }
