@@ -7,7 +7,7 @@ default:
 
 # vet + test + lint + web build, lint and tests + go build + browser
 # smoke test (what ci.yml runs).
-check: vet test lint brand web web-lint web-test build e2e
+check: vet test lint brand web web-lint web-test build e2e e2e-share
 
 vet:
     go vet ./...
@@ -85,6 +85,14 @@ dev:
 # CHROME=/path/to/chrome) and ffmpeg.
 e2e:
     node web/e2e/smoke.mjs
+
+# A shared screen scrolled in bursts with still pauses between them,
+# presented from Chrome and from Firefox: every burst must play fluidly
+# after the screen sat still. Prints the share second by second. Needs
+# Chrome and Firefox on PATH (or CHROME= and FIREFOX=); `--skip-firefox`
+# measures Chrome alone.
+e2e-share *args:
+    node web/e2e/share-burst.mjs {{args}}
 
 # Regenerate the logo, favicon, touch icon and link-preview card in
 # web/public from web/brand (needs Inkscape, in the dev shell).

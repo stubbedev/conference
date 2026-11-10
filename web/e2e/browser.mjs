@@ -1,9 +1,10 @@
 // Browser harness shared by the smoke test and the production monitor:
 // headless Chromes with fake devices driven over the DevTools protocol,
-// a page hook that records peer connections and E2EE stats, and the
+// headless Firefoxes driven over WebDriver BiDi behind the same calls, a
+// page hook that records peer connections and E2EE stats, and the
 // assertions that a call really carries media.
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 
@@ -119,7 +120,237 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
   const { product } = await cdp.send('Browser.getVersion')
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' })
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
-  return { proc, cdp, sessionId, browser: product }
+  return {
+    proc,
+    cdp,
+    sessionId,
+    browser: product,
+    async addInitScript(source) {
+      await cdp.send('Page.enable', {}, sessionId)
+      await cdp.send('Runtime.enable', {}, sessionId)
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, sessionId)
+    },
+    async navigate(url) {
+      await cdp.send('Page.enable', {}, sessionId)
+      await cdp.send('Page.navigate', { url }, sessionId)
+    },
+    async evaluate(expression) {
+      const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId)
+      return r.result.value
+    },
+    async callFunction(fn, ...args) {
+      const global = await cdp.send('Runtime.evaluate', { expression: 'globalThis' }, sessionId)
+      const r = await cdp.send(
+        'Runtime.callFunctionOn',
+        {
+          functionDeclaration: fn.toString(),
+          objectId: global.result.objectId,
+          arguments: args.map((value) => ({ value })),
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        sessionId,
+      )
+      await cdp.send('Runtime.releaseObject', { objectId: global.result.objectId }, sessionId)
+      if (r.exceptionDetails) throw new Error(`${fn.name} threw: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`)
+      return r.result.value
+    },
+    // The send-side bandwidth estimate of the connection that sends ssrc,
+    // in bits per second; null when no connection sends it.
+    async outgoingEstimate(ssrc) {
+      return this.evaluate(`(async () => {
+        for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
+          const stats = [...(await pc.getStats()).values()]
+          if (!stats.some((r) => r.type === 'outbound-rtp' && r.ssrc === ${Number(ssrc)})) continue
+          return stats.find((r) => r.type === 'candidate-pair' && r.nominated && r.availableOutgoingBitrate)?.availableOutgoingBitrate ?? null
+        }
+        return null
+      })()`)
+    },
+  }
+}
+
+export const DEFAULT_FIREFOX = '/etc/profiles/per-user/stubbe/bin/firefox'
+
+export function findFirefox() {
+  for (const name of ['firefox', 'firefox-esr']) {
+    if (spawnSync('sh', ['-c', `command -v ${name}`]).status === 0) return name
+  }
+  throw new Error('no Firefox binary found; pass --firefox or set FIREFOX, or pass --skip-firefox to measure Chrome alone')
+}
+
+// WebDriver BiDi, which Firefox speaks natively now that it has dropped
+// CDP. Commands and events share one socket; events carry a method and
+// no id.
+class BiDi {
+  constructor(ws) {
+    this.ws = ws
+    this.id = 0
+    this.pending = new Map()
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data)
+      const waiter = msg.id && this.pending.get(msg.id)
+      if (!waiter) return
+      this.pending.delete(msg.id)
+      if (msg.type === 'error') waiter.reject(new Error(`${msg.error}: ${msg.message}`))
+      else waiter.resolve(msg.result)
+    }
+  }
+  send(method, params = {}) {
+    const id = ++this.id
+    return new Promise((resolvePromise, reject) => {
+      this.pending.set(id, { resolve: resolvePromise, reject })
+      this.ws.send(JSON.stringify({ id, method, params }))
+    })
+  }
+}
+
+function bidiEndpoint(proc, idx) {
+  return new Promise((resolveEndpoint, reject) => {
+    let stderr = ''
+    const settle = () => {
+      clearTimeout(timer)
+      proc.off('error', onError)
+      proc.off('exit', onExit)
+      proc.stderr.off('data', onData)
+      proc.stderr.resume()
+    }
+    const fail = (reason) => {
+      settle()
+      proc.kill('SIGKILL')
+      reject(new Error(`firefox ${idx} did not start: ${reason}\n${stderr}`))
+    }
+    const onError = (err) => fail(err.message)
+    const onExit = (code, signal) => fail(`exited with ${signal ?? `code ${code}`}`)
+    const onData = (chunk) => {
+      stderr += chunk
+      const match = /^WebDriver BiDi listening on (ws:\/\/\S+)$/m.exec(stderr)
+      if (!match) return
+      settle()
+      resolveEndpoint(`${match[1]}/session`)
+    }
+    const timer = setTimeout(() => fail(`no WebDriver BiDi endpoint within ${CHROME_START_TIMEOUT_MS} ms`), CHROME_START_TIMEOUT_MS)
+    proc.on('error', onError)
+    proc.on('exit', onExit)
+    proc.stderr.setEncoding('utf8')
+    proc.stderr.on('data', onData)
+  })
+}
+
+// Fake camera and microphone without a prompt, media that plays without
+// a gesture, silent speakers, and ICE over loopback, which Firefox leaves
+// out unless told to.
+const FIREFOX_PREFS = {
+  'media.navigator.streams.fake': true,
+  'media.navigator.permission.disabled': true,
+  'media.autoplay.default': 0,
+  'media.autoplay.blocking_policy': 0,
+  'media.volume_scale': '0.0',
+  'media.peerconnection.ice.loopback': true,
+  'media.peerconnection.ice.obfuscate_host_addresses': false,
+}
+
+function bidiValue(value) {
+  if (value === null) return { type: 'null' }
+  if (value === undefined) return { type: 'undefined' }
+  if (typeof value === 'string' || typeof value === 'boolean') return { type: typeof value, value }
+  if (typeof value === 'number') return { type: 'number', value }
+  throw new Error(`cannot pass ${typeof value} ${String(value)} to the page over WebDriver BiDi`)
+}
+
+// Results cross as JSON text, so a page value arrives as the same plain
+// data Chrome's returnByValue gives.
+function bidiResult(response, what) {
+  if (response.type === 'exception') return { thrown: `${what} threw: ${response.exceptionDetails.text}` }
+  const { result } = response
+  return { value: result.type === 'string' ? JSON.parse(result.value) : undefined }
+}
+
+export async function launchFirefox(firefox, idx, dir, { headless = true } = {}) {
+  const profile = mkdtempSync(join(dir, `firefox-${idx}-`))
+  writeFileSync(
+    join(profile, 'user.js'),
+    Object.entries(FIREFOX_PREFS)
+      .map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`)
+      .join('\n'),
+  )
+  const proc = spawn(
+    firefox,
+    [
+      ...(headless ? ['--headless'] : []),
+      '--no-remote',
+      '--profile',
+      profile,
+      '--remote-debugging-port=0',
+      '--remote-allow-system-access',
+      '--width=1200',
+      '--height=900',
+      'about:blank',
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: '1' } },
+  )
+  const ws = new WebSocket(await bidiEndpoint(proc, idx))
+  await new Promise((r, reject) => {
+    ws.onopen = r
+    ws.onerror = reject
+  })
+  const bidi = new BiDi(ws)
+  const { capabilities } = await bidi.send('session.new', { capabilities: {} })
+  const { contexts } = await bidi.send('browsingContext.getTree', {})
+  const target = { context: contexts[0].context }
+  const { contexts: windows } = await bidi.send('browsingContext.getTree', { 'moz:scope': 'chrome' })
+  const browserWindow = { context: windows[0].context }
+  return {
+    proc,
+    bidi,
+    browser: `${capabilities.browserName}/${capabilities.browserVersion}`,
+    async addInitScript(source) {
+      await bidi.send('script.addPreloadScript', { functionDeclaration: `() => { ${source} }` })
+    },
+    async navigate(url) {
+      await bidi.send('browsingContext.navigate', { context: target.context, url, wait: 'interactive' })
+    },
+    async evaluate(expression) {
+      const response = await bidi.send('script.evaluate', {
+        expression: `(async () => JSON.stringify(await (${expression})))()`,
+        target,
+        awaitPromise: true,
+        resultOwnership: 'none',
+      })
+      return bidiResult(response, 'expression').value
+    },
+    async callFunction(fn, ...args) {
+      const response = await bidi.send('script.callFunction', {
+        functionDeclaration: `async (...args) => JSON.stringify(await (${fn.toString()})(...args))`,
+        arguments: args.map(bidiValue),
+        target,
+        awaitPromise: true,
+        resultOwnership: 'none',
+      })
+      const { thrown, value } = bidiResult(response, fn.name)
+      if (thrown) throw new Error(thrown)
+      return value
+    },
+    // Firefox keeps its bandwidth estimate out of getStats; about:webrtc
+    // reads it from the browser's own window, which system access opens
+    // to the test. Despite its name, sendBandwidthBps counts bytes: an
+    // idle connection reads 37500, libwebrtc's 300 kbps starting rate.
+    async outgoingEstimate(ssrc) {
+      const response = await bidi.send('script.evaluate', {
+        expression: `new Promise((done) => WebrtcGlobalInformation.getAllStats((all) => {
+          const report = all.reports.find((r) => r.outboundRtpStreamStats.some((s) => s.ssrc === ${Number(ssrc)}))
+          const bytes = report?.bandwidthEstimations[0]?.sendBandwidthBps
+          done(JSON.stringify(bytes === undefined ? null : bytes * 8))
+        }))`,
+        target: browserWindow,
+        awaitPromise: true,
+        resultOwnership: 'none',
+      })
+      const { thrown, value } = bidiResult(response, 'the bandwidth estimate')
+      if (thrown) throw new Error(thrown)
+      return value
+    },
+  }
 }
 
 // Injected before the app loads: records peer connections, the E2EE
@@ -269,26 +500,15 @@ async function waitJoined(browser) {
 // Joining waits for the camera preview, so the call starts with media, and
 // returns once the server has welcomed the member into the call.
 export async function joinRoom(browser, url, relayTransport = null, beforeJoin = null) {
-  const s = browser.sessionId
-  await browser.cdp.send('Page.enable', {}, s)
-  await browser.cdp.send('Runtime.enable', {}, s)
-  await browser.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook(relayTransport) }, s)
-  await browser.cdp.send('Page.navigate', { url }, s)
+  await browser.addInitScript(hook(relayTransport))
+  await browser.navigate(url)
   if (beforeJoin) {
     const ready = `Boolean(${joinButton('Join call')}) && ${previewLive}`
     for (let t = 0; t < 80 && !(await evalJs(browser, ready)); t++) await sleep(250)
     await beforeJoin(browser)
   }
   for (let t = 0; t < 80; t++) {
-    const r = await browser.cdp.send(
-      'Runtime.evaluate',
-      {
-        expression: `${previewLive} && ${clickJoin('Join call')}`,
-        returnByValue: true,
-      },
-      s,
-    )
-    if (r.result.value === true) {
+    if ((await evalJs(browser, `${previewLive} && ${clickJoin('Join call')}`)) === true) {
       await waitJoined(browser)
       return
     }
@@ -297,31 +517,15 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
   throw new Error('Join call button never became clickable')
 }
 
-export async function evalJs(browser, expression) {
-  const r = await browser.cdp.send(
-    'Runtime.evaluate',
-    { expression, returnByValue: true, awaitPromise: true },
-    browser.sessionId,
-  )
-  return r.result.value
+// Both browsers answer the same calls (see launchChrome and launchFirefox):
+// an expression or a function evaluated in the page, awaited, and its
+// result handed back as plain data.
+export function evalJs(browser, expression) {
+  return browser.evaluate(expression)
 }
 
-export async function callJs(browser, fn, ...args) {
-  const global = await browser.cdp.send('Runtime.evaluate', { expression: 'globalThis' }, browser.sessionId)
-  const r = await browser.cdp.send(
-    'Runtime.callFunctionOn',
-    {
-      functionDeclaration: fn.toString(),
-      objectId: global.result.objectId,
-      arguments: args.map((value) => ({ value })),
-      returnByValue: true,
-      awaitPromise: true,
-    },
-    browser.sessionId,
-  )
-  await browser.cdp.send('Runtime.releaseObject', { objectId: global.result.objectId }, browser.sessionId)
-  if (r.exceptionDetails) throw new Error(`${fn.name} threw: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`)
-  return r.result.value
+export function callJs(browser, fn, ...args) {
+  return browser.callFunction(fn, ...args)
 }
 
 export async function waitFor(browser, expression, predicate, timeoutMs) {
@@ -335,12 +539,7 @@ export async function waitFor(browser, expression, predicate, timeoutMs) {
 }
 
 export async function sample(browser) {
-  const r = await browser.cdp.send(
-    'Runtime.evaluate',
-    { expression: probe, awaitPromise: true, returnByValue: true },
-    browser.sessionId,
-  )
-  return JSON.parse(r.result.value)
+  return JSON.parse(await evalJs(browser, probe))
 }
 
 export function check(failures, label, condition, detail) {

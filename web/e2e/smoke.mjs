@@ -15,12 +15,10 @@
 // UDP, one over TCP) via the machine's LAN address, since Chrome does
 // not relay TURN/UDP to loopback. Exit code 0 means every assertion
 // held on every browser.
-import { spawn, spawnSync } from 'node:child_process'
-import { createSocket } from 'node:dgram'
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { networkInterfaces, tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join, resolve } from 'node:path'
 
 import {
   callJs,
@@ -39,8 +37,19 @@ import {
   stopProcess,
   waitFor,
 } from './browser.mjs'
-
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
+import {
+  clickButtonByTitle,
+  fakeDisplay,
+  remoteScreen,
+  screenSent,
+  SHARE_WIDTH,
+  shareMode,
+  shareReceiveCounters,
+  shareSendCounters,
+  tileByLabel,
+  uploads,
+} from './share.mjs'
 
 const args = parseArgs(process.argv.slice(2))
 const seconds = Number(args.seconds ?? 8)
@@ -48,99 +57,12 @@ const stagger = Number(args.stagger ?? 500)
 const chromeBinary = args.chrome ?? process.env.CHROME ?? findChrome()
 const launch = (idx, dir, extraArgs) => launchChrome(chromeBinary, idx, dir, extraArgs)
 
-function parseArgs(argv) {
-  const out = {}
-  for (let i = 0; i < argv.length; i++) {
-    const key = argv[i]
-    if (!key.startsWith('--')) continue
-    out[key.slice(2)] = argv[i + 1]
-    i++
-  }
-  return out
-}
-
-function freeUdpPort() {
-  return new Promise((resolvePort, reject) => {
-    const sock = createSocket('udp4')
-    sock.on('error', reject)
-    sock.bind(0, () => {
-      const { port } = sock.address()
-      sock.close(() => resolvePort(port))
-    })
-  })
-}
-
-function buildServer(dir) {
-  const bin = join(dir, 'server')
-  const res = spawnSync('go', ['build', '-race', '-o', bin, './cmd/server'], {
-    cwd: repoRoot,
-    stdio: 'inherit',
-    env: { ...process.env, CGO_ENABLED: '1' },
-  })
-  if (res.status !== 0) throw new Error('go build failed')
-  return bin
-}
-
-async function serverEnv(dir, port) {
-  return {
-    ...process.env,
-    PORT: String(port),
-    ICE_UDP_PORT: String(await freeUdpPort()),
-    TURN_PORT: String(await freePort()),
-    DB_PATH: join(dir, 'smoke.db'),
-    SPEECH_ENGINES: 'real',
-    TRANSLATE_MODEL: '',
-    GORACE: 'halt_on_error=1',
-  }
-}
-
-async function startServer(bin, env) {
-  const port = env.PORT
-  const proc = spawn(bin, [], {
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let log = ''
-  proc.stdout.on('data', (d) => (log += d))
-  proc.stderr.on('data', (d) => (log += d))
-  for (let i = 0; i < 50; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/config`)
-      if (res.ok) return { proc, log: () => log }
-    } catch {
-      // not up yet
-    }
-    await sleep(200)
-  }
-  proc.kill('SIGKILL')
-  throw new Error(`server did not start:\n${log}`)
-}
-
 function lanAddress() {
   for (const addrs of Object.values(networkInterfaces())) {
     const lan = addrs?.find((a) => a.family === 'IPv4' && !a.internal)
     if (lan) return lan.address
   }
   throw new Error('no non-loopback IPv4 address: Chrome only relays TURN/UDP to a routable host')
-}
-
-// A control is a button on the bar or an item in its "More options"
-// menu, which Radix opens on pointerdown rather than click.
-function clickButtonByLabel(label) {
-  const find = () => [...document.querySelectorAll('button, [role="menuitem"]')].find((b) => b.getAttribute('aria-label') === label)
-  let control = find()
-  if (!control) {
-    const more = document.querySelector('button[aria-label="More options"]')
-    if (!more || more.getAttribute('aria-expanded') === 'true') return false
-    more.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }))
-    control = find()
-  }
-  if (!control) {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-    return false
-  }
-  control.click()
-  return true
 }
 
 async function controlPresent(label) {
@@ -153,15 +75,6 @@ async function controlPresent(label) {
   const present = find()
   document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   return present
-}
-
-async function clickButtonByTitle(browser, label) {
-  for (let t = 0; t < 20; t++) {
-    const clicked = await callJs(browser, clickButtonByLabel, label)
-    if (clicked) return true
-    await sleep(250)
-  }
-  return false
 }
 
 // Chrome's fake microphone beeps at about -10 dB; silence is below -60.
@@ -548,71 +461,6 @@ async function checkSimulcast(failures, publisher, viewer) {
   check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, not a layer above ${filmstrip.value}px`)
 }
 
-const SHARE_WIDTH = 1600
-const SHARE_HEIGHT = 900
-
-// Headless Chrome has no screen to pick, so the share is a canvas of
-// changing text handed out where getDisplayMedia would hand out a screen;
-// everything after the picker is the call's own path.
-const fakeDisplay = `(() => {
-  navigator.mediaDevices.getDisplayMedia = async () => {
-    const canvas = document.createElement('canvas')
-    canvas.width = ${SHARE_WIDTH}
-    canvas.height = ${SHARE_HEIGHT}
-    const ctx = canvas.getContext('2d')
-    let frame = 0
-    const draw = () => {
-      if (window.__shareStill) return
-      ctx.fillStyle = '#fff'
-      ctx.fillRect(0, 0, canvas.width, canvas.height)
-      ctx.fillStyle = '#000'
-      ctx.font = '14px monospace'
-      for (let line = 0; line < 60; line++) ctx.fillText('line ' + line + ' frame ' + frame + ' the quick brown fox jumps over the lazy dog', 10, 14 * (line + 1))
-      frame++
-    }
-    draw()
-    setInterval(draw, 16)
-    return canvas.captureStream(60)
-  }
-  return true
-})()`
-
-const screenSent = `
-(async () => {
-  const pc = window.__pcs.find((pc) => pc.signalingState !== 'closed' && pc.getTransceivers().some((t) => t.sender.track?.contentHint === 'detail'))
-  if (!pc) return null
-  const mid = pc.getTransceivers().find((t) => t.sender.track?.contentHint === 'detail').mid
-  const layers = {}
-  let available = 0
-  const stats = await pc.getStats()
-  for (const r of stats.values()) {
-    if (r.type === 'outbound-rtp' && r.mid === mid && r.rid) layers[r.rid] = { bytes: r.bytesSent || 0, frames: r.framesEncoded || 0, width: r.frameWidth || 0, fps: r.framesPerSecond || 0, target: r.targetBitrate || 0, limit: r.qualityLimitationReason, codec: stats.get(r.codecId)?.mimeType ?? '' }
-    if (r.type === 'candidate-pair' && r.nominated && r.availableOutgoingBitrate) available = r.availableOutgoingBitrate
-  }
-  return { layers, available, twcc: /transport-cc/.test(pc.remoteDescription?.sdp ?? '') }
-})()
-`
-
-// The publisher's open uploads, the share's apart from the camera's, and
-// whether the server answered each with transport-wide congestion control.
-const uploads = `
-window.__pcs
-  .filter((pc) => pc.signalingState !== 'closed' && pc.getSenders().some((s) => s.track))
-  .map((pc) => ({ share: pc.getSenders().some((s) => s.track?.contentHint === 'detail'), twcc: /transport-cc/.test(pc.remoteDescription?.sdp ?? '') }))
-`
-
-function tileByLabel(suffix) {
-  return [...document.querySelectorAll('.group')].find((g) => g.querySelector('.hud-label')?.textContent.trim().endsWith(suffix))
-}
-
-const remoteScreen = `
-(() => {
-  const tile = (${tileByLabel.toString()})('screen')
-  const video = tile?.querySelector('video')
-  return video ? { width: video.videoWidth, frames: video.getVideoPlaybackQuality().totalVideoFrames } : null
-})()
-`
-
 function clickTilePin(suffix, label) {
   const tile = [...document.querySelectorAll('.group')].find((g) => g.querySelector('.hud-label')?.textContent.trim().endsWith(suffix))
   const button = tile && [...tile.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label)
@@ -633,36 +481,6 @@ async function remoteScreenFps(viewer) {
 
 const SHARE_SETTLE_MS = 20000
 
-const shareReceiveCounters = `
-(async () => {
-  const tile = (${tileByLabel.toString()})('screen')
-  const trackId = tile?.querySelector('video')?.srcObject?.getVideoTracks()[0]?.id
-  for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
-    for (const r of (await pc.getStats()).values()) {
-      if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
-        return { decoded: r.framesDecoded || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
-      }
-    }
-  }
-  return null
-})()
-`
-
-const shareSendCounters = `
-(async () => {
-  const pc = window.__pcs.find((pc) => pc.signalingState !== 'closed' && pc.getTransceivers().some((t) => t.sender.track?.contentHint === 'detail'))
-  if (!pc) return null
-  const mid = pc.getTransceivers().find((t) => t.sender.track?.contentHint === 'detail').mid
-  const layers = {}
-  let available = 0
-  for (const r of (await pc.getStats()).values()) {
-    if (r.type === 'outbound-rtp' && r.mid === mid && r.rid) layers[r.rid] = { encoded: r.framesEncoded || 0, keyframes: r.keyFramesEncoded || 0, plis: r.pliCount || 0, firs: r.firCount || 0, limit: r.qualityLimitationReason, bytes: r.bytesSent || 0, target: r.targetBitrate || 0 }
-    if (r.type === 'candidate-pair' && r.nominated && r.availableOutgoingBitrate) available = r.availableOutgoingBitrate
-  }
-  return { layers, available }
-})()
-`
-
 const TIMELINE_SECONDS = 20
 
 async function shareTimeline(publisher, viewer) {
@@ -670,6 +488,7 @@ async function shareTimeline(publisher, viewer) {
   let previous = null
   for (let second = 0; second <= TIMELINE_SECONDS; second++) {
     const [recv, send] = await Promise.all([evalJs(viewer, shareReceiveCounters), evalJs(publisher, shareSendCounters)])
+    const estimate = send?.layers.h ? await publisher.outgoingEstimate(send.layers.h.ssrc) : null
     const sample = { recv, send }
     if (previous?.recv && recv) {
       const h = send?.layers.h ?? {}
@@ -680,7 +499,7 @@ async function shareTimeline(publisher, viewer) {
         `  t=${second}s viewer: ${recv.decoded - previous.recv.decoded} fps, +${recv.keyframes - previous.recv.keyframes} key, +${recv.freezes - previous.recv.freezes} freeze (${recv.frozenMs - previous.recv.frozenMs} ms), +${recv.plis - previous.recv.plis} pli, +${recv.lost - previous.recv.lost} lost, ${recv.width}px` +
           ` | presenter h: ${(h.encoded ?? 0) - (ph.encoded ?? 0)} fps, +${(h.keyframes ?? 0) - (ph.keyframes ?? 0)} key, +${(h.plis ?? 0) - (ph.plis ?? 0)} pli, ${(((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8 / 1e6).toFixed(1)} Mbps (target ${((h.target ?? 0) / 1e6).toFixed(1)}), ${h.limit}` +
           ` l: +${(l.keyframes ?? 0) - (pl.keyframes ?? 0)} key, +${(l.plis ?? 0) - (pl.plis ?? 0)} pli` +
-          ` | share estimate ${((send?.available ?? 0) / 1e6).toFixed(1)} Mbps`,
+          ` | share estimate ${((estimate ?? 0) / 1e6).toFixed(1)} Mbps`,
       )
     }
     samples.push(sample)
@@ -767,7 +586,7 @@ async function checkScreenShare(failures, publisher, viewer) {
   console.log(`screen share pinned again: ${back.width}px at ${back.fps.toFixed(1)} fps`)
   check(failures, 'screen share', back.fps >= FLUID_SHARE_MIN_FPS, `the share pinned again plays at ${back.fps.toFixed(1)} fps, not the fluid encoding`)
 
-  await evalJs(publisher, 'window.__shareStill = true')
+  await evalJs(publisher, shareMode('still'))
   await sleep(STILL_SETTLE_MS)
   const stillFrom = await evalJs(viewer, shareReceiveCounters)
   await sleep(STILL_WINDOW_MS)
@@ -810,7 +629,7 @@ async function main() {
   const procs = []
   const failures = []
   try {
-    const bin = args.server ? resolve(args.server) : buildServer(dir)
+    const bin = args.server ? resolve(args.server) : buildServer(dir, { race: true })
     const port = await freePort()
     const env = await serverEnv(dir, port)
     let server = await startServer(bin, env)
