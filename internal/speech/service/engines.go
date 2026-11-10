@@ -25,6 +25,7 @@ const (
 	contextSentences  = 3
 	maxResponseBytes  = 32 << 20
 	fakeToneSeconds   = 0.4
+	warmUpSamples     = vad.Rate / 2
 	fakeToneHz        = 440
 	fakeOwnToneHz     = 660
 	fakeToneLevel     = 0.2
@@ -353,6 +354,30 @@ func (e *httpEngines) converted(ctx context.Context, samples []int16, rate uint3
 	converted.converting = time.Since(started)
 
 	return converted, nil
+}
+
+// voiceWarmer is a voice engine that can get a speaker's own voice ready
+// before their first sentence.
+type voiceWarmer interface {
+	warmVoice(ctx context.Context, own *reference) error
+}
+
+// warmVoice has the conversion engine load its model and prepare the
+// speaker's voice with a short silence, so the first sentence in their
+// voice doesn't wait for either.
+func (e *httpEngines) warmVoice(ctx context.Context, own *reference) error {
+	if e.settings.conversion == nil {
+		return nil
+	}
+
+	silence, err := wav.Encode(make([]int16, warmUpSamples), vad.Rate)
+	if err != nil {
+		return fmt.Errorf("%s: encode the warm-up: %w", conversion, err)
+	}
+
+	_, err = e.convert(ctx, silence, own)
+
+	return err
 }
 
 // convert turns a stock voice WAV into the speaker's own voice.

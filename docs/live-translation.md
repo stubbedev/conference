@@ -212,7 +212,10 @@ German sentence without it comes out garbled.
   for every sentence, which saved 0.3–0.4 s per sentence on an M1 Max and
   brought a conversion to about 0.7 s. Like the cloning cache, it lives
   only in memory and goes with `--idle-unload-ms`. If a conversion fails,
-  the listener hears the stock voice already made for it.
+  the listener hears the stock voice already made for it. As soon as a
+  recording is accepted, the service has the conversion engine load its
+  model and prepare that voice (with half a second of silence), so the
+  speaker's first sentence doesn't wait for either.
 
 **Voices only where someone listens.** Each speaker's browser tells the
 service which languages someone wants a translated voice in; others get

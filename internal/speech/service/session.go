@@ -249,8 +249,16 @@ func (s *session) prepare(ctx context.Context, current *speaker, audio []int16, 
 		return
 	}
 
-	current.prepared.Store(&reference{wav: encoded, text: text})
+	prepared := &reference{wav: encoded, text: text}
+	current.prepared.Store(prepared)
 	s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceReady, Seconds: seconds(len(audio))})
+
+	if warmer, ok := s.engines.(voiceWarmer); ok {
+		err = warmer.warmVoice(ctx, prepared)
+		if err != nil {
+			logFailure(ctx, "own voice warm-up", err)
+		}
+	}
 }
 
 // forgetVoice drops the speaker's own voice from this session at once:

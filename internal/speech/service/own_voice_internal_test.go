@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stubbe/conference/internal/speech/vad"
 	"github.com/stubbe/conference/internal/speech/wav"
@@ -508,5 +509,48 @@ func TestConversionGetsAWellFormedWAV(t *testing.T) {
 
 	if !bytes.Equal(sent, want) {
 		t.Fatalf("the converter got % x, want a WAV with its real sizes % x", sent, want)
+	}
+}
+
+func TestConversionEngineIsWarmedWhenTheRecordingIsReady(t *testing.T) {
+	t.Parallel()
+
+	api, seen := fakeAPI(t)
+	settings := convertingSettings(t, api, api.URL+"/v1")
+	out := newOutbox()
+
+	opened, err := newSession(t.Context(), settings, newHTTPEngines(settings), anna, out.send)
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	t.Cleanup(opened.close)
+	sendSample(t, opened, 8)
+	out.waitFor(t, noticeOf(wire.NoticeOwnVoiceReady))
+
+	silence, err := wav.Encode(make([]int16, warmUpSamples), vad.Rate)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	recorded := opened.speaker.prepared.Load()
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for {
+		seen.mu.Lock()
+		got := seen.convert
+		seen.mu.Unlock()
+
+		if got.Request.Audio == base64.StdEncoding.EncodeToString(silence) &&
+			got.Request.VoiceRef.Data == base64.StdEncoding.EncodeToString(recorded.wav) {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("no warm-up with the recorded voice reached the conversion engine: %+v", got.Request.VoiceRef.Type)
+		}
+
+		time.Sleep(10 * time.Millisecond)
 	}
 }
