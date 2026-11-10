@@ -621,20 +621,12 @@ export async function createMicPipeline(rawTrack: MediaStreamTrack, gain: number
         const oldSource = source
         source = nextSource
         source.connect(gate)
-        try {
-          oldSource.disconnect()
-        } catch {
-          // already detached
-        }
+        oldSource.disconnect()
         input.stop()
         input = next
       },
       dispose() {
-        try {
-          source.disconnect()
-        } catch {
-          // already detached
-        }
+        source.disconnect()
         gate.disconnect()
         gainNode.disconnect()
         input.stop()
