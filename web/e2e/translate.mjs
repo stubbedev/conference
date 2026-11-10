@@ -23,7 +23,9 @@
 // SPEECH_RUNTIME=browser runs the same test against the browsers' own
 // engines, on the same stand-ins: no audio leaves either browser, the
 // subtitles and the tone come from the code that runs the models. There
-// the test breaks the host's transcription and mends it again.
+// the test breaks the host's transcription and mends it again, and lets
+// a third member join whose language already has a translator, to see
+// that member named under the caption.
 //
 // Needs Chrome (CHROME=…) and Go, which builds the server.
 //
@@ -109,11 +111,17 @@ function preset(browser, lang, name) {
   )
 }
 
-// The tile whose name tag reads `name`, as [caption text, audio volume].
+// The tile whose name tag reads `name`: its caption, who is named under
+// it as the translator, and the volume of the member's own voice.
 const tileState = (name) => `(() => {
-  const tile = [...document.querySelectorAll('.hud-tile')].find((t) => t.innerText.toLowerCase().includes(${JSON.stringify(name.toLowerCase())}))
+  const named = (tile) => tile.querySelector('.hud-label')?.innerText.toLowerCase().includes(${JSON.stringify(name.toLowerCase())})
+  const tile = [...document.querySelectorAll('.hud-tile')].find(named)
   if (!tile) return null
-  return { caption: tile.querySelector('p.line-clamp-3')?.textContent ?? '', volume: tile.querySelector('audio')?.volume ?? null }
+  return {
+    caption: tile.querySelector('p.line-clamp-3')?.textContent ?? '',
+    by: tile.querySelector('.hud-caption p + p')?.textContent ?? '',
+    volume: tile.querySelector('audio')?.volume ?? null,
+  }
 })()`
 
 // Audio elements outside the tiles: the translated voice.
@@ -230,6 +238,8 @@ async function main() {
 
   const guestSees = await waitFor(guest, tileState('Hana'), (tile) => tile?.caption.startsWith('[de] en utterance'), TIMEOUT_MS)
   check('guest subtitles', guestSees.ok, `no German subtitle on the host's tile: ${JSON.stringify(guestSees.value)}`)
+  // The speaker's own bridge, or the guest's own engines, translated it.
+  check('no translator to name', guestSees.value?.by === '', `a translator is named under a caption no other member translated: ${JSON.stringify(guestSees.value)}`)
 
   const hostSees = await waitFor(host, tileState('Gerd'), (tile) => tile?.caption.startsWith('[en] de utterance'), TIMEOUT_MS)
   check('host subtitles', hostSees.ok, `no English subtitle on the guest's tile: ${JSON.stringify(hostSees.value)}`)
@@ -285,6 +295,30 @@ async function main() {
     check('own voice again', ownAgain.ok, `the guest does not hear the host's own voice after the host's translator stopped: ${JSON.stringify(ownAgain.value)}`)
     console.log(`after the host's translator stopped, guest hears: ${JSON.stringify(ownAgain.value)}`)
   } else {
+    // A second English speaker joins: one of the two translates the
+    // guest's German for both, and the other is shown who did.
+    const emil = await launchChrome(chrome, 4, dir, [`--use-file-for-fake-audio-capture=${join(fixtures, 'english.wav')}`, '--mute-audio'])
+    procs.push(emil.proc)
+    await preset(emil, 'en', 'Emil')
+    await joinRoom(emil, room.url)
+    const readers = { Hana: host, Emil: emil }
+    let named = null
+    for (let waited = 0; waited < TIMEOUT_MS && !named; waited += 500) {
+      for (const [reader, browser] of Object.entries(readers)) {
+        const tile = await evalJs(browser, tileState('Gerd'))
+        if (tile?.by) named = { reader, ...tile }
+      }
+      if (!named) await sleep(500)
+    }
+    const translator = named?.reader === 'Hana' ? 'Emil' : 'Hana'
+    check(
+      'translator named',
+      named?.by === `Translated by ${translator}` && named.caption.startsWith('[en] de utterance'),
+      `neither English speaker is shown that the other translated the guest: ${JSON.stringify(named)}`,
+    )
+    console.log(`a caption another member translated: ${JSON.stringify(named)}`)
+    await stopProcess(emil.proc)
+
     // The host's transcription breaks mid-call. The voice the guest's
     // own engines made of the host has nothing more to say, so the guest
     // must hear the host's own voice, and the translation again once the
