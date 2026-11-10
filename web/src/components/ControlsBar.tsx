@@ -90,6 +90,8 @@ export const ControlsBar = memo(function ControlsBar({
   children,
 }: ControlsBarProps) {
   const translateLabel = translating ? 'Stop live translation' : 'Start live translation'
+  const shareLabel = sharing ? 'Stop sharing' : 'Share your screen'
+  const recordLabel = recording ? 'Stop recording' : 'Record the call'
   const [revealed, setRevealed] = useState(true)
   const visible = !fullscreen || revealed
   const hideTimer = useRef<number | undefined>(undefined)
@@ -134,29 +136,28 @@ export const ControlsBar = memo(function ControlsBar({
         </span>
         <span className="hidden h-4 w-px shrink-0 bg-border sm:inline" />
         <span className="hidden min-w-0 truncate font-medium md:inline">{roomName}</span>
-        {canRecord && onRecord && recording && (
-          <Hint label="Stop recording">
+        {canRecord && onRecord && (
+          <Hint label={recordLabel}>
             <Button
-              variant="destructive"
-              className="h-9 shrink-0 gap-1.5 rounded-full px-3 text-xs font-semibold pointer-coarse:h-11"
+              variant={recording ? 'destructive' : 'ghost'}
+              className={cn(
+                'h-9 shrink-0 rounded-full px-3 pointer-coarse:h-11',
+                recording ? 'gap-1.5 text-xs font-semibold' : 'gap-2',
+              )}
               onClick={onRecord}
-              aria-label="Stop recording"
+              aria-label={recordLabel}
             >
-              <span className="size-2 animate-pulse rounded-full bg-white" />
-              REC
-            </Button>
-          </Hint>
-        )}
-        {canRecord && onRecord && !recording && (
-          <Hint label="Record the call">
-            <Button
-              variant="ghost"
-              className="h-9 shrink-0 gap-2 rounded-full px-3 pointer-coarse:h-11"
-              onClick={onRecord}
-              aria-label="Record the call"
-            >
-              <Circle className="fill-destructive text-destructive" />
-              <span className="hidden lg:inline">Record</span>
+              {recording ? (
+                <>
+                  <span className="size-2 animate-pulse rounded-full bg-white" />
+                  REC
+                </>
+              ) : (
+                <>
+                  <Circle className="fill-destructive text-destructive" />
+                  <span className="hidden lg:inline">Record</span>
+                </>
+              )}
             </Button>
           </Hint>
         )}
@@ -166,13 +167,13 @@ export const ControlsBar = memo(function ControlsBar({
         <DeviceToggle kind="mic" on={mic} available={micAvailable} onToggle={onMic} withShortcut className={ROUND} />
         <DeviceToggle kind="cam" on={cam} available={camAvailable} onToggle={onCam} withShortcut className={ROUND} />
         {canShare && (
-          <Hint label={sharing ? 'Stop sharing' : 'Share your screen'}>
+          <Hint label={shareLabel}>
             <Button
               variant={sharing ? 'default' : 'secondary'}
               size="icon"
               className={cn(ROUND, 'hidden sm:inline-flex')}
               onClick={onShare}
-              aria-label={sharing ? 'Stop sharing' : 'Share your screen'}
+              aria-label={shareLabel}
             >
               {sharing ? <MonitorX /> : <MonitorUp />}
             </Button>
@@ -202,9 +203,9 @@ export const ControlsBar = memo(function ControlsBar({
           </Hint>
           <DropdownMenuContent side="top" align="center">
             {canShare && (
-              <DropdownMenuItem className="sm:hidden" onSelect={onShare} aria-label={sharing ? 'Stop sharing' : 'Share your screen'}>
+              <DropdownMenuItem className="sm:hidden" onSelect={onShare} aria-label={shareLabel}>
                 {sharing ? <MonitorX /> : <MonitorUp />}
-                {sharing ? 'Stop sharing' : 'Share your screen'}
+                {shareLabel}
               </DropdownMenuItem>
             )}
             {canBlur && onBlur && (

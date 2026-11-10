@@ -617,6 +617,125 @@ async function checkPinRoundTrip(failures, label, browser) {
   check(failures, label, unpinned.unpinButtons === 0, `expected no pinned tile after unpinning, found ${unpinned.unpinButtons}`)
 }
 
+// Real pointer and key input, so the tooltips see the event sequence a
+// person produces: boundary events, focus on press, focus handed back.
+function pointerAt(browser, type, { x, y }, button = 'none') {
+  return browser.cdp.send('Input.dispatchMouseEvent', { type, x, y, button, clickCount: button === 'none' ? 0 : 1 }, browser.sessionId)
+}
+
+async function glide(browser, from, to) {
+  const steps = 8
+  for (let i = 1; i <= steps; i++) {
+    await pointerAt(browser, 'mouseMoved', { x: from.x + ((to.x - from.x) * i) / steps, y: from.y + ((to.y - from.y) * i) / steps })
+  }
+}
+
+async function press(browser, at) {
+  await pointerAt(browser, 'mousePressed', at, 'left')
+  await pointerAt(browser, 'mouseReleased', at, 'left')
+}
+
+async function pressKey(browser, key, code, keyCode) {
+  for (const type of ['keyDown', 'keyUp']) {
+    await browser.cdp.send('Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode: keyCode }, browser.sessionId)
+  }
+}
+
+// The middle of each call-bar control, left to right, and a point on the
+// bar's own padding that nothing reacts to.
+function callBarLayout() {
+  const bar = document.querySelector('footer').getBoundingClientRect()
+  const centre = (el) => {
+    const r = el.getBoundingClientRect()
+    return { label: el.getAttribute('aria-label'), x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  }
+  return {
+    controls: [...document.querySelectorAll('footer button[aria-label]')].filter((b) => b.getClientRects().length > 0).map(centre),
+    idle: { x: bar.x + 4, y: bar.y + 4 },
+    below: { x: bar.x + bar.width / 2, y: window.innerHeight + 40 },
+  }
+}
+
+const tooltips = `[...document.querySelectorAll('[data-slot="tooltip-content"]')].map((t) => ({ state: t.dataset.state, text: t.textContent }))`
+const TOOLTIP_WAIT_MS = 2000
+
+async function checkTooltips(failures, browser) {
+  const label = 'tooltips'
+  const { controls, idle, below } = await callJs(browser, callBarLayout)
+  const mic = controls.find((c) => c.label === 'Mute microphone')
+  check(failures, label, mic, `no microphone toggle among the call bar controls: ${JSON.stringify(controls)}`)
+  if (!mic) return
+  const shown = async (what) => {
+    const open = await waitFor(browser, tooltips, (all) => all.some((t) => t.state !== 'closed'), TOOLTIP_WAIT_MS)
+    check(failures, label, open.ok, `${what} showed no tooltip`)
+    return open.value.filter((t) => t.state !== 'closed')
+  }
+  const closed = async (what) => {
+    const gone = await waitFor(browser, tooltips, (all) => all.length === 0, TOOLTIP_WAIT_MS)
+    check(failures, label, gone.ok, `${what}, tooltips stayed open: ${JSON.stringify(gone.value)}`)
+  }
+
+  await pointerAt(browser, 'mouseMoved', idle)
+  let from = idle
+  for (const control of controls) {
+    await glide(browser, from, control)
+    from = control
+    const open = await shown(`hovering "${control.label}"`)
+    check(failures, label, open.length <= 1, `hovering "${control.label}" left ${open.length} tooltips open: ${JSON.stringify(open)}`)
+  }
+  await glide(browser, from, idle)
+  await closed('after hovering along the call bar and moving off it')
+
+  // Twice, so the microphone ends as it started.
+  for (let round = 1; round <= 2; round++) {
+    await glide(browser, idle, mic)
+    await shown(`hovering the microphone toggle (round ${round})`)
+    await press(browser, mic)
+    await glide(browser, mic, idle)
+    await closed(`after clicking the microphone toggle (round ${round}) and moving away`)
+  }
+
+  await glide(browser, idle, mic)
+  await shown('hovering the microphone toggle before leaving the window')
+  // One move straight out, as a quick hand leaves the window: no
+  // pointermove follows inside the page.
+  await pointerAt(browser, 'mouseMoved', below)
+  await closed('after leaving the window from a hovered control')
+  await pointerAt(browser, 'mouseMoved', idle)
+
+  // Picking a menu item hands focus back to the menu's trigger. Into full
+  // screen and out again, the one item every member always has; the bar
+  // moves in full screen, so it is measured again each time.
+  for (const item of ['Enter fullscreen', 'Exit fullscreen']) {
+    const layout = await callJs(browser, callBarLayout)
+    const more = layout.controls.find((c) => c.label === 'More options')
+    check(failures, label, more, `no "More options" button among the call bar controls: ${JSON.stringify(layout.controls)}`)
+    if (!more) return
+    await glide(browser, layout.idle, more)
+    await shown(`hovering "More options" before picking "${item}"`)
+    await press(browser, more)
+    const target = await waitFor(
+      browser,
+      `(() => { const r = document.querySelector('[role="menuitem"][aria-label=${JSON.stringify(item)}]')?.getBoundingClientRect(); return r && { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`,
+      Boolean,
+      TOOLTIP_WAIT_MS,
+    )
+    check(failures, label, target.ok, `no "${item}" item in the "More options" menu`)
+    if (!target.ok) return
+    await glide(browser, more, target.value)
+    await press(browser, target.value)
+    await glide(browser, target.value, layout.idle)
+    await closed(`after picking "${item}" from the "More options" menu`)
+  }
+  const fullscreen = await waitFor(browser, 'document.fullscreenElement === null', Boolean, TOOLTIP_WAIT_MS)
+  check(failures, label, fullscreen.ok, 'the page stayed in full screen')
+
+  await pressKey(browser, 'Tab', 'Tab', 9)
+  await shown('moving keyboard focus to the next control')
+  await press(browser, idle)
+  await closed('after clicking away from a keyboard-focused control')
+}
+
 async function checkStillInRoom(failures, label, browsers) {
   for (const [i, browser] of browsers.entries()) {
     const path = await evalJs(browser, 'location.pathname')
@@ -658,6 +777,7 @@ async function main() {
     for (const [i, browser] of browsers.entries()) {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
     }
+    await checkTooltips(failures, browsers[1])
 
     await checkSimulcast(failures, browsers[0], browsers[1])
     await checkScreenShare(failures, browsers[0], browsers[1])

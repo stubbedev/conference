@@ -5,6 +5,7 @@ import App from './App'
 import { Toaster } from '@/components/ui/sonner'
 import { purgePlaintextRoomPasswords } from '@/lib/roompass'
 import { ThemeProvider } from '@/components/ThemeProvider'
+import { HintProvider } from '@/components/Hint'
 import { applyStoredTheme } from '@/lib/theme'
 // Cyberchat 2077's fonts, bundled rather than fetched from a font CDN, so
 // the app makes no third-party requests.
@@ -22,9 +23,11 @@ applyStoredTheme()
 // No StrictMode: double-invoked effects would connect media twice.
 createRoot(document.getElementById('root')!).render(
   <ThemeProvider>
-    <BrowserRouter>
-      <App />
-      <Toaster richColors position="bottom-right" />
-    </BrowserRouter>
+    <HintProvider>
+      <BrowserRouter>
+        <App />
+        <Toaster richColors position="bottom-right" />
+      </BrowserRouter>
+    </HintProvider>
   </ThemeProvider>,
 )
