@@ -4,6 +4,7 @@
 // in this device's IndexedDB. It is sent to the speech service while
 // live translation runs, which keeps it for that connection only.
 
+import { isMobileDevice } from '@/hooks/media'
 import captureWorkletUrl from '@/lib/translate/pcm-capture.worklet.ts?worker&url'
 
 export const SAMPLE_RATE = 16_000
@@ -18,12 +19,44 @@ export interface OwnVoiceSample {
   lang: string
 }
 
+/**
+ * The call's microphone (deviceId, '' for the default) without the call's
+ * echo cancellation, noise suppression and gain control, which flatten a
+ * voice; null when the browser can't give it, and on phones, where a
+ * second capture of the microphone can silence the call's. The caller
+ * stops it.
+ */
+export async function unprocessedMicrophone(deviceId: string): Promise<MediaStreamTrack | null> {
+  if (isMobileDevice()) return null
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 1,
+      },
+    })
+    const raw = stream.getAudioTracks()[0]
+    const settings = raw?.getSettings()
+    if (raw && !settings?.echoCancellation && !settings?.noiseSuppression && !settings?.autoGainControl) return raw
+    for (const t of stream.getTracks()) t.stop()
+    return null
+  } catch {
+    return null
+  }
+}
+
 /** Records the microphone until stop() or SAMPLE_SECONDS, at 16 kHz. */
 export class SampleRecorder {
   private context: AudioContext | null = null
   private chunks: Int16Array[] = []
   private samples = 0
   private finished: ((pcm: Int16Array<ArrayBuffer>) => void) | null = null
+  // stop() before start() (the settings closed while the microphone was
+  // still opening) cancels the recording.
+  private cancelled = false
 
   private readonly onProgress: (seconds: number) => void
 
@@ -32,6 +65,7 @@ export class SampleRecorder {
   }
 
   async start(track: MediaStreamTrack): Promise<Int16Array<ArrayBuffer>> {
+    if (this.cancelled) return new Int16Array(0)
     const context = new AudioContext({ sampleRate: SAMPLE_RATE })
     this.context = context
     await context.audioWorklet.addModule(captureWorkletUrl)
@@ -57,7 +91,10 @@ export class SampleRecorder {
 
   stop(): void {
     const finished = this.finished
-    if (!finished) return
+    if (!finished) {
+      this.cancelled = true
+      return
+    }
     this.finished = null
     void this.context?.close()
     this.context = null

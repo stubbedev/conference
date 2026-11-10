@@ -113,7 +113,10 @@ speaker reads a short, meeting-like text in their speaking language (15 s,
 with a question and a livelier sentence for intonation). Every language
 the service ships has one, shown before recording so it can be read
 through first; a language added in a languages file gets a prompt to talk
-freely instead. When live translation starts, their browser sends the recording
+freely instead. On computers the recording skips the call's echo
+cancellation, noise suppression and gain control, which flatten a voice;
+on phones, where a second capture of the microphone can silence the call's,
+it uses the call's microphone as it is. When live translation starts, their browser sends the recording
 to the speech service, which transcribes it and uses it from their first
 sentence. Without a recording, or with one under 6 s or without speech,
 they are heard in the female voice and asked to record. The voice is

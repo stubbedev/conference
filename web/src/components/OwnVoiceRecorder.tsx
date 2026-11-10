@@ -4,7 +4,14 @@ import { Mic, Square, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { MIN_SAMPLE_SECONDS, SAMPLE_RATE, SAMPLE_SECONDS, SampleRecorder, type OwnVoiceSample } from '@/lib/translate/own-voice'
+import {
+  MIN_SAMPLE_SECONDS,
+  SAMPLE_RATE,
+  SAMPLE_SECONDS,
+  SampleRecorder,
+  unprocessedMicrophone,
+  type OwnVoiceSample,
+} from '@/lib/translate/own-voice'
 import { READING_TIPS, readingText } from '@/lib/translate/reading-texts'
 
 export interface OwnVoiceControls {
@@ -12,6 +19,8 @@ export interface OwnVoiceControls {
   /** Keep the recording on this device for later calls. */
   remember: boolean
   micTrack: MediaStreamTrack | null
+  /** The microphone the call uses ('' for the system default). */
+  micDeviceId: string
   onSample: (sample: OwnVoiceSample | null) => void
   onRemember: (remember: boolean) => void
   /** The speaker agreed that this meeting's server may make their voice from the recording. */
@@ -30,6 +39,7 @@ export function OwnVoiceRecorder({
   sample,
   remember,
   micTrack,
+  micDeviceId,
   onSample,
   onRemember,
   serverConsent,
@@ -48,14 +58,17 @@ export function OwnVoiceRecorder({
   // A recording still running when the settings close is stopped and dropped.
   useEffect(() => () => recordingRef.current?.stop(), [])
 
-  const record = () => {
+  const record = async () => {
     if (!micTrack) return
     const recorder = new SampleRecorder(setSeconds)
     setSeconds(0)
     setTooShort(false)
     setRecording(recorder)
+    // The voice is made from this recording, so it skips the call's audio
+    // processing when the browser allows; otherwise it uses the call's track.
+    const raw = await unprocessedMicrophone(micDeviceId)
     void recorder
-      .start(micTrack)
+      .start(raw ?? micTrack)
       .then((pcm) => {
         if (pcm.length < MIN_SAMPLE_SECONDS * SAMPLE_RATE) {
           setTooShort(true)
@@ -63,7 +76,10 @@ export function OwnVoiceRecorder({
         }
         onSample({ pcm, lang })
       })
-      .finally(() => setRecording(null))
+      .finally(() => {
+        raw?.stop()
+        setRecording(null)
+      })
   }
 
   return (
@@ -92,7 +108,7 @@ export function OwnVoiceRecorder({
             Your voice is recorded ({Math.round(sample.pcm.length / SAMPLE_RATE)} s) and used from your first sentence.
           </p>
           <div className="flex shrink-0 gap-1">
-            <Button size="sm" variant="ghost" onClick={record} disabled={!micTrack || !serverConsent} aria-label="Record again">
+            <Button size="sm" variant="ghost" onClick={() => void record()} disabled={!micTrack || !serverConsent} aria-label="Record again">
               <Mic />
             </Button>
             <Button size="sm" variant="ghost" onClick={() => onSample(null)} aria-label="Delete my voice">
@@ -110,7 +126,7 @@ export function OwnVoiceRecorder({
           </p>
           <p className="border-l-2 pl-2 text-sm">{reading.text}</p>
           <p className="text-xs text-muted-foreground">{READING_TIPS}</p>
-          <Button size="sm" variant="secondary" onClick={record} disabled={!micTrack || !serverConsent}>
+          <Button size="sm" variant="secondary" onClick={() => void record()} disabled={!micTrack || !serverConsent}>
             <Mic /> Record my voice
           </Button>
           {!serverConsent && (
