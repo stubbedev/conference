@@ -23,3 +23,6 @@ func NewLoopbackEngine() (*Engine, func(), error) {
 
 	return engine, func() {}, nil
 }
+
+// BrowserMaxBitrate is the REMB that limits nothing.
+const BrowserMaxBitrate = browserMaxBitrate

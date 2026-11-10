@@ -383,13 +383,14 @@ func TestScreenShareKeepsItsFluidLayerWithNobodyWatchingIt(t *testing.T) {
 
 	for _, kind := range []string{KindScreen, KindCamera} {
 		thumbnail := &upViewer{
-			local: nil, rate: newViewerRate(0), mu: sync.Mutex{}, current: layerLow, target: layerLow,
+			local: nil, rate: newViewerRate(), mu: sync.Mutex{}, current: layerLow, target: layerLow,
 			preferred: layerLow, steps: newLadder(), mung: newMunger(), buf: nil,
 		}
 		track := &UpTrack{
 			key: trackKey{up: UpstreamMedia, mid: "1"}, kind: kind, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP8,
 			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{}, viewers: map[string]*upViewer{"thumbnail": thumbnail},
 			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
+			delivered: atomic.Uint64{},
 		}
 
 		wanted, _ := track.updateDemand(start)
@@ -512,14 +513,14 @@ func TestAStillScreenKeepsItsLayersWhileACameraLosesThem(t *testing.T) {
 		{kind: KindScreen, active: true},
 		{kind: KindCamera, active: false},
 	} {
-		layer := &upLayer{remote: nil, lastPacket: atomic.Int64{}}
-		layer.lastPacket.Store(sparse.UnixNano())
+		layer := newUpLayer(nil, sparse)
 
 		track := &UpTrack{
 			key: trackKey{up: UpstreamMedia, mid: "1"}, kind: tc.kind,
 			first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP9,
 			extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{layer, nil, nil}, viewers: map[string]*upViewer{},
 			demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
+			delivered: atomic.Uint64{},
 		}
 
 		if got := track.activeLayers(now)[layerLow]; got != tc.active {

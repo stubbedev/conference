@@ -2,6 +2,7 @@ package sfu
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ func simulcastTrack(key trackKey, kind string) *UpTrack {
 		key: key, kind: kind, first: nil, codec: webrtc.RTPCodecCapability{}, simulcast: true, parse: parseVP8,
 		extURIs: nil, mu: sync.RWMutex{}, layers: [layerCount]*upLayer{}, viewers: map[string]*upViewer{},
 		demand: layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false}, stop: nil,
+		delivered: atomic.Uint64{},
 	}
 }
 
@@ -25,6 +27,7 @@ func publishingOn(member *Member, which Upstream, tracks ...*UpTrack) {
 	member.ups[which] = &UpPeer{
 		which: which, pc: nil, member: member, mu: sync.RWMutex{},
 		tracks: byMid, labels: map[string]string{}, ice: newICEStash(),
+		sampledAt: time.Time{}, uplink: uplinkEstimate{limit: unlimited, peak: 0}, rembCapped: false,
 	}
 }
 
@@ -37,7 +40,7 @@ func TestLayerDemandNamesTheConnection(t *testing.T) {
 
 	room := &Room{
 		slug: "two-upstreams", name: "Two upstreams", limit: 0, hub: nil,
-		cfg: &HubConfig{Engine: nil, Relay: nil, MaxMembers: 0, MaxPublishKbps: 0, Speech: nil, Translate: false},
+		cfg: &HubConfig{Engine: nil, Relay: nil, MaxMembers: 0, Speech: nil, Translate: false},
 		mu:  sync.Mutex{}, members: map[string]*Member{}, nextShort: 0, recorder: "", translatingBy: "", rembStop: nil,
 	}
 

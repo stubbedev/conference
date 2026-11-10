@@ -43,19 +43,17 @@ const (
 // Internal tuning knobs.
 const (
 	taskQueueDepth = 64
-	bpsPerKbps     = 1000
 
 	// Minimum spacing between keyframe requests forwarded for one
 	// viewer, so a PLI burst cannot thrash the publisher's encoder.
 	keyframeRequestInterval = 200 * time.Millisecond
 
 	// Downlink rate control, following Galène's rtpconn: a per-viewer
-	// loss-driven AIMD estimate clamped by the viewer's REMB, aggregated
-	// as the minimum across viewers and fed back to the publisher. A
-	// fixed ceiling floods constrained mobile downlinks into a frozen
-	// picture no keyframe relay can recover.
+	// loss-driven estimate clamped by the viewer's REMB, aggregated as
+	// the minimum across viewers and fed back to the publisher. Sending
+	// whatever the publisher can floods constrained mobile downlinks into
+	// a frozen picture no keyframe relay can recover.
 	minViewerBitrate    = 9_600
-	initViewerBitrate   = 512_000
 	minPublisherBitrate = 100_000
 	rembInterval        = time.Second
 
@@ -150,10 +148,6 @@ type Message struct {
 
 	ICEServers []relay.ICEServer `json:"iceServers,omitempty"`
 
-	// PublishKbps is the upload ceiling the server holds the member to,
-	// absent when it holds them to none.
-	PublishKbps int `json:"publishKbps,omitempty"`
-
 	// media (PC names the peer connection: an upstream such as "up" or
 	// "up-screen", or "down-<source>"; close names an upstream to drop)
 	PC        string                   `json:"pc,omitempty"`
@@ -211,10 +205,9 @@ type Hub struct {
 
 // HubConfig wires the hub to an engine and applies limits.
 type HubConfig struct {
-	Engine         *Engine
-	Relay          *relay.Credentials
-	MaxMembers     int
-	MaxPublishKbps int
+	Engine     *Engine
+	Relay      *relay.Credentials
+	MaxMembers int
 
 	// Speech streams a member's speech to the speech service; nil means
 	// no server-side streams, as when every browser translates on its
@@ -451,7 +444,6 @@ func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 		Type: "welcome", Self: &self, Members: others, Recorder: r.recorder, TranslatingBy: r.translatingBy,
 		RoomInfo:   &RoomInfo{Slug: r.slug, Name: r.name, Live: len(r.members), Limit: r.limit},
 		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
-		PublishKbps: max(r.cfg.MaxPublishKbps, 0),
 	})
 
 	return admission{
@@ -591,9 +583,8 @@ func (r *Room) broadcastExcept(exceptID string, msg Message) {
 	}
 }
 
-// startRembTicker periodically feeds a bandwidth ceiling to every
-// publisher via REMB. Without it, Chrome ramps to its local maximum and
-// can saturate the uplink behind which the server sits.
+// startRembTicker periodically measures every publisher connection and
+// feeds each the bandwidth it may use via REMB.
 func (r *Room) startRembTicker() {
 	r.mu.Lock()
 
@@ -617,47 +608,48 @@ func (r *Room) startRembTicker() {
 			case <-stop:
 				return
 			case <-ticker.C:
-				r.sendRemb()
+				r.sendRemb(time.Now())
 				r.adaptLayers()
 			}
 		}
 	}()
 }
 
-// publishCeilingBps converts the configured kbps ceiling into bps; a
-// missing or invalid configuration returns 0, which disables REMB.
-func publishCeilingBps(kbps int) uint64 {
-	if kbps <= 0 {
-		return 0
-	}
-
-	return uint64(kbps) * bpsPerKbps
-}
-
-func (r *Room) sendRemb() {
-	ceiling := publishCeilingBps(r.cfg.MaxPublishKbps)
-	if ceiling == 0 {
-		return
-	}
-
+func (r *Room) sendRemb(now time.Time) {
 	for _, peer := range r.snapshot() {
 		for _, upPeer := range peer.upstreamPeers() {
-			upPeer.sendRemb(ceiling)
+			upPeer.sendRemb(now)
 		}
 	}
 }
 
-// sendRemb feeds this connection its own bandwidth ceiling, so each
-// upstream's estimate follows only the tracks it carries.
-func (up *UpPeer) sendRemb(ceiling uint64) {
+// sendRemb closes one measurement period of this connection and feeds it
+// the bandwidth it may use, so each upstream's estimate follows only the
+// tracks it carries and the link they share.
+func (up *UpPeer) sendRemb(now time.Time) {
+	sample := up.measure(now)
+
+	limit := up.viewerLimit()
+	if up.which.feedback() == feedbackReceiverEstimate {
+		up.uplink = up.uplink.next(sample)
+		limit = limit.tighter(up.uplink.limit)
+	}
+
 	ssrcs := up.videoSSRCs()
 	if len(ssrcs) == 0 {
 		return
 	}
 
+	bitrate, send := rembFor(up.which.feedback(), limit, up.rembCapped)
+	if !send {
+		return
+	}
+
+	up.rembCapped = limit.bound
+
 	packet := &rtcp.ReceiverEstimatedMaximumBitrate{
 		SenderSSRC: 1,
-		Bitrate:    float32(up.adaptiveBitrate(ceiling)),
+		Bitrate:    float32(bitrate),
 		SSRCs:      ssrcs,
 	}
 
@@ -665,6 +657,24 @@ func (up *UpPeer) sendRemb(ceiling uint64) {
 	if err != nil {
 		log.Printf("room %s member %.6s %s: remb: %v", up.member.room.slug, up.member.ID, up.which, err)
 	}
+}
+
+// measure closes the period since the previous one: every track learns
+// the rate it delivered, and the connection gets what all of them
+// delivered together.
+func (up *UpPeer) measure(now time.Time) linkSample {
+	elapsed := now.Sub(up.sampledAt)
+	up.sampledAt = now
+
+	var link receiveTotals
+
+	for _, track := range up.trackSnapshot() {
+		arrived := track.measure()
+		track.delivered.Store(linkSample{arrived: arrived, elapsed: elapsed}.bitrate())
+		link = link.plus(arrived)
+	}
+
+	return linkSample{arrived: link, elapsed: elapsed}
 }
 
 // adaptLayers closes one adaptation period for every simulcast track:
@@ -1177,13 +1187,16 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 	}
 
 	upPeer := &UpPeer{
-		which:  which,
-		pc:     connection,
-		member: m,
-		mu:     sync.RWMutex{},
-		tracks: map[string]*UpTrack{},
-		labels: map[string]string{},
-		ice:    newICEStash(),
+		which:      which,
+		pc:         connection,
+		member:     m,
+		mu:         sync.RWMutex{},
+		tracks:     map[string]*UpTrack{},
+		labels:     map[string]string{},
+		ice:        newICEStash(),
+		sampledAt:  time.Now(),
+		uplink:     uplinkEstimate{limit: unlimited, peak: 0},
+		rembCapped: false,
 	}
 
 	m.setUpstream(which, upPeer)
@@ -1344,7 +1357,7 @@ func (m *Member) ensureDownPeer(sourceID string) {
 		}
 
 		down.sends[track.key] = &downSend{local: local, kind: track.kind}
-		track.addViewer(m.ID, local, m.layerPreference(sourceID, track.kind), publishCeilingBps(m.room.cfg.MaxPublishKbps))
+		track.addViewer(m.ID, local, m.layerPreference(sourceID, track.kind))
 		down.watchFeedback(transceiver.Sender(), m, track)
 	}
 
@@ -1503,6 +1516,12 @@ type UpPeer struct {
 
 	labels map[string]string
 	ice    iceStash
+
+	// The REMB ticker's own state: when it last measured, the estimate of
+	// the uplink it keeps, and whether the browser holds a limit from it.
+	sampledAt  time.Time
+	uplink     uplinkEstimate
+	rembCapped bool
 }
 
 // UpTrack is one forwarded upstream track, keyed by its connection and
@@ -1532,12 +1551,33 @@ type UpTrack struct {
 	viewers map[string]*upViewer
 	demand  layerDemand
 	stop    chan struct{}
+
+	// delivered is the rate the track arrived at over the last REMB
+	// period, in bits per second: what each of its viewers is sent.
+	delivered atomic.Uint64
 }
 
 // upLayer is one encoding of an upstream track.
 type upLayer struct {
 	remote     *webrtc.TrackRemote
 	lastPacket atomic.Int64 // unix nanoseconds
+	arrived    arrivals
+
+	// sampled is arrived as the REMB ticker last read it.
+	sampled receiveTotals
+}
+
+// newUpLayer starts an encoding whose last packet arrived at lastPacket.
+func newUpLayer(remote *webrtc.TrackRemote, lastPacket time.Time) *upLayer {
+	layer := &upLayer{
+		remote:     remote,
+		lastPacket: atomic.Int64{},
+		arrived:    arrivals{bytes: atomic.Uint64{}, expected: atomic.Uint64{}, received: atomic.Uint64{}},
+		sampled:    receiveTotals{bytes: 0, expected: 0, received: 0},
+	}
+	layer.lastPacket.Store(lastPacket.UnixNano())
+
+	return layer
 }
 
 // upViewer is one viewer of one forwarded track: the downlink rate
@@ -1557,87 +1597,49 @@ type upViewer struct {
 }
 
 // viewerRate tracks a sustainable downlink bitrate for one viewer,
-// following Galène's loss-based controller: additive increase while loss
-// is low, multiplicative decrease on loss, clamped by whatever REMB the
-// viewer itself reports. It recovers in both directions: the walk back up
-// is paced by elapsed time, and a viewer's own REMB is taken as evidence
-// of recovered headroom, so a single-layer stream that dropped during a
-// blip returns to full quality in seconds instead of creeping back.
+// following Galène's loss-based controller: multiplicative decrease on
+// loss, increase while loss is low, clamped by whatever REMB the viewer
+// itself reports. Before any heavy loss nothing limits the viewer but
+// its REMB. The increase only happens while the viewer is sent close to
+// the estimate, since a stream sending less is not probing the link, so
+// the estimate never runs far above what was actually delivered. It
+// recovers in both directions: the walk back up is paced by elapsed
+// time, and a viewer's own REMB is taken as evidence of recovered
+// headroom, so a single-layer stream that dropped during a blip returns
+// to full quality in seconds instead of creeping back.
 type viewerRate struct {
 	mu    sync.Mutex
-	start uint64 // bps before the first loss report, the room's ceiling
-	loss  uint64 // bps, AIMD estimate from receiver reports
-	remb  uint64 // bps cap from the viewer's REMB, 0 = none seen
-	clean bool   // the last receiver report showed no loss
+	loss  bitrateLimit // estimate from receiver reports, none before heavy loss
+	remb  bitrateLimit // the viewer's own REMB, none before one arrives
+	clean bool         // the last receiver report showed no loss
 }
 
-// newViewerRate starts a viewer at the publisher ceiling rather than at
-// a guess: a single-layer stream has no lower layer to adapt to, so the only useful starting point is everything the uplink
-// may use, and real loss walks it down from there.
-func newViewerRate(start uint64) viewerRate {
-	return viewerRate{mu: sync.Mutex{}, start: start, loss: 0, remb: 0, clean: false}
+func newViewerRate() viewerRate {
+	return viewerRate{mu: sync.Mutex{}, loss: unlimited, remb: unlimited, clean: false}
 }
 
-// Galène's loss-controller tuning: receiver-report fraction-lost
-// thresholds (in 1/256 units) and the multiplicative rate factors
-// between them.
+// Galène grows the estimate only while what is sent reaches seven
+// eighths of it: below that the stream is not probing the bottleneck.
 const (
-	lowLossFraction  = 5
-	highLossFraction = 25
-	rateGainNum      = 269
-	rateGainDen      = 256
-	lossScale        = 512
-
-	// rateGainPeriod is how long one additive-increase step takes. The
-	// increase is scaled by the time since the previous report so the
-	// ramp stays at 5% a second whether a viewer reports every 200 ms or
-	// every two seconds.
-	rateGainPeriod = time.Second
-
-	// maxGainSteps bounds one increase, so a viewer that has been quiet
-	// for minutes does not jump from the floor to the ceiling at once.
-	maxGainSteps = 16
+	probingNum = 7
+	probingDen = 8
 )
-
-// estimate is the current rate; callers hold vr.mu.
-func (vr *viewerRate) estimate() uint64 {
-	if vr.loss >= minViewerBitrate {
-		return vr.loss
-	}
-
-	return max(vr.start, initViewerBitrate)
-}
-
-// grow applies one additive-increase burst for the time elapsed since the
-// previous receiver report, never above the ceiling the room set: the
-// walk up has to end somewhere, and more than the publisher may send is
-// not useful.
-func (vr *viewerRate) grow(rate uint64, elapsed time.Duration) uint64 {
-	steps := min(max(1, int(elapsed/rateGainPeriod)), maxGainSteps)
-
-	for range steps {
-		rate = rate * rateGainNum / rateGainDen
-
-		if rate >= vr.start {
-			return vr.start
-		}
-	}
-
-	return rate
-}
 
 // lift takes the viewer's own REMB as evidence of recovered headroom: the
 // viewer measuring its own downlink sees a network recover long before a
 // 5%-a-second walk notices. Callers hold vr.mu.
 func (vr *viewerRate) lift(rate uint64) uint64 {
-	if vr.remb == 0 {
+	if !vr.remb.bound {
 		return rate
 	}
 
-	return max(rate, min(vr.remb, vr.start))
+	return max(rate, vr.remb.bps)
 }
 
-func (vr *viewerRate) updateLoss(fractionLost uint8, elapsed time.Duration) {
+// updateLoss applies one receiver report: the fraction of packets the
+// viewer lost since its previous report, elapsed ago, while it was sent
+// delivered bits per second.
+func (vr *viewerRate) updateLoss(fractionLost uint8, elapsed time.Duration, delivered uint64) {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 
@@ -1645,19 +1647,36 @@ func (vr *viewerRate) updateLoss(fractionLost uint8, elapsed time.Duration) {
 		elapsed = rateGainPeriod
 	}
 
-	rate := vr.estimate()
-
 	switch {
 	case fractionLost > highLossFraction:
-		rate = rate * (lossScale - uint64(fractionLost)) / lossScale
-		rate = max(rate, minViewerBitrate)
 		vr.clean = false
+
+		// Nothing measured yet: the track has not been sent for a full
+		// period, so there is no rate to back off from.
+		if delivered == 0 {
+			return
+		}
+
+		through := delivered
+		if vr.loss.bound {
+			through = min(through, vr.loss.bps)
+		}
+
+		vr.loss = capAt(max(backOff(through, fractionLost), minViewerBitrate))
 	case fractionLost < lowLossFraction:
 		vr.clean = true
-		rate = vr.lift(vr.grow(rate, elapsed))
-	}
 
-	vr.loss = rate
+		if !vr.loss.bound {
+			return
+		}
+
+		rate := vr.loss.bps
+		if delivered*probingDen >= rate*probingNum {
+			rate = viewerGain.grow(rate, elapsed)
+		}
+
+		vr.loss = capAt(vr.lift(rate))
+	}
 }
 
 func (vr *viewerRate) setREMB(bitrate float64) {
@@ -1668,27 +1687,23 @@ func (vr *viewerRate) setREMB(bitrate float64) {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 
-	vr.remb = uint64(bitrate)
+	vr.remb = capAt(uint64(bitrate))
 
 	// A viewer that is not losing packets and now says it has more room
 	// is right about its own link; follow it instead of waiting for the
-	// additive ramp to rediscover the bandwidth.
-	if vr.clean && vr.loss >= minViewerBitrate {
-		vr.loss = vr.lift(vr.loss)
+	// ramp to rediscover the bandwidth.
+	if vr.clean && vr.loss.bound {
+		vr.loss = capAt(vr.lift(vr.loss.bps))
 	}
 }
 
-func (vr *viewerRate) max() uint64 {
+// limit is the most the viewer can take: the tighter of its loss
+// estimate and its own REMB.
+func (vr *viewerRate) limit() bitrateLimit {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 
-	rate := vr.estimate()
-
-	if vr.remb != 0 && vr.remb < rate {
-		rate = vr.remb
-	}
-
-	return rate
+	return vr.loss.tighter(vr.remb)
 }
 
 // isVideo reports whether the track carries video (camera or screen);
@@ -1708,8 +1723,7 @@ func (ut *UpTrack) addLayer(index int, remote *webrtc.TrackRemote) bool {
 		return false
 	}
 
-	layer := &upLayer{remote: remote, lastPacket: atomic.Int64{}}
-	layer.lastPacket.Store(time.Now().UnixNano())
+	layer := newUpLayer(remote, time.Now())
 	ut.layers[index] = layer
 
 	ut.mu.Unlock()
@@ -1722,6 +1736,8 @@ func (ut *UpTrack) addLayer(index int, remote *webrtc.TrackRemote) bool {
 func (ut *UpTrack) forwardLayer(index int, layer *upLayer) {
 	first := true
 
+	var count sequenceCount
+
 	for {
 		select {
 		case <-ut.stop:
@@ -1729,7 +1745,7 @@ func (ut *UpTrack) forwardLayer(index int, layer *upLayer) {
 		default:
 		}
 
-		packet, _, err := layer.remote.ReadRTP()
+		packet, attributes, err := layer.remote.ReadRTP()
 		if err != nil {
 			log.Printf("sfu: forward loop track=%s rid=%q kind=%s ended: %v", ut.key, layer.remote.RID(), ut.kind, err)
 
@@ -1738,6 +1754,12 @@ func (ut *UpTrack) forwardLayer(index int, layer *upLayer) {
 
 		now := time.Now()
 		layer.lastPacket.Store(now.UnixNano())
+
+		if attributes.Get(webrtc.AttributeRtxPayloadType) == nil {
+			count = count.observe(packet.SequenceNumber)
+		}
+
+		layer.arrived.record(packet.MarshalSize(), count)
 
 		if first {
 			first = false
@@ -1889,7 +1911,7 @@ func (ut *UpTrack) setViewerPreference(viewerID string, layer int) {
 
 // addViewer starts forwarding to a viewer. A single-layer track flows
 // at once; a simulcast viewer starts at its first target keyframe.
-func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int, ceiling uint64) {
+func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int) {
 	ut.mu.Lock()
 
 	if viewer := ut.viewers[viewerID]; viewer != nil {
@@ -1908,7 +1930,7 @@ func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int
 	}
 
 	viewer := &upViewer{
-		local: local, rate: newViewerRate(ceiling),
+		local: local, rate: newViewerRate(),
 		mu: sync.Mutex{}, current: current, target: current, preferred: preferred,
 		steps: newLadder(), mung: newMunger(), buf: nil,
 	}
@@ -1921,23 +1943,40 @@ func (ut *UpTrack) addViewer(viewerID string, local *forwardTrack, preferred int
 	}
 }
 
-// minViewerRate returns the smallest sustainable bitrate across this
-// track's viewers, or 0 when nobody is watching.
-func (ut *UpTrack) minViewerRate() uint64 {
+// viewerLimit is the smallest sustainable bitrate across this track's
+// viewers, none when nobody watching is limited.
+func (ut *UpTrack) viewerLimit() bitrateLimit {
 	ut.mu.RLock()
 	defer ut.mu.RUnlock()
 
-	var lowest uint64
+	limit := unlimited
 
 	for _, viewer := range ut.viewers {
-		rate := viewer.rate.max()
-
-		if lowest == 0 || rate < lowest {
-			lowest = rate
-		}
+		limit = limit.tighter(viewer.rate.limit())
 	}
 
-	return lowest
+	return limit
+}
+
+// measure closes one REMB period of the track: what its layers delivered
+// since the previous one. Only the REMB ticker calls it.
+func (ut *UpTrack) measure() receiveTotals {
+	ut.mu.RLock()
+	defer ut.mu.RUnlock()
+
+	var total receiveTotals
+
+	for _, layer := range ut.layers {
+		if layer == nil {
+			continue
+		}
+
+		now := layer.arrived.load()
+		total = total.plus(now.since(layer.sampled))
+		layer.sampled = now
+	}
+
+	return total
 }
 
 func (ut *UpTrack) setViewerREMB(viewerID string, bitrate float64) {
@@ -1959,7 +1998,7 @@ func (ut *UpTrack) updateViewerLoss(viewerID string, fractionLost uint8, elapsed
 		return
 	}
 
-	viewer.rate.updateLoss(fractionLost, elapsed)
+	viewer.rate.updateLoss(fractionLost, elapsed, ut.delivered.Load())
 
 	viewer.mu.Lock()
 	viewer.steps.observeLoss(fractionLost, viewer.current)
@@ -2016,12 +2055,11 @@ func (up *UpPeer) videoSSRCs() []uint32 {
 	return ssrcs
 }
 
-// adaptiveBitrate picks the REMB ceiling for this publisher: the room cap
-// unless a viewer's downlink forces it lower (the minimum across viewers,
-// Galène-style), never starving video entirely. Tracks nobody watches do
-// not constrain the publisher.
-func (up *UpPeer) adaptiveBitrate(ceiling uint64) uint64 {
-	rate := ceiling
+// viewerLimit is what the publisher's viewers can take on this
+// connection: the minimum across viewers, Galène-style. Tracks nobody
+// watches do not constrain the publisher.
+func (up *UpPeer) viewerLimit() bitrateLimit {
+	limit := unlimited
 
 	for _, track := range up.trackSnapshot() {
 		// Simulcast viewers adapt by layer, so they never hold the
@@ -2030,21 +2068,10 @@ func (up *UpPeer) adaptiveBitrate(ceiling uint64) uint64 {
 			continue
 		}
 
-		viewerCap := track.minViewerRate()
-		if viewerCap == 0 {
-			continue
-		}
-
-		if viewerCap < rate {
-			rate = viewerCap
-		}
+		limit = limit.tighter(track.viewerLimit())
 	}
 
-	if rate < minPublisherBitrate {
-		rate = minPublisherBitrate
-	}
-
-	return rate
+	return limit
 }
 
 // requestKeyframe sends PLIs for every layer of every video track of
@@ -2132,6 +2159,7 @@ func (up *UpPeer) trackFor(key trackKey, receiver *webrtc.RTPReceiver, track *we
 		viewers:   map[string]*upViewer{},
 		demand:    layerDemand{lastWanted: [layerCount]time.Time{}, sent: [layerCount]bool{}, announced: false},
 		stop:      make(chan struct{}),
+		delivered: atomic.Uint64{},
 	}
 	up.tracks[key.mid] = upTrack
 

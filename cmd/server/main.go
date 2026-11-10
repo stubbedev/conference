@@ -153,12 +153,11 @@ func (l liveTranslation) tokens() *service.Service {
 // newHub creates the SFU hub, with live translation when it can run.
 func newHub(cfg *config.Config, engine *sfu.Engine, creds *relay.Credentials, translation liveTranslation) *sfu.Hub {
 	hub := sfu.HubConfig{
-		Engine:         engine,
-		Relay:          creds,
-		MaxMembers:     cfg.MaxRoomMembers,
-		MaxPublishKbps: cfg.MaxPublishKbps,
-		Speech:         nil,
-		Translate:      translation.status.Available,
+		Engine:     engine,
+		Relay:      creds,
+		MaxMembers: cfg.MaxRoomMembers,
+		Speech:     nil,
+		Translate:  translation.status.Available,
 	}
 
 	if streams := translation.tokens(); streams != nil {

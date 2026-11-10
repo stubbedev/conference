@@ -268,7 +268,8 @@ func TestShareConnectionLeavesOutTransportWideFeedback(t *testing.T) {
 
 // TestShareConnectionKeepsItsOwnRemb checks that each connection gets
 // its own REMB: a viewer whose downlink caps the camera does not drag
-// the share's ceiling down with it.
+// the share down with it, and the share, losing nothing, is limited by
+// nothing.
 func TestShareConnectionKeepsItsOwnRemb(t *testing.T) {
 	t.Parallel()
 
@@ -287,7 +288,9 @@ func TestShareConnectionKeepsItsOwnRemb(t *testing.T) {
 	}
 
 	waitRemb(t, cameraRembs, "a viewer-capped REMB on the camera", func(bitrate float64) bool { return bitrate <= rembCap*1.01 })
-	waitRemb(t, screenRembs, "the full ceiling on the share after the camera was capped", atCeiling)
+	waitRemb(t, screenRembs, "an unlimited REMB on the share after the camera was capped", func(bitrate float64) bool {
+		return bitrate >= sfu.BrowserMaxBitrate*0.99
+	})
 }
 
 // watchPLI counts the keyframe requests a publisher's sender receives.

@@ -22,7 +22,6 @@ const (
 	defaultICEUDPPort     = 5000
 	defaultTURNPort       = 3478
 	maxPort               = 65535
-	defaultMaxPublishKbps = 50000
 	defaultMaxRoomMembers = 16
 	defaultRoomTTLDays    = 365
 	defaultSessionDays    = 365
@@ -64,9 +63,6 @@ type Config struct {
 	ICEUDPPort  int          // single UDP port for the ICE mux
 	ExternalIPs []netip.Addr // NAT 1:1 addresses announced as host candidates
 	Relay       relay.Config // embedded TURN server
-
-	// Ceiling for the REMB estimate the SFU feeds back to publishers.
-	MaxPublishKbps int
 
 	// TrustedProxies are the reverse proxies whose X-Forwarded-For
 	// header names the real client. Empty trusts no header: the client
@@ -168,7 +164,6 @@ func FromEnv() (*Config, error) {
 		ICEUDPPort:         defaultICEUDPPort,
 		ExternalIPs:        nil,
 		Relay:              relay.Config{Port: defaultTURNPort, TLSHost: ""},
-		MaxPublishKbps:     defaultMaxPublishKbps,
 		TrustedProxies:     nil,
 		AllowedOrigins:     nil,
 		SessionTTL:         defaultSessionDays * hoursPerDay * time.Hour,
@@ -351,15 +346,6 @@ func applyMediaConfig(cfg *Config) error {
 		}
 
 		cfg.ExternalIPs = append(cfg.ExternalIPs, addr.Unmap())
-	}
-
-	maxPublishKbps, err := envInt("MAX_PUBLISH_KBPS", cfg.MaxPublishKbps)
-	if err != nil {
-		return err
-	}
-
-	if maxPublishKbps > 0 {
-		cfg.MaxPublishKbps = maxPublishKbps
 	}
 
 	return nil

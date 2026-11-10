@@ -44,7 +44,7 @@ func newTranslateHub(t *testing.T) (*sfu.Hub, *sfu.Engine) {
 	}
 
 	return sfu.NewHub(sfu.HubConfig{
-		Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500,
+		Engine: engine, Relay: creds, MaxMembers: 8,
 		Speech: roomTokens{}, Translate: true,
 	}), engine
 }
@@ -120,7 +120,7 @@ func TestTranslationWithoutSpeechStreams(t *testing.T) {
 	}
 
 	hub := sfu.NewHub(sfu.HubConfig{
-		Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: 2500,
+		Engine: engine, Relay: creds, MaxMembers: 8,
 		Speech: nil, Translate: true,
 	})
 

@@ -116,13 +116,7 @@ export function cameraSenderParameters(
     : withSenderPriority(relayerParameters(parameters, layers), CAMERA_PRIORITY)
 }
 
-export function fluidShareBitrate(publishCeilingBps: number | null): number {
-  if (publishCeilingBps === null) return SCREEN_SHARE_FLUID_MAX_BITRATE
-  const leftForFluid = Math.max(publishCeilingBps - SCREEN_SHARE_LOW_MAX_BITRATE, SCREEN_SHARE_LOW_MAX_BITRATE)
-  return Math.min(SCREEN_SHARE_FLUID_MAX_BITRATE, leftForFluid)
-}
-
-export function screenLayers(publishCeilingBps: number | null, codec: VideoCodec): ScreenEncoding[] {
+export function screenLayers(codec: VideoCodec): ScreenEncoding[] {
   const stream = codec === 'VP9' ? { scalabilityMode: SIMULCAST_STREAM_MODE } : {}
   return [
     {
@@ -135,7 +129,7 @@ export function screenLayers(publishCeilingBps: number | null, codec: VideoCodec
     {
       rid: LAYER_RIDS[2],
       scaleResolutionDownBy: 1,
-      maxBitrate: fluidShareBitrate(publishCeilingBps),
+      maxBitrate: SCREEN_SHARE_FLUID_MAX_BITRATE,
       maxFramerate: SCREEN_SHARE_FPS,
       ...stream,
     },

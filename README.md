@@ -107,7 +107,6 @@ All settings are environment variables.
 | `EXTERNAL_IPS`      | —               | Comma-separated public IPs to advertise when behind NAT                                   |
 | `TURN_PORT`         | `3478`          | UDP and TCP port of the built-in relay                                                    |
 | `TURN_TLS_HOST`     | —               | Hostname whose port 443 forwards to the relay over TLS                                    |
-| `MAX_PUBLISH_KBPS`  | `50000`         | Upload bandwidth cap per participant                                                      |
 | `MAX_ROOM_MEMBERS`  | `16`            | Default maximum people per room                                                           |
 | `TRUSTED_PROXIES`   | —               | Comma-separated IPs or CIDRs of reverse proxies whose `X-Forwarded-For` names the real client, so rate limits apply per visitor instead of per proxy |
 | `ALLOWED_ORIGINS`   | same origin     | Extra origins allowed to connect to the signaling WebSocket                               |
@@ -404,12 +403,18 @@ The response has everything you need to hand out links:
 One Go binary serves the website, the REST API, signaling and a
 Galène-style SFU (selective forwarding unit):
 
-- One upstream connection per publisher and one downstream connection per
-  viewer, trickle ICE, keyframe requests, NACK and receiver-report
-  interceptors, and a REMB bandwidth ceiling, all on a single UDP port.
-- Transport-wide congestion control feedback on every upload, so the
+- One upstream connection per publisher (and a second one while it shares
+  its screen) and one downstream connection per viewer, trickle ICE,
+  keyframe requests, NACK and receiver-report interceptors, all on a
+  single UDP port.
+- No fixed upload cap: every bandwidth limit comes from measurement. The
+  camera's upload gets transport-wide congestion control feedback, so the
   publisher's browser measures its own uplink and probes back up after a
-  dip instead of creeping back from packet loss alone.
+  dip instead of creeping back from packet loss alone. The share's upload
+  gets none; the server estimates it from the packets it receives and
+  loses, keeps the estimate up while the screen is still, and backs off
+  only when packets go missing, so the next scroll is not encoded down to
+  what idling sent.
 - Simulcast cameras and screen shares, with each viewer getting the
   layer that fits, and a loss-driven bitrate ceiling that climbs back as
   the network does: a layer lost to one bad minute comes back, and the

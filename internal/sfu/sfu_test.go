@@ -27,8 +27,6 @@ const (
 	msgRecording  = "recording"
 	msgOffer      = "offer"
 	testTURNPort  = 3478
-
-	testPublishKbps = 2500
 )
 
 // errNoTestConn reports a description for a connection the test never opened.
@@ -43,7 +41,7 @@ func newTestHub(t *testing.T, engine *sfu.Engine) *sfu.Hub {
 	}
 
 	return sfu.NewHub(sfu.HubConfig{
-		Engine: engine, Relay: creds, MaxMembers: 8, MaxPublishKbps: testPublishKbps, Speech: nil, Translate: false,
+		Engine: engine, Relay: creds, MaxMembers: 8, Speech: nil, Translate: false,
 	})
 }
 
@@ -1097,25 +1095,26 @@ func TestViewerRembCapsPublisher(t *testing.T) {
 	waitRemb(t, rembs, "a viewer-capped REMB", func(bitrate float64) bool { return bitrate <= rembCap*1.01 })
 }
 
-// TestSingleLayerVideoRembStartsAtCeiling asserts that a single-layer
-// video stream, which has no simulcast layer to step down to, is offered
-// the whole uplink ceiling instead of the controller's low starting
-// guess, and is throttled only once loss shows up.
-func TestSingleLayerVideoRembStartsAtCeiling(t *testing.T) {
+// TestSingleLayerVideoIsLimitedOnlyOnceLossShows asserts that a
+// single-layer video stream, which has no simulcast layer to step down to,
+// is not held to any guess while its viewer's link is clean: on the
+// camera's connection the browser's own delay-based estimate measures the
+// uplink, and the hub only speaks up once the viewer loses packets.
+func TestSingleLayerVideoIsLimitedOnlyOnceLossShows(t *testing.T) {
 	t.Parallel()
 
 	call := newSingleLayerCall(t)
 
-	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its single-layer stream", atCeiling)
+	noRemb(t, call.rembs, "a REMB before the viewer reported any loss", 3*rembPeriod)
 
 	call.report(t, 64)
 
-	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
+	waitRemb(t, call.rembs, "a REMB below the stream's rate after heavy loss", belowDelivered)
 }
 
 // TestSingleLayerVideoRembRecoversAfterCongestion asserts the other half of
 // the controller: once the viewer reports a clean link and says its own
-// downlink is healthy again, the publisher's ceiling comes back on that
+// downlink is healthy again, the publisher gets that room back on that
 // report. A stream that only adapts downwards stays degraded by one bad
 // minute for the rest of the call.
 func TestSingleLayerVideoRembRecoversAfterCongestion(t *testing.T) {
@@ -1123,16 +1122,29 @@ func TestSingleLayerVideoRembRecoversAfterCongestion(t *testing.T) {
 
 	call := newSingleLayerCall(t)
 
-	waitRemb(t, call.rembs, "a REMB at the uplink ceiling for its single-layer stream", atCeiling)
+	noRemb(t, call.rembs, "a REMB before the viewer reported any loss", 2*rembPeriod)
 
 	call.report(t, 64)
 
-	waitRemb(t, call.rembs, "a REMB below the ceiling after heavy loss", belowCeiling)
+	waitRemb(t, call.rembs, "a REMB below the stream's rate after heavy loss", belowDelivered)
 
 	call.report(t, 0)
-	call.setREMB(t, singleLayerCeiling)
+	call.setREMB(t, recoveredDownlink)
 
-	waitRemb(t, call.rembs, "the ceiling back once the viewer's link recovered", atCeiling)
+	waitRemb(t, call.rembs, "the viewer's own estimate back once its link recovered", func(bitrate float64) bool {
+		return bitrate >= recoveredDownlink*0.99
+	})
+}
+
+// noRemb asserts the publisher receives no REMB for a while.
+func noRemb(t *testing.T, rembs <-chan float64, what string, wait time.Duration) {
+	t.Helper()
+
+	select {
+	case bitrate := <-rembs:
+		t.Fatalf("publisher received %s: %.0f bps", what, bitrate)
+	case <-time.After(wait):
+	}
 }
 
 // singleLayerCall is one member publishing single-layer video to one
@@ -1146,9 +1158,16 @@ type singleLayerCall struct {
 	rembs  <-chan float64
 }
 
-// singleLayerCeiling is the room's default publish ceiling in bits per
-// second, which one single-layer stream may use in full.
-const singleLayerCeiling = testPublishKbps * 1000.0
+const (
+	// rembPeriod is how often the hub feeds publishers their REMB.
+	rembPeriod = time.Second
+
+	// deliveredRate is what pumpMedia publishes, in bits per second.
+	deliveredRate = frameBytes * 8 * float64(time.Second) / float64(frameInterval)
+
+	// recoveredDownlink is a viewer's own estimate of a healthy downlink.
+	recoveredDownlink = 2_500_000.0
+)
 
 func newSingleLayerCall(t *testing.T) singleLayerCall {
 	t.Helper()
@@ -1210,30 +1229,11 @@ func (c singleLayerCall) setREMB(t *testing.T, bitrate float64) {
 	}
 }
 
-func atCeiling(bitrate float64) bool { return bitrate >= singleLayerCeiling*0.99 }
-
-func belowCeiling(bitrate float64) bool { return !atCeiling(bitrate) }
+func belowDelivered(bitrate float64) bool { return bitrate < deliveredRate }
 
 // TestWelcomeCarriesRelayCredentials checks that a member is handed
 // TURN credentials for the host it signaled on, and that the hub
 // vouches for them exactly while the member is in the call.
-func TestWelcomeCarriesPublishCeiling(t *testing.T) {
-	t.Parallel()
-
-	engine, closeEngine, err := sfu.NewLoopbackEngine()
-	if err != nil {
-		t.Fatalf("engine: %v", err)
-	}
-
-	defer closeEngine()
-
-	peer := newTestPeer(t, newTestHub(t, engine), engine, "alice", false)
-
-	if welcome := peer.next(t, "welcome"); welcome.PublishKbps != testPublishKbps {
-		t.Fatalf("welcome publish ceiling %d kbps, want the hub's %d", welcome.PublishKbps, testPublishKbps)
-	}
-}
-
 func TestWelcomeCarriesRelayCredentials(t *testing.T) {
 	t.Parallel()
 
