@@ -19,7 +19,7 @@ export type ThemeChoice = Theme | 'system'
 
 export const DEFAULT_THEME: ThemeChoice = 'dark'
 
-export function parseThemeChoice(stored: string | null): ThemeChoice {
+export function parseThemeChoice(stored: unknown): ThemeChoice {
   if (stored === 'system') return stored
   return THEMES.find((theme) => theme === stored) ?? DEFAULT_THEME
 }

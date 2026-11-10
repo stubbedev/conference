@@ -26,19 +26,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-export function parseHistory<P extends string>(stored: string | null, setup: string, purposes: readonly P[]): GpuHistory<P> {
-  if (stored === null) return freshHistory(setup)
+export function parseHistory<P extends string>(stored: unknown, setup: string, purposes: readonly P[]): GpuHistory<P> {
+  if (!isRecord(stored) || stored.setup !== setup || !isRecord(stored.quietMs) || !Array.isArray(stored.unusable)) return freshHistory(setup)
 
-  const value: unknown = JSON.parse(stored)
-  if (!isRecord(value) || value.setup !== setup || !isRecord(value.quietMs) || !Array.isArray(value.unusable)) return freshHistory(setup)
-
-  const quiet = value.quietMs
+  const quiet = stored.quietMs
   const quietMs: Partial<Record<P, number>> = {}
   for (const purpose of purposes) {
     const ms = quiet[purpose]
     if (typeof ms === 'number' && Number.isFinite(ms) && ms >= 0) quietMs[purpose] = ms
   }
-  const unusable = purposes.filter((purpose) => (value.unusable as unknown[]).includes(purpose))
+  const remembered: readonly unknown[] = stored.unusable
+  const unusable = purposes.filter((purpose) => remembered.includes(purpose))
   return { setup, quietMs, unusable }
 }
 

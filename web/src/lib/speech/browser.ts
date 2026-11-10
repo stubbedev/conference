@@ -10,6 +10,7 @@ import { Serial } from '@/lib/speech/serial'
 import { fetchRuntime, type Runtime } from '@/lib/speech/wasm'
 import { WorkerRpc, type WorkerEvent, type WorkerReply } from '@/lib/speech/worker'
 import { Workers } from '@/lib/speech/workers'
+import { readStored, writeStored } from '@/lib/storage'
 import { languageName, type Language } from '@/lib/translate/languages'
 import type { LoadingPart, TranslationLevel, VoiceChoice } from '@/lib/translate/types'
 
@@ -112,7 +113,7 @@ class BrowserEngines implements Engines {
     this.models = models
     this.languages = languages
     this.requiresWebGpu = !models.asr.fallback
-    this.gpuHistory = readGpuHistory(`${navigator.userAgent}\n${fingerprint(JSON.stringify(models))}`)
+    this.gpuHistory = parseHistory(readStored(GPU_HISTORY_KEY), `${navigator.userAgent}\n${fingerprint(JSON.stringify(models))}`, PURPOSES)
     for (const purpose of this.gpuHistory.unusable) this.noGpu.add(purpose)
   }
 
@@ -252,11 +253,7 @@ class BrowserEngines implements Engines {
   private remember(history: GpuHistory<Purpose>): void {
     if (history === this.gpuHistory) return
     this.gpuHistory = history
-    try {
-      localStorage.setItem(GPU_HISTORY_KEY, JSON.stringify(history))
-    } catch (err) {
-      console.warn(`live translation: could not remember how this GPU behaved (${message(err)}), so the next visit waits the first-visit time for it again`)
-    }
+    writeStored(GPU_HISTORY_KEY, history)
   }
 
   private async translate(sentence: Sentence): Promise<string> {
@@ -445,15 +442,6 @@ class BrowserEngines implements Engines {
         return channel.call<WorkerReply>({ ...settings, gpu: !this.noGpu.has(purpose), runtime, type: 'init' })
       })
     })
-  }
-}
-
-function readGpuHistory(setup: string): GpuHistory<Purpose> {
-  try {
-    return parseHistory(localStorage.getItem(GPU_HISTORY_KEY), setup, PURPOSES)
-  } catch (err) {
-    console.warn(`live translation: could not read how this GPU behaved before (${message(err)}), so it gets the first-visit time`)
-    return parseHistory(null, setup, PURPOSES)
   }
 }
 
