@@ -92,6 +92,7 @@ export const ControlsBar = memo(function ControlsBar({
   const translateLabel = translating ? 'Stop live translation' : 'Start live translation'
   const shareLabel = sharing ? 'Stop sharing' : 'Share your screen'
   const recordLabel = recording ? 'Stop recording' : 'Record the call'
+  const chatName = chatOpen ? 'Close chat' : 'Open chat'
   const [revealed, setRevealed] = useState(true)
   const visible = !fullscreen || revealed
   const hideTimer = useRef<number | undefined>(undefined)
@@ -145,7 +146,6 @@ export const ControlsBar = memo(function ControlsBar({
                 recording ? 'gap-1.5 text-xs font-semibold' : 'gap-2',
               )}
               onClick={onRecord}
-              aria-label={recordLabel}
             >
               {recording ? (
                 <>
@@ -173,7 +173,6 @@ export const ControlsBar = memo(function ControlsBar({
               size="icon"
               className={cn(ROUND, 'hidden sm:inline-flex')}
               onClick={onShare}
-              aria-label={shareLabel}
             >
               {sharing ? <MonitorX /> : <MonitorUp />}
             </Button>
@@ -186,7 +185,6 @@ export const ControlsBar = memo(function ControlsBar({
               size="icon"
               className={ROUND}
               onClick={onTranslate}
-              aria-label={translateLabel}
               aria-pressed={translating}
             >
               <Languages />
@@ -196,7 +194,7 @@ export const ControlsBar = memo(function ControlsBar({
         <DropdownMenu>
           <Hint label="More options">
             <DropdownMenuTrigger asChild>
-              <Button variant="secondary" size="icon" className={ROUND} aria-label="More options">
+              <Button variant="secondary" size="icon" className={ROUND}>
                 <MoreVertical />
               </Button>
             </DropdownMenuTrigger>
@@ -227,14 +225,14 @@ export const ControlsBar = memo(function ControlsBar({
               <Users />
               People ({peopleCount})
             </DropdownMenuItem>
-            <DropdownMenuItem className="sm:hidden" onSelect={onToggleChat} aria-label={chatOpen ? 'Close chat' : 'Open chat'}>
+            <DropdownMenuItem className="sm:hidden" onSelect={onToggleChat} aria-label={chatName}>
               <MessageSquare />
               Chat{unread > 0 ? ` (${unread > 9 ? '9+' : unread} new)` : ''}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <Hint label="Leave call">
-          <Button variant="destructive" className="h-11 w-16 rounded-full [&_svg]:size-5" onClick={onLeave} aria-label="Leave">
+        <Hint label="Leave call" name="Leave">
+          <Button variant="destructive" className="h-11 w-16 rounded-full [&_svg]:size-5" onClick={onLeave}>
             <PhoneOff />
           </Button>
         </Hint>
@@ -242,13 +240,12 @@ export const ControlsBar = memo(function ControlsBar({
 
       <div className="flex items-center justify-end gap-1">
         <span className="hidden sm:contents">{children}</span>
-        <Hint label={peopleOpen ? 'Hide people' : 'Show everyone'}>
+        <Hint label={peopleOpen ? 'Hide people' : 'Show everyone'} name="Participants">
           <Button
             variant={peopleOpen ? 'secondary' : 'ghost'}
             size="icon"
             className={cn(SIDE, 'relative hidden sm:inline-flex')}
             onClick={onTogglePeople}
-            aria-label="Participants"
             aria-pressed={peopleOpen}
           >
             <Users />
@@ -257,13 +254,12 @@ export const ControlsBar = memo(function ControlsBar({
             </span>
           </Button>
         </Hint>
-        <Hint label={chatOpen ? 'Close chat (C)' : 'Chat with everyone (C)'}>
+        <Hint label={chatOpen ? 'Close chat (C)' : 'Chat with everyone (C)'} name={chatName}>
           <Button
             variant={chatOpen ? 'secondary' : 'ghost'}
             size="icon"
             className={cn(SIDE, 'relative hidden sm:inline-flex')}
             onClick={onToggleChat}
-            aria-label={chatOpen ? 'Close chat' : 'Open chat'}
           >
             <MessageSquare />
             {unread > 0 && (

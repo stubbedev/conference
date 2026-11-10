@@ -31,13 +31,12 @@ export function DeviceToggle({ kind, on, available, onToggle, withShortcut = fal
   const Icon = kind === 'mic' ? (live ? Mic : MicOff) : live ? Video : VideoOff
 
   return (
-    <Hint label={hint}>
+    <Hint label={hint} name={label}>
       <Button
         variant={live ? 'secondary' : 'destructive'}
         size="icon"
         className={cn('relative', className)}
         onClick={onToggle}
-        aria-label={label}
       >
         <Icon />
         {!available && (

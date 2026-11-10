@@ -125,8 +125,8 @@ export function SidePanel({ tab, peopleCount, unread, onTab, onClose, people, ch
             )}
           </TabButton>
         </div>
-        <Hint label="Close panel (Esc)" side="bottom">
-          <Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close panel">
+        <Hint label="Close panel (Esc)" name="Close panel" side="bottom">
+          <Button variant="ghost" size="icon" className="size-8" onClick={onClose}>
             <X />
           </Button>
         </Hint>

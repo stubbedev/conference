@@ -115,12 +115,11 @@ export function Prejoin({
                   className="size-12 rounded-full [&_svg]:size-5"
                 />
                 {canBlur && onToggleBlur && (
-                  <Hint label={blur ? 'Turn off background blur' : 'Blur background'} side="top">
+                  <Hint label={blur ? 'Turn off background blur' : 'Blur background'}>
                     <Button
                       variant={blur ? 'default' : 'secondary'}
                       size="icon"
                       className="size-12 rounded-full [&_svg]:size-5"
-                      aria-label={blur ? 'Turn off background blur' : 'Blur background'}
                       aria-pressed={blur}
                       disabled={!cam}
                       onClick={onToggleBlur}

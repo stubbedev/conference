@@ -266,7 +266,6 @@ export const VideoTile = memo(function VideoTile({
           <button
             type="button"
             onClick={() => onTogglePin(tileKey)}
-            aria-label={pinned ? 'Unpin' : 'Pin to main view'}
             className={cn(
               'absolute top-2 right-2 grid size-7 cursor-pointer place-items-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-opacity hover:bg-black/80',
               pinned ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',

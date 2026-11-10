@@ -1,6 +1,6 @@
 import { Circle, Languages, Link2, TriangleAlert } from 'lucide-react'
 
-import { Hint } from '@/components/Hint'
+import { Hint, TextHint } from '@/components/Hint'
 import { SpeechLoading } from '@/components/SpeechLoading'
 import type { TranslationConfig } from '@/lib/api'
 import type { MemberInfo } from '@/lib/sfu'
@@ -64,11 +64,10 @@ export function RoomHeader({
   return (
     <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex p-4">
       <div className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-2 [&>*]:shadow-sm">
-        <Hint label="Copy invite link (tap 5× for diagnostics)" side="bottom">
+        <Hint label="Copy invite link (tap 5× for diagnostics)" name="Copy invite link" side="bottom">
           <button
             type="button"
             onClick={onTitleTap}
-            aria-label="Copy invite link"
             className="group flex min-w-0 cursor-pointer items-center gap-1.5 rounded-full bg-background/85 px-3 py-1.5 text-sm font-medium backdrop-blur transition-colors hover:bg-background"
           >
             <span className="hud-title max-w-48 truncate sm:max-w-80">{title}</span>
@@ -82,7 +81,7 @@ export function RoomHeader({
           </span>
         )}
         {translationBy && (
-          <Hint
+          <TextHint
             label={[
               `Started by ${translationBy === selfId ? 'you' : (members.find((m) => m.id === translationBy)?.name ?? 'someone')}.`,
               translatorStatus?.detail ?? '',
@@ -96,10 +95,10 @@ export function RoomHeader({
                 {translatorStatus && ` · ${TRANSLATOR_STATE_LABELS[translatorStatus.state]}`}
               </span>
             </span>
-          </Hint>
+          </TextHint>
         )}
         {translationFailure && (
-          <Hint label={`${translationFailure} Click to dismiss.`} side="bottom">
+          <TextHint label={`${translationFailure} Click to dismiss.`} side="bottom">
             <button
               type="button"
               onClick={onDismissFailure}
@@ -108,16 +107,16 @@ export function RoomHeader({
               <TriangleAlert className="size-3 shrink-0" />
               <span className="truncate">Live translation failed: {translationFailure}</span>
             </button>
-          </Hint>
+          </TextHint>
         )}
         {translatorStatus?.loading && <SpeechLoading loading={translatorStatus.loading} />}
         {translatorStatus && translationWarnings(translatorStatus, lang, translation.languages).map((warning) => (
-          <Hint key={warning} label={warning} side="bottom">
+          <TextHint key={warning} label={warning} side="bottom">
             <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-amber-400 px-2.5 py-1 text-xs font-medium text-black">
               <TriangleAlert className="size-3 shrink-0" />
               <span className="truncate">{warning}</span>
             </span>
-          </Hint>
+          </TextHint>
         ))}
       </div>
     </header>

@@ -281,9 +281,9 @@ export function DeviceSettingsPopover({
 }: DeviceSettingsProps & { translation?: ReactNode }) {
   return (
     <Popover>
-      <Hint label="Audio and video settings" side="top">
+      <Hint label="Audio and video settings">
         <PopoverTrigger asChild>
-          <Button variant="ghost" size="icon" aria-label="Audio and video settings">
+          <Button variant="ghost" size="icon">
             <Settings2 />
           </Button>
         </PopoverTrigger>

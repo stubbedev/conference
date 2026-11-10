@@ -1,6 +1,6 @@
 import { RotateCw, TriangleAlert } from 'lucide-react'
 
-import { Hint } from '@/components/Hint'
+import { TextHint } from '@/components/Hint'
 import { overall } from '@/lib/speech/progress'
 import type { Loading, LoadingPart, PartLoading } from '@/lib/translate/types'
 import { cn } from '@/lib/utils'
@@ -72,9 +72,9 @@ function LoadingFailed({ reason, retry }: { reason: string; retry: () => void })
   return (
     <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-destructive py-1 pr-1 pl-2.5 text-xs font-medium text-white">
       <TriangleAlert className="size-3 shrink-0" />
-      <Hint label={reason} side="bottom">
+      <TextHint label={reason} side="bottom">
         <span className="truncate">Live translation could not load: {reason}</span>
-      </Hint>
+      </TextHint>
       <button
         type="button"
         onClick={retry}

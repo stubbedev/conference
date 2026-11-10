@@ -1,4 +1,4 @@
-import type { FocusEvent, ReactNode } from 'react'
+import { cloneElement, type AriaAttributes, type FocusEvent, type ReactElement, type ReactNode } from 'react'
 import { Tooltip } from 'radix-ui'
 
 // The one tooltip provider, at the app root; a Hint outside it throws.
@@ -24,17 +24,35 @@ function onlyKeyboardFocus(event: FocusEvent<HTMLButtonElement>) {
   if (!event.currentTarget.matches(':focus-visible')) event.preventDefault()
 }
 
-interface HintProps {
+interface TextHintProps {
   label: string
   side?: 'top' | 'right' | 'bottom' | 'left'
-  children: ReactNode
+  children: ReactElement
 }
 
-// The app's one tooltip style around an interactive control: the child
-// becomes the trigger (asChild), so it must accept trigger props — a
-// Button or any plain element. Give the child a matching aria-label;
-// the tooltip itself only exists while hovered or focused.
-export function Hint({ label, side = 'top', children }: HintProps) {
+interface HintProps extends TextHintProps {
+  /** The control's accessible name, where it deliberately differs from the label. */
+  name?: string
+  children: ReactElement<Pick<AriaAttributes, 'aria-label'>>
+}
+
+// The app's one tooltip style around a control, which it also names: the
+// label is the control's accessible name unless `name` gives another.
+// The child becomes the trigger (asChild), so it must accept trigger
+// props — a Button or any plain element. The name is set on the child
+// itself, replacing any aria-label written there: Slot lets a child's
+// own props win over the trigger's, and the name has this one source.
+export function Hint({ label, name = label, side, children }: HintProps) {
+  return (
+    <TextHint label={label} side={side}>
+      {cloneElement(children, { 'aria-label': name })}
+    </TextHint>
+  )
+}
+
+// The same tooltip on something its own text already names, a status
+// pill or a line cut short: it adds detail and leaves the name alone.
+export function TextHint({ label, side = 'top', children }: TextHintProps) {
   return (
     <Tooltip.Root>
       <Tooltip.Trigger asChild onFocus={onlyKeyboardFocus}>

@@ -13,7 +13,7 @@ export function ThemeToggle() {
 
   return (
     <Hint label={label} side="bottom">
-      <Button variant="ghost" size="icon" className="size-8" aria-label={label} onClick={() => setTheme(next)}>
+      <Button variant="ghost" size="icon" className="size-8" onClick={() => setTheme(next)}>
         {current === 'light' ? <Sun /> : current === 'dark' ? <Moon /> : <ScanLine />}
       </Button>
     </Hint>
