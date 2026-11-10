@@ -45,8 +45,15 @@ export const shareMode = (mode) => {
 
 const SCROLL_PX_PER_FRAME = 12
 
+// How long the stand-in keeps delivering its picture after the capture
+// starts, however still: the call has to attach an encoder before a frame
+// can reach anyone, and a frame delivered before that is lost.
+const CAPTURE_START_MS = 2000
+
 // The share is a canvas handed out where getDisplayMedia would hand out a
-// screen; everything after the picker is the call's own path.
+// screen; everything after the picker is the call's own path. Like a
+// screen it shows a picture from the start, whatever the mode; a still
+// one repeats the same picture until CAPTURE_START_MS has passed.
 export const fakeDisplay = `(() => {
   window.__shareMode = 'typing'
   navigator.mediaDevices.getDisplayMedia = async () => {
@@ -61,7 +68,7 @@ export const fakeDisplay = `(() => {
     let offset = 0
     const draw = () => {
       const mode = window.__shareMode
-      if (mode === 'still') return
+      if (mode === 'still' && performance.now() - startedAt > ${CAPTURE_START_MS}) return
       if (mode === 'scrolling') offset += ${SCROLL_PX_PER_FRAME}
       ctx.fillStyle = '#fff'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
@@ -73,9 +80,9 @@ export const fakeDisplay = `(() => {
         const y = line * lineHeight - (offset % lineHeight) + lineHeight
         ctx.fillText('line ' + index + ' frame ' + frame + ' ' + text(index), 10, y)
       }
-      frame++
+      if (mode !== 'still') frame++
     }
-    draw()
+    const startedAt = performance.now()
     setInterval(draw, 16)
     return canvas.captureStream(60)
   }

@@ -6,7 +6,9 @@
 // follows what it sends meets the next scroll with an encoder held to a
 // trickle: the viewer sees a few frames a second and freezes. This test
 // prints the share second by second and fails when a scrolling burst does
-// not play fluidly.
+// not play fluidly, when the viewer needs a keyframe after every still
+// stretch, or when a share started on a still screen does not get a high
+// estimate at once.
 //
 //   node web/e2e/share-burst.mjs [--server path/to/binary] [--chrome binary] [--firefox binary] [--skip-firefox] [--cycles N]
 //
@@ -19,6 +21,7 @@ import { join, resolve } from 'node:path'
 
 import { createRoom, evalJs, findChrome, findFirefox, freePort, joinRoom, launchChrome, launchFirefox, sleep, stopProcess, waitFor } from './browser.mjs'
 import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
+import { SCREEN_SHARE_FLUID_MAX_BITRATE } from '../src/lib/encodings.ts'
 import { clickButtonByTitle, fakeDisplay, remoteScreen, SHARE_WIDTH, shareMode, shareReceiveCounters, shareSendCounters } from './share.mjs'
 
 const args = parseArgs(process.argv.slice(2))
@@ -34,6 +37,18 @@ const WARMUP_SECONDS = 5
 // frames a second across it, and does not freeze once it has started.
 const BURST_MIN_FPS = 15
 const MAX_FROZEN_MS = 500
+
+// A keyframe is the largest frame; one at the start of every burst would
+// arrive exactly when the bitrate is needed most. Loss may cost one.
+const MAX_KEYFRAMES = 1
+
+// A share that starts on a still screen must have the estimate a scroll
+// needs within libwebrtc's two-second start window, not climb to it at
+// 8% a second.
+const START_SECONDS = 3
+const START_SAMPLE_MS = 250
+const START_WINDOW_MS = 2000
+const START_MIN_ESTIMATE = SCREEN_SHARE_FLUID_MAX_BITRATE
 
 const phaseAt = (second) => (Math.floor(second / PHASE_SECONDS) % 2 === 0 ? 'scrolling' : 'still')
 
@@ -56,6 +71,9 @@ function secondOf(second, before, after, estimate) {
     freezes: after.recv.freezes - before.recv.freezes,
     frozenMs: after.recv.frozenMs - before.recv.frozenMs,
     keyframes: after.recv.keyframes - before.recv.keyframes,
+    viewerPlis: after.recv.plis - before.recv.plis,
+    sentKeyframes: (h.keyframes ?? 0) - (ph.keyframes ?? 0),
+    presenterPlis: (h.plis ?? 0) - (ph.plis ?? 0) + (h.firs ?? 0) - (ph.firs ?? 0),
     lost: after.recv.lost - before.recv.lost,
     width: after.recv.width,
     encodedFps: (h.encoded ?? 0) - (ph.encoded ?? 0),
@@ -84,8 +102,8 @@ async function timeline(presenter, viewer, seconds) {
     const ssrc = after.send?.layers.h?.ssrc
     const row = secondOf(second, before, after, ssrc === undefined ? null : await presenter.outgoingEstimate(ssrc))
     console.log(
-      `  t=${String(second).padStart(2)}s ${phase.padEnd(9)} viewer ${String(row.viewerFps).padStart(2)} fps, +${row.freezes} freeze (${row.frozenMs} ms), +${row.keyframes} key, +${row.lost} lost, ${row.width}px` +
-        ` | presenter h ${String(row.encodedFps).padStart(2)} fps, ${mbps(row.sentBps)} Mbps (target ${mbps(row.targetBps)}), ${row.limit}` +
+      `  t=${String(second).padStart(2)}s ${phase.padEnd(9)} viewer ${String(row.viewerFps).padStart(2)} fps, +${row.freezes} freeze (${row.frozenMs} ms), +${row.keyframes} key, +${row.viewerPlis} pli, +${row.lost} lost, ${row.width}px` +
+        ` | presenter h ${String(row.encodedFps).padStart(2)} fps, +${row.sentKeyframes} key, +${row.presenterPlis} pli, ${mbps(row.sentBps)} Mbps (target ${mbps(row.targetBps)}), ${row.limit}` +
         ` | estimate ${row.estimateBps === null ? 'unknown' : `${mbps(row.estimateBps)} Mbps`}`,
     )
     out.push(row)
@@ -111,23 +129,45 @@ function summarize(rows) {
     stillEstimates: estimates(still),
     burstFreezes: inBursts.reduce((sum, row) => sum + row.freezes, 0),
     burstFrozenMs: Math.max(0, ...inBursts.map((row) => row.frozenMs)),
+    keyframes: rows.reduce((sum, row) => sum + row.keyframes, 0),
   }
 }
 
 const estimateMbps = (bps) => (bps.length ? (mean(bps) / 1e6).toFixed(1) : 'unknown')
 const minEstimateMbps = (bps) => (bps.length ? (Math.min(...bps) / 1e6).toFixed(1) : 'unknown')
 
+// The share's estimate over its first seconds, sampled from its first
+// frame on: a share that starts on a still screen sends a few frames and
+// then nothing, and its estimate must still start high rather than climb.
+async function startingEstimates(label, presenter) {
+  const sending = await waitFor(presenter, shareSendCounters, (v) => (v?.layers.h?.bytes ?? 0) > 0, 30000)
+  if (!sending.ok) throw new Error(`${label}: the share never sent its first frame`)
+  const ssrc = sending.value.layers.h.ssrc
+  const start = Date.now()
+  const samples = []
+  while (Date.now() - start < START_SECONDS * 1000) {
+    samples.push({ ms: Date.now() - start, bps: await presenter.outgoingEstimate(ssrc) })
+    await sleep(START_SAMPLE_MS)
+  }
+  return samples
+}
+
+const startEstimateOf = (samples) => Math.max(0, ...samples.filter((s) => s.ms <= START_WINDOW_MS && s.bps !== null).map((s) => s.bps))
+
 async function present(label, presenter, viewer, base) {
   const room = await createRoom(base, `burst-${label}`)
   await joinRoom(presenter, room.url)
   await joinRoom(viewer, room.url)
   await evalJs(presenter, fakeDisplay)
+  await evalJs(presenter, shareMode('still'))
   if (!(await clickButtonByTitle(presenter, 'Share your screen'))) throw new Error(`${label}: no "Share your screen" button`)
+  const start = await startingEstimates(label, presenter)
+  console.log(`${label} (${presenter.browser}) starting on a still screen, estimate: ${start.map((s) => `${(s.ms / 1000).toFixed(1)}s ${s.bps === null ? 'unknown' : mbps(s.bps)}`).join(', ')} Mbps`)
   const shown = await waitFor(viewer, remoteScreen, (v) => v?.width === SHARE_WIDTH, 30000)
   if (!shown.ok) throw new Error(`${label}: the share never reached the viewer at ${SHARE_WIDTH}px (${JSON.stringify(shown.value)})`)
   await sleep(WARMUP_SECONDS * 1000)
   console.log(`${label} (${presenter.browser}) presenting to ${viewer.browser}:`)
-  return summarize(await timeline(presenter, viewer, cycles * PHASE_SECONDS * 2))
+  return { startEstimate: startEstimateOf(start), ...summarize(await timeline(presenter, viewer, cycles * PHASE_SECONDS * 2)) }
 }
 
 async function main() {
@@ -163,6 +203,7 @@ async function main() {
         Object.entries(results).map(([label, s]) => [
           label,
           {
+            'estimate at start': mbps(s.startEstimate),
             'viewer fps per burst': s.burstFps.map((fps) => fps.toFixed(0)).join(' '),
             'encoded fps scrolling': s.scrollEncodedFps.toFixed(1),
             'Mbps scrolling': s.scrollMbps.toFixed(2),
@@ -171,6 +212,7 @@ async function main() {
             'estimate still (min)': minEstimateMbps(s.stillEstimates),
             'freezes in bursts': s.burstFreezes,
             'longest ms': s.burstFrozenMs,
+            keyframes: s.keyframes,
           },
         ]),
       ),
@@ -179,6 +221,8 @@ async function main() {
       const worst = Math.min(...s.burstFps)
       if (worst < BURST_MIN_FPS) failures.push(`${label}: a scrolling burst played at ${worst.toFixed(1)} fps, want at least ${BURST_MIN_FPS}`)
       if (s.burstFrozenMs > MAX_FROZEN_MS) failures.push(`${label}: the share froze for ${s.burstFrozenMs} ms in the middle of a scrolling burst`)
+      if (s.keyframes > MAX_KEYFRAMES) failures.push(`${label}: the viewer decoded ${s.keyframes} keyframes over ${cycles} bursts, want at most ${MAX_KEYFRAMES}`)
+      if (s.startEstimate < START_MIN_ESTIMATE) failures.push(`${label}: a share started on a still screen estimated ${mbps(s.startEstimate)} Mbps within ${START_WINDOW_MS} ms, want at least ${mbps(START_MIN_ESTIMATE)}`)
     }
     if (failures.length) {
       console.error('\nSHARE BURST FAILED')
@@ -186,7 +230,7 @@ async function main() {
       console.error('\nserver log tail:\n' + server.log().split('\n').slice(-20).join('\n'))
       process.exitCode = 1
     } else {
-      console.log('\nSHARE BURST OK: scrolling bursts stay fluid after the screen sat still')
+      console.log('\nSHARE BURST OK: the share starts fast, and scrolling bursts stay fluid and need no keyframe after the screen sat still')
     }
   } finally {
     await Promise.all(procs.map((p) => stopProcess(p, 'SIGKILL')))
