@@ -48,10 +48,10 @@ func (r *recordingVoice) speak(_ context.Context, _ string, _ language, _ voiceC
 	}
 
 	if own != nil && r.unconverted {
-		return speech{}, &unconvertedError{stock: speech{pcm: []byte{0, 0}, rate: vad.Rate}, err: errEngineDown}
+		return speech{}, &unconvertedError{stock: speech{pcm: []byte{0, 0}, rate: vad.Rate, converting: 0}, err: errEngineDown}
 	}
 
-	return speech{pcm: []byte{0, 0}, rate: vad.Rate}, nil
+	return speech{pcm: []byte{0, 0}, rate: vad.Rate, converting: 0}, nil
 }
 
 func (r *recordingVoice) seen() []bool {

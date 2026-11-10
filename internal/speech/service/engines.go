@@ -35,6 +35,9 @@ const (
 type speech struct {
 	pcm  []byte
 	rate int
+	// converting is how long a conversion engine took to make it the
+	// speaker's own voice; zero otherwise.
+	converting time.Duration
 }
 
 type speechEngines interface {
@@ -340,10 +343,14 @@ func (e *httpEngines) converted(ctx context.Context, samples []int16, rate uint3
 		return speech{}, &unconvertedError{stock: spoken, err: fmt.Errorf("%s: encode the voice: %w", conversion, err)}
 	}
 
+	started := time.Now()
+
 	converted, err := e.convert(ctx, stock, own)
 	if err != nil {
 		return speech{}, &unconvertedError{stock: spoken, err: err}
 	}
+
+	converted.converting = time.Since(started)
 
 	return converted, nil
 }
@@ -392,7 +399,7 @@ func pcmSpeech(use purpose, samples []int16, rate uint32) (speech, error) {
 		return speech{}, fmt.Errorf("%s: encode the voice: %w", use, err)
 	}
 
-	return speech{pcm: pcm, rate: int(rate)}, nil
+	return speech{pcm: pcm, rate: int(rate), converting: 0}, nil
 }
 
 func (e *httpEngines) stockVoice(lang language, choice voiceChoice) (string, error) {
@@ -496,5 +503,5 @@ func (f *fakeEngines) speak(_ context.Context, _ string, _ language, _ voiceChoi
 		return speech{}, fmt.Errorf("fake voice: %w", err)
 	}
 
-	return speech{pcm: pcm, rate: vad.Rate}, nil
+	return speech{pcm: pcm, rate: vad.Rate, converting: 0}, nil
 }

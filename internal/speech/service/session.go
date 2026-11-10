@@ -394,6 +394,8 @@ func seconds(samples int) float64 {
 }
 
 func (s *session) translate(ctx context.Context, current *speaker, job final, target language, text string, earlier []string) {
+	started := time.Now()
+
 	translated, err := s.engines.translate(ctx, text, job.lang, target, earlier)
 	if err != nil {
 		logFailure(ctx, "translation, sent the original", err)
@@ -408,6 +410,9 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 	if !s.wantsVoice(target.Code) {
 		return
 	}
+
+	translating := time.Since(started)
+	voicing := time.Now()
 
 	spoken, err := s.engines.speak(ctx, translated, target, job.voice, job.own)
 	cloned := job.own != nil
@@ -429,6 +434,9 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 
 		return
 	}
+
+	log.Printf("voice lang=%s translate_ms=%d voice_ms=%d convert_ms=%d own=%t",
+		target.Code, translating.Milliseconds(), time.Since(voicing).Milliseconds(), spoken.converting.Milliseconds(), cloned)
 
 	s.emit(ctx, voiceFrame{
 		header: wire.VoiceHeader{

@@ -30,7 +30,7 @@ func (s stubEngines) translate(_ context.Context, text string, _, target languag
 }
 
 func (stubEngines) speak(context.Context, string, language, voiceChoice, *reference) (speech, error) {
-	return speech{pcm: []byte{0, 0}, rate: vad.Rate}, nil
+	return speech{pcm: []byte{0, 0}, rate: vad.Rate, converting: 0}, nil
 }
 
 type outbox struct {
