@@ -7,6 +7,7 @@ import { useLatest } from '@/hooks/latest'
 import {
   createMicPipeline,
   DEVICE_LABELS,
+  deviceNoun,
   facingFromLabel,
   facingFromTrack,
   isMobileDevice,
@@ -47,7 +48,7 @@ const UNSENT: Record<TrackKind, string> = {
 }
 
 function trackFailure(kind: TrackKind, error: unknown): string {
-  const device = DEVICE_LABELS[kind].toLowerCase()
+  const device = deviceNoun(kind)
   console.error(`media: opening the ${device}`, error)
   return describeTrackOpenError(device, error)
 }
@@ -359,7 +360,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       if (mode === 'enable' && !controlsRef.current[kind]) return
       const failed = (error: unknown) => {
         const message = trackFailure(kind, error)
-        if (mode === 'switch') toast.error(`Could not switch the ${DEVICE_LABELS[kind].toLowerCase()}. ${message}`)
+        if (mode === 'switch') toast.error(`Could not switch the ${deviceNoun(kind)}. ${message}`)
         if (mode === 'enable') toast.error(message)
       }
       const prefs = prefsRef.current
@@ -411,9 +412,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       }
       const { track, deviceId: usedId, facing: usedFacing, fallback } = opened
       if (deviceId && fallback && mode !== 'recover') {
-        toast(
-          `That ${DEVICE_LABELS[kind].toLowerCase()} is unavailable here, using the system default.`,
-        )
+        toast(`That ${deviceNoun(kind)} is unavailable here, using the system default.`)
       }
       let outbound = track
       if (kind === 'mic') {

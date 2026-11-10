@@ -89,6 +89,11 @@ export const DEVICE_LABELS: Record<DeviceKind, string> = {
   speaker: 'Speaker',
 }
 
+// The device as it reads inside a sentence.
+export function deviceNoun(kind: DeviceKind): string {
+  return DEVICE_LABELS[kind].toLowerCase()
+}
+
 export function blurToggleLabel(blur: boolean): string {
   return blur ? 'Turn off background blur' : 'Blur background'
 }
@@ -334,7 +339,7 @@ async function requestTrack(
   const track = streamTrack(stream, kind)
   if (track) return track
   stopMediaStream(stream)
-  throw new DOMException(`The browser returned no ${DEVICE_LABELS[kind].toLowerCase()} track`, 'NotFoundError')
+  throw new DOMException(`The browser returned no ${deviceNoun(kind)} track`, 'NotFoundError')
 }
 
 export interface OpenedTrack {
@@ -394,7 +399,7 @@ export async function openTrackWithFallback(
         fallback: attempt.fallback,
       }
     } catch (err) {
-      console.warn(`media: opening the ${DEVICE_LABELS[kind].toLowerCase()} "${attempt.deviceId || 'default'}"`, err)
+      console.warn(`media: opening the ${deviceNoun(kind)} "${attempt.deviceId || 'default'}"`, err)
       error = err
     }
   }

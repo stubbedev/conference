@@ -1,6 +1,6 @@
 import { Mic, MicOff, Video, VideoOff } from 'lucide-react'
 
-import type { TrackKind } from '@/hooks/media'
+import { deviceNoun, type TrackKind } from '@/hooks/media'
 import { Hint } from '@/components/Hint'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -24,7 +24,7 @@ export function DeviceToggle({ kind, on, available, onToggle, withShortcut = fal
   const live = available && on
   const label = !available ? labels.blocked : on ? labels.on : labels.off
   const hint = !available
-    ? `Your browser has not allowed the ${kind === 'mic' ? 'microphone' : 'camera'} yet. Click to ask again.`
+    ? `Your browser has not allowed the ${deviceNoun(kind)} yet. Click to ask again.`
     : withShortcut
       ? `${label} (${labels.shortcut})`
       : label
