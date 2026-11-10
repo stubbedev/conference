@@ -317,12 +317,30 @@ func (e *httpEngines) speak(ctx context.Context, text string, lang language, cho
 		return speech{}, err
 	}
 
-	spoken, err := decodeSpeech(voice, reply.Bytes())
+	samples, rate, err := wav.Decode(reply.Bytes())
+	if err != nil {
+		return speech{}, fmt.Errorf("%s: read the voice: %w", voice, err)
+	}
+
+	spoken, err := pcmSpeech(voice, samples, rate)
 	if err != nil || own == nil || e.settings.conversion == nil {
 		return spoken, err
 	}
 
-	converted, err := e.convert(ctx, reply.Bytes(), own)
+	return e.converted(ctx, samples, rate, spoken, own)
+}
+
+// converted is the stock voice in the speaker's own voice, or, if that
+// fails, an unconvertedError that carries the stock voice.
+func (e *httpEngines) converted(ctx context.Context, samples []int16, rate uint32, spoken speech, own *reference) (speech, error) {
+	// A streaming voice engine's WAV has no real sizes in its header, which
+	// a conversion engine may refuse, so it gets a WAV written afresh.
+	stock, err := wav.Encode(samples, rate)
+	if err != nil {
+		return speech{}, &unconvertedError{stock: spoken, err: fmt.Errorf("%s: encode the voice: %w", conversion, err)}
+	}
+
+	converted, err := e.convert(ctx, stock, own)
 	if err != nil {
 		return speech{}, &unconvertedError{stock: spoken, err: err}
 	}
@@ -365,6 +383,10 @@ func decodeSpeech(use purpose, data []byte) (speech, error) {
 		return speech{}, fmt.Errorf("%s: read the voice: %w", use, err)
 	}
 
+	return pcmSpeech(use, samples, rate)
+}
+
+func pcmSpeech(use purpose, samples []int16, rate uint32) (speech, error) {
 	pcm, err := binary.Append(make([]byte, 0, len(samples)*pcmWidth), binary.LittleEndian, samples)
 	if err != nil {
 		return speech{}, fmt.Errorf("%s: encode the voice: %w", use, err)

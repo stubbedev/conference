@@ -1,9 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
+	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -440,5 +444,69 @@ func TestConversionSettings(t *testing.T) {
 		if err == nil {
 			t.Errorf("%s was accepted", name)
 		}
+	}
+}
+
+// streamedWAV is a WAV as a streaming voice engine sends it: the RIFF and
+// data sizes are unknown when the header goes out, so both are 0xFFFFFFFF.
+func streamedWAV(t *testing.T, samples []int16, rate uint32) []byte {
+	t.Helper()
+
+	data, err := wav.Encode(samples, rate)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	const riffSize, dataSize = 4, 40
+
+	for _, at := range []int{riffSize, dataSize} {
+		binary.LittleEndian.PutUint32(data[at:], math.MaxUint32)
+	}
+
+	return data
+}
+
+func TestConversionGetsAWellFormedWAV(t *testing.T) {
+	t.Parallel()
+
+	stock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(streamedWAV(t, []int16{1, 2, 3}, voiceTestRate))
+	}))
+	t.Cleanup(stock.Close)
+
+	var sent []byte
+
+	converter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request convertRequest
+
+		decodeInto(t, r, &request)
+
+		sent, _ = base64.StdEncoding.DecodeString(request.Request.Audio)
+
+		converted, err := wav.Encode([]int16{4}, convertTestRate)
+		if err != nil {
+			t.Errorf("encode: %v", err)
+		}
+
+		_, _ = io.WriteString(w, `{"audio":"`+base64.StdEncoding.EncodeToString(converted)+`"}`)
+	}))
+	t.Cleanup(converter.Close)
+
+	settings := convertingSettings(t, stock, converter.URL+"/v1")
+	settings.voice.endpoint = mustURL(t, stock.URL)
+
+	_, err := newHTTPEngines(settings).speak(t.Context(), helloGerman, mustLanguage(t, settings, "de"), voiceOwn,
+		&reference{wav: []byte("RIFF"), text: sampleText})
+	if err != nil {
+		t.Fatalf("speak: %v", err)
+	}
+
+	want, err := wav.Encode([]int16{1, 2, 3}, voiceTestRate)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	if !bytes.Equal(sent, want) {
+		t.Fatalf("the converter got % x, want a WAV with its real sizes % x", sent, want)
 	}
 }
