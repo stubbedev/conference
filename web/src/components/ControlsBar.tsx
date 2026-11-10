@@ -51,7 +51,8 @@ interface ControlsBarProps {
   onRecord: () => void
   onLeave: () => void
   onToggleChat: () => void
-  onToggleFullscreen: () => void
+  /** Null where the page cannot go full screen; the menu then leaves it out. */
+  onToggleFullscreen: (() => void) | null
   children?: ReactNode
 }
 
@@ -215,12 +216,14 @@ export const ControlsBar = memo(function ControlsBar({
                 {blurLabel}
               </DropdownMenuItem>
             )}
-            <DropdownMenuItem onSelect={onToggleFullscreen} aria-keyshortcuts={fullscreenKey}>
-              {fullscreen ? <Minimize2 /> : <Maximize2 />}
-              <span>
-                {fullscreen ? 'Exit full screen' : 'Full screen'} <span aria-hidden>({fullscreenKey})</span>
-              </span>
-            </DropdownMenuItem>
+            {onToggleFullscreen && (
+              <DropdownMenuItem onSelect={onToggleFullscreen} aria-keyshortcuts={fullscreenKey}>
+                {fullscreen ? <Minimize2 /> : <Maximize2 />}
+                <span>
+                  {fullscreen ? 'Exit full screen' : 'Full screen'} <span aria-hidden>({fullscreenKey})</span>
+                </span>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator className="sm:hidden" />
             <DropdownMenuItem className="sm:hidden" onSelect={onTogglePeople}>
               <Users />

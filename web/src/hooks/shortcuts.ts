@@ -9,7 +9,8 @@ export interface ShortcutActions {
   toggleMic: () => void
   toggleCam: () => void
   toggleChat: () => void
-  toggleFullscreen: () => void
+  /** Null where the page cannot go full screen. */
+  toggleFullscreen: (() => void) | null
 }
 
 export type Shortcut = keyof ShortcutActions
@@ -33,7 +34,7 @@ export function useShortcuts(phase: Phase, { toggleMic, toggleCam, toggleChat, t
       if (key === KEYS.toggleMic) toggleMic()
       else if (key === KEYS.toggleCam) toggleCam()
       else if (key === KEYS.toggleChat && phase === 'live') toggleChat()
-      else if (key === KEYS.toggleFullscreen) toggleFullscreen()
+      else if (key === KEYS.toggleFullscreen) toggleFullscreen?.()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
