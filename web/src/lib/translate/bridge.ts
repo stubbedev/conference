@@ -233,7 +233,8 @@ export class ServerTranslator implements Translator {
     let message: { type?: string; code?: string } & Partial<CaptionLine>
     try {
       message = JSON.parse(data) as typeof message
-    } catch {
+    } catch (err) {
+      console.warn('translate: a speech-service message that is not JSON', err)
       return
     }
     if (message.type === 'notice' && message.code === 'translation-failed') {

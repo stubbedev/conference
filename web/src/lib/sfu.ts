@@ -5,8 +5,10 @@
 // When the room is end-to-end encrypted, encoded frames are transformed
 // through the E2EE worker, so the server only ever relays ciphertext.
 
+import { errorText } from '@/lib/errors'
 import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
+import { settled } from '@/lib/settled'
 import {
   addCounts,
   countsSince,
@@ -147,7 +149,8 @@ async function readInboundCounters(
       })
       counters.set(kind, sum)
     }
-  } catch {
+  } catch (err) {
+    console.warn('sfu: reading the inbound video counters', err)
     return null
   }
 
@@ -308,7 +311,8 @@ async function sendsVP9Simulcast(track: MediaStreamTrack): Promise<boolean> {
       },
     })
     return info.supported
-  } catch {
+  } catch (err) {
+    console.warn('sfu: asking whether the fluid share layer can be encoded', err)
     return false
   }
 }
@@ -415,7 +419,8 @@ export class RoomClient {
         let msg: ReceivedMessage
         try {
           msg = JSON.parse(ev.data as string) as ReceivedMessage
-        } catch {
+        } catch (err) {
+          console.warn('sfu: a signalling message that is not JSON', err)
           return
         }
         if (msg.type === 'welcome') {
@@ -879,7 +884,7 @@ export class RoomClient {
     if (!up) return Promise.reject(new Error(`Offer on ${id}, which is not open.`))
 
     const next = up.negotiation.then(() => this.negotiateUp(id, up.pc))
-    up.negotiation = next.catch(() => {})
+    up.negotiation = settled(next)
     return next
   }
 
@@ -1199,8 +1204,8 @@ export class RoomClient {
             )
           }
         }
-      } catch {
-        lines.push(`${label} stats unavailable`)
+      } catch (err) {
+        lines.push(`${label} stats unavailable: ${errorText(err)}`)
       }
     }
 
