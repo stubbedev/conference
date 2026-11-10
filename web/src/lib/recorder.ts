@@ -7,8 +7,9 @@
 import { audioContext, playMediaElement } from '@/hooks/media'
 import { ElementSource, FrameSource, frameApis, type FrameWriter, type TrackGenerator, type VideoSource } from './frames.ts'
 import { initials } from './names.ts'
-import { focusKey, gridRects, NO_SPEAKER, nextSpeakerFocus, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
-import { heard, holdLeft, isVoiced, SPEAKING_SAMPLE_MS, type LastVoiced } from './speaking.ts'
+import { focusKey, gridRects, nextSpeakerFocus, spotlightRects, type Rect, type SpeakerFocus } from './recording-layout.ts'
+import { SPEAKING_SAMPLE_MS } from './speaking.ts'
+import { VoiceMeter } from './voice-meter.ts'
 import { withDuration } from './webm.ts'
 
 export interface RecorderTile {
@@ -82,12 +83,14 @@ type Canvas2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
 const WEBKIT = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\/|Chromium\//.test(navigator.userAgent)
 
 interface MixedSource {
-  track: MediaStreamTrack
   source: AudioNode
   gain: GainNode
-  analyser: AnalyserNode
-  lastVoiced: LastVoiced
   element?: HTMLAudioElement
+}
+
+// A tile track in the mix, measured for the speaker spotlight.
+interface TileAudio extends MixedSource {
+  meter: VoiceMeter
 }
 
 const TILE_GAP = 8
@@ -133,7 +136,7 @@ export class CallRecorder {
   private writing = false
   private entries = new Map<string, RecorderEntry>()
   private latest: RecorderTile[] = []
-  private mixed = new Map<MediaStreamTrack, MixedSource>()
+  private mixed = new Map<MediaStreamTrack, TileAudio>()
   private translations: TranslationAudio[] = []
   private translationsMixed: MixedSource[] = []
   private mixer: MediaStreamAudioDestinationNode | null = null
@@ -148,8 +151,7 @@ export class CallRecorder {
   private paintTimer = 0
   private lastPaint = 0
   private lastListen = 0
-  private samples = new Float32Array(0)
-  private speaker: SpeakerFocus = NO_SPEAKER
+  private speaker: SpeakerFocus = null
   private endedReason = ''
   private startedAt = 0
   private finishing: Promise<void> | null = null
@@ -504,7 +506,7 @@ export class CallRecorder {
 
     for (const [track, mixed] of this.mixed) {
       if (track.readyState !== 'ended') continue
-      this.disconnectMixed(mixed)
+      this.disconnectTileAudio(mixed)
       this.mixed.delete(track)
     }
 
@@ -518,7 +520,9 @@ export class CallRecorder {
         }
         const mixedSource = this.mixSource(ctx, mixer, track, tile.local)
         mixedSource.gain.gain.value = volume
-        this.mixed.set(track, mixedSource)
+        const meter = new VoiceMeter(ctx)
+        mixedSource.source.connect(meter.input)
+        this.mixed.set(track, { ...mixedSource, meter })
       }
     }
   }
@@ -548,25 +552,22 @@ export class CallRecorder {
       source = ctx.createMediaElementSource(element)
     }
     const gain = ctx.createGain()
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 512
     source.connect(gain).connect(mixer)
-    source.connect(analyser)
-    return { track, source, gain, analyser, lastVoiced: null, element }
+    return { source, gain, element }
   }
 
   private disconnectMixed(mixed: MixedSource): void {
-    try {
-      mixed.source.disconnect()
-      mixed.gain.disconnect()
-      mixed.analyser.disconnect()
-    } catch {
-      // already detached
-    }
+    mixed.source.disconnect()
+    mixed.gain.disconnect()
     if (mixed.element) {
       mixed.element.pause()
       mixed.element.srcObject = null
     }
+  }
+
+  private disconnectTileAudio(audio: TileAudio): void {
+    this.disconnectMixed(audio)
+    audio.meter.input.disconnect()
   }
 
   private draw = () => {
@@ -601,7 +602,7 @@ export class CallRecorder {
 
     this.listen()
     const area = { x: TILE_GAP, y: TILE_GAP, width: canvas.width - 2 * TILE_GAP, height: canvas.height - 2 * TILE_GAP }
-    const focus = focusKey(tiles, this.speaker.key)
+    const focus = focusKey(tiles, this.speaker?.key ?? null)
     const featured = focus === null ? undefined : tiles.find((tile) => tile.key === focus)
     if (!featured) {
       gridRects(tiles.length, area, TILE_GAP).forEach((rect, index) => {
@@ -624,15 +625,9 @@ export class CallRecorder {
     const now = performance.now()
     if (now - this.lastListen < SPEAKING_SAMPLE_MS) return
     this.lastListen = now
-    for (const mixed of this.mixed.values()) {
-      if (this.samples.length !== mixed.analyser.fftSize) this.samples = new Float32Array(mixed.analyser.fftSize)
-      mixed.analyser.getFloatTimeDomainData(this.samples)
-      let sum = 0
-      for (const sample of this.samples) sum += sample * sample
-      mixed.lastVoiced = heard(mixed.lastVoiced, isVoiced(Math.sqrt(sum / this.samples.length)), now)
-    }
+    for (const audio of this.mixed.values()) audio.meter.sample(now)
     const speaking = this.latest
-      .filter((tile) => !tile.screen && (tile.stream?.getAudioTracks() ?? []).some((track) => holdLeft(this.mixed.get(track)?.lastVoiced ?? null, now) > 0))
+      .filter((tile) => !tile.screen && (tile.stream?.getAudioTracks() ?? []).some((track) => this.mixed.get(track)?.meter.speaking(now) === true))
       .map((tile) => tile.key)
     this.speaker = nextSpeakerFocus(this.speaker, speaking, now)
   }
@@ -702,7 +697,7 @@ export class CallRecorder {
     this.sink = null
     this.starting = null
     this.storageRoot = null
-    for (const mixed of this.mixed.values()) this.disconnectMixed(mixed)
+    for (const audio of this.mixed.values()) this.disconnectTileAudio(audio)
     this.mixed.clear()
     for (const mixed of this.translationsMixed) this.disconnectMixed(mixed)
     this.translationsMixed = []

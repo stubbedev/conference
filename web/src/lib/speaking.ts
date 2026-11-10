@@ -14,9 +14,12 @@ const SILENT_RMS = 0.04
  */
 export const SPEAKING_HOLD_MS = 700
 
-/** isVoiced is whether a frame of this root-mean-square amplitude carries sound. */
-export function isVoiced(rms: number): boolean {
-  return rms > SILENT_RMS
+/** isVoiced is whether a frame of samples, each from -1 to 1, carries sound. */
+export function isVoiced(frame: Float32Array): boolean {
+  let sum = 0
+  for (const sample of frame) sum += sample * sample
+
+  return Math.sqrt(sum / frame.length) > SILENT_RMS
 }
 
 /** When a voice was last heard, in milliseconds, or null if it never was. */

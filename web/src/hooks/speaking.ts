@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 
 import { audioContext } from '@/hooks/media'
-import { heard, holdLeft, isVoiced, SPEAKING_SAMPLE_MS, type LastVoiced } from '@/lib/speaking'
+import { heard, holdLeft, SPEAKING_SAMPLE_MS, type LastVoiced } from '@/lib/speaking'
+import { VoiceMeter } from '@/lib/voice-meter'
 
 // Speaking detection for every tile in the call runs on one loop. A
 // per-tile requestAnimationFrame loop wakes the page at display refresh
@@ -12,10 +13,8 @@ import { heard, holdLeft, isVoiced, SPEAKING_SAMPLE_MS, type LastVoiced } from '
 
 interface Probe {
   stream: MediaStream
-  analyser: AnalyserNode
+  meter: VoiceMeter
   source: MediaStreamAudioSourceNode | null
-  samples: Uint8Array<ArrayBuffer>
-  lastVoiced: LastVoiced
   active: boolean
   listeners: Set<(active: boolean) => void>
 }
@@ -32,21 +31,13 @@ function bind(probe: Probe, ctx: AudioContext): void {
   if (!track) return
 
   probe.source = ctx.createMediaStreamSource(new MediaStream([track]))
-  probe.source.connect(probe.analyser)
+  probe.source.connect(probe.meter.input)
 }
 
 function sample(probe: Probe, now: number): void {
-  probe.analyser.getByteTimeDomainData(probe.samples)
+  probe.meter.sample(now)
 
-  let sum = 0
-  for (const value of probe.samples) {
-    const deviation = (value - 128) / 128
-    sum += deviation * deviation
-  }
-
-  probe.lastVoiced = heard(probe.lastVoiced, isVoiced(Math.sqrt(sum / probe.samples.length)), now)
-
-  const active = holdLeft(probe.lastVoiced, now) > 0
+  const active = probe.meter.speaking(now)
   if (active === probe.active) return
 
   probe.active = active
@@ -66,15 +57,10 @@ function probeFor(stream: MediaStream, ctx: AudioContext): Probe {
   const known = probes.get(stream)
   if (known) return known
 
-  const analyser = ctx.createAnalyser()
-  analyser.fftSize = 1024
-
   const probe: Probe = {
     stream,
-    analyser,
+    meter: new VoiceMeter(ctx),
     source: null,
-    samples: new Uint8Array(analyser.fftSize),
-    lastVoiced: null,
     active: false,
     listeners: new Set(),
   }
@@ -111,7 +97,7 @@ export function watchSpeaking(stream: MediaStream, listener: (active: boolean) =
     if (probe.listeners.size > 0) return
 
     probe.source?.disconnect()
-    probe.analyser.disconnect()
+    probe.meter.input.disconnect()
     probes.delete(stream)
   }
 }

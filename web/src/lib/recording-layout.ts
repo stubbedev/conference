@@ -16,18 +16,15 @@ export interface LayoutTile {
   screen: boolean
 }
 
-export interface SpeakerFocus {
-  key: string | null
-  heardAt: number
-}
-
-export const NO_SPEAKER: SpeakerFocus = { key: null, heardAt: 0 }
+/** The tile the spotlight follows and when it was last heard, or null for none. */
+export type SpeakerFocus = { readonly key: string; readonly heardAt: number } | null
 
 export function nextSpeakerFocus(focus: SpeakerFocus, speaking: readonly string[], now: number): SpeakerFocus {
-  if (speaking.length === 1) return { key: speaking[0] ?? null, heardAt: now }
-  if (focus.key !== null && speaking.includes(focus.key)) return { key: focus.key, heardAt: now }
-  if (focus.key !== null && now - focus.heardAt < SPEAKER_HOLD_MS) return focus
-  return { key: null, heardAt: focus.heardAt }
+  const [only, ...rest] = speaking
+  if (only !== undefined && rest.length === 0) return { key: only, heardAt: now }
+  if (focus === null) return null
+  if (speaking.includes(focus.key)) return { key: focus.key, heardAt: now }
+  return now - focus.heardAt < SPEAKER_HOLD_MS ? focus : null
 }
 
 export function focusKey(tiles: readonly LayoutTile[], speaker: string | null): string | null {

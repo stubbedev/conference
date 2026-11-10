@@ -4,7 +4,6 @@ import { test } from 'node:test'
 import {
   focusKey,
   gridRects,
-  NO_SPEAKER,
   nextSpeakerFocus,
   SPEAKER_HOLD_MS,
   spotlightRects,
@@ -88,23 +87,23 @@ test('the recorder’s pin wins, then a screen share, then the one person speaki
 })
 
 test('one person speaking takes the spotlight', () => {
-  assert.equal(nextSpeakerFocus(NO_SPEAKER, ['a'], 1000).key, 'a')
+  assert.equal(nextSpeakerFocus(null, ['a'], 1000)?.key, 'a')
 })
 
 test('people talking over each other leave the spotlight where it was', () => {
-  const focus = nextSpeakerFocus(NO_SPEAKER, ['a'], 1000)
-  assert.equal(nextSpeakerFocus(focus, ['a', 'b'], 1500).key, 'a')
-  assert.equal(nextSpeakerFocus(NO_SPEAKER, ['a', 'b'], 1500).key, null)
+  const focus = nextSpeakerFocus(null, ['a'], 1000)
+  assert.equal(nextSpeakerFocus(focus, ['a', 'b'], 1500)?.key, 'a')
+  assert.equal(nextSpeakerFocus(null, ['a', 'b'], 1500), null)
 })
 
 test('a pause does not drop the speaker at once, but silence does', () => {
-  const focus = nextSpeakerFocus(NO_SPEAKER, ['a'], 1000)
+  const focus = nextSpeakerFocus(null, ['a'], 1000)
   const pause = nextSpeakerFocus(focus, [], 1000 + SPEAKER_HOLD_MS - 1)
-  assert.equal(pause.key, 'a')
-  assert.equal(nextSpeakerFocus(pause, [], 1000 + SPEAKER_HOLD_MS + 1).key, null)
+  assert.equal(pause?.key, 'a')
+  assert.equal(nextSpeakerFocus(pause, [], 1000 + SPEAKER_HOLD_MS + 1), null)
 })
 
 test('someone else speaking alone takes over the spotlight', () => {
-  const focus = nextSpeakerFocus(NO_SPEAKER, ['a'], 1000)
-  assert.equal(nextSpeakerFocus(focus, ['b'], 1200).key, 'b')
+  const focus = nextSpeakerFocus(null, ['a'], 1000)
+  assert.equal(nextSpeakerFocus(focus, ['b'], 1200)?.key, 'b')
 })

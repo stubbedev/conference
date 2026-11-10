@@ -6,17 +6,27 @@ import { heard, holdLeft, isVoiced, SPEAKING_HOLD_MS, SPEAKING_SAMPLE_MS, type L
 const VOICE = 0.3
 const SILENCE = 0.01
 
-/** ring is the ring's state at each sample of a probe fed these frames' RMS. */
+/** tone is an analyser frame whose root-mean-square amplitude is rms. */
+const tone = (rms: number): Float32Array => Float32Array.from({ length: 1024 }, (_, i) => (i % 2 === 0 ? rms : -rms))
+
+/** ring is the ring's state at each sample of a probe fed frames of these RMS levels. */
 const ring = (frames: readonly number[]): boolean[] => {
   let lastVoiced: LastVoiced = null
   return frames.map((rms, i) => {
     const now = i * SPEAKING_SAMPLE_MS
-    lastVoiced = heard(lastVoiced, isVoiced(rms), now)
+    lastVoiced = heard(lastVoiced, isVoiced(tone(rms)), now)
     return holdLeft(lastVoiced, now) > 0
   })
 }
 
 const quiet = (samples: number): number[] => Array<number>(samples).fill(SILENCE)
+
+test('a frame is voiced by its loudness, whichever way the wave swings', () => {
+  assert.equal(isVoiced(tone(VOICE)), true)
+  assert.equal(isVoiced(tone(SILENCE)), false)
+  assert.equal(isVoiced(new Float32Array(1024)), false)
+  assert.equal(isVoiced(Float32Array.from({ length: 1024 }, (_, i) => VOICE * Math.sin(i / 8))), true)
+})
 
 test('the ring stays off until a voice is heard, then turns on at once', () => {
   assert.deepEqual(ring([SILENCE, SILENCE, VOICE]), [false, false, true])
