@@ -75,10 +75,19 @@ export function lowerLayer(a: Layer, b: Layer): Layer {
   return layerIndex(a) <= layerIndex(b) ? a : b
 }
 
-function step(layer: Layer, by: number): Layer {
-  const index = Math.min(LAYERS.length - 1, Math.max(0, layerIndex(layer) + by))
+/**
+ * The layers a stream is published in, lowest first: a camera in all
+ * three, a shared screen in two. The ceiling moves between these, so a
+ * step is always a layer the viewer can be sent.
+ */
+export type Rungs = readonly Layer[]
 
-  return LAYERS[index] ?? 'l'
+function rungBelow(layer: Layer, rungs: Rungs): Layer {
+  return rungs.findLast((rung) => layerIndex(rung) < layerIndex(layer)) ?? layer
+}
+
+function rungAbove(layer: Layer, rungs: Rungs): Layer {
+  return rungs.find((rung) => layerIndex(rung) > layerIndex(layer)) ?? layer
 }
 
 function significant(bad: number, good: number, limit: number, share: number): boolean {
@@ -93,19 +102,20 @@ function troubled(health: InboundCounters): boolean {
 }
 
 /**
- * nextQuality moves the viewer's ceiling one step for one sample. Trouble
- * lowers it at once; a run of clean samples raises it back towards the
- * layer the tile's size on screen can use, so a blip costs a second of
- * sharpness rather than the rest of the call.
+ * nextQuality moves the viewer's ceiling one step for one sample, over the
+ * layers the stream is published in. Trouble lowers it at once; a run of
+ * clean samples raises it back towards the layer the tile's size on
+ * screen can use, so a blip costs a second of sharpness rather than the
+ * rest of the call.
  */
-export function nextQuality(state: QualityState, layout: Layer, health: InboundCounters): QualityState {
+export function nextQuality(state: QualityState, layout: Layer, health: InboundCounters, rungs: Rungs): QualityState {
   const sinceUp = Math.min(state.sinceUp + 1, SETTLED_SAMPLES)
   const settledWait = sinceUp >= SETTLED_SAMPLES ? RECOVER_SAMPLES : state.wait
 
   if (troubled(health)) {
     const failed = state.sinceUp < FAILED_RECOVERY_SAMPLES
     return {
-      ceiling: step(lowerLayer(state.ceiling, layout), -1),
+      ceiling: rungBelow(lowerLayer(state.ceiling, layout), rungs),
       clean: 0,
       wait: failed ? Math.min(state.wait * 2, MAX_RECOVER_SAMPLES) : settledWait,
       sinceUp,
@@ -121,7 +131,7 @@ export function nextQuality(state: QualityState, layout: Layer, health: InboundC
     return { ceiling: state.ceiling, clean, wait: settledWait, sinceUp }
   }
 
-  return { ceiling: step(state.ceiling, 1), clean: 0, wait: settledWait, sinceUp: 0 }
+  return { ceiling: rungAbove(state.ceiling, rungs), clean: 0, wait: settledWait, sinceUp: 0 }
 }
 
 /** The layer to ask for: what the layout wants, no more than the viewer can carry. */

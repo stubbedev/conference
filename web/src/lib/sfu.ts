@@ -35,6 +35,7 @@ import {
   demandParameters,
   LAYER_RIDS,
   SCREEN_CONTENT_HINT,
+  SCREEN_LAYER_RIDS,
   screenLayers,
   screenSenderParameters,
 } from '@/lib/encodings'
@@ -713,7 +714,8 @@ export class RoomClient {
     if (!previous || !layout) return
 
     const quality = this.quality.get(key) ?? newQualityState()
-    const stepped = nextQuality(quality, layout, countsSince(previous, counters))
+    const rungs = kind === SCREEN_KIND ? SCREEN_LAYER_RIDS : LAYER_RIDS
+    const stepped = nextQuality(quality, layout, countsSince(previous, counters), rungs)
     this.quality.set(key, stepped)
 
     if (stepped.ceiling !== quality.ceiling) {
