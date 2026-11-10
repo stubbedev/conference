@@ -1681,15 +1681,42 @@ var unreported = receivedUpTo{seq: 0, known: false}
 // lost packets asks while the stream flows or moments after.
 const idleDecoderQuiet = 2 * time.Second
 
+// resumeGrace is how long after a paused stream flows again a keyframe
+// request is still taken for the timeout the pause set off. The request
+// leaves the viewer three seconds after its last decodable frame
+// (kMaxWaitForFrame in libwebrtc's video_receive_stream2), and a screen
+// read for three seconds and then scrolled puts that at the moment the
+// first packets of the scroll are on their way: the viewer has to receive
+// a whole frame of them, decrypt it and hand it to its decoder before the
+// timer is disarmed. A second is room for that on a slow viewer and a slow
+// path, and short of what the viewer does next when it does need a
+// keyframe: a decoder that cannot go on asks every 200 ms
+// (kMaxWaitForKeyFrame), a receiver whose frames stay undecodable asks
+// again after another three seconds. Either request falls outside the
+// grace and is relayed, at most one second or one timeout of the viewer
+// later than it would have been.
+const resumeGrace = time.Second
+
 // idleKeyframeRequest reports whether a viewer's keyframe request is its
-// decoder timing out on a stream the publisher stopped sending: the
-// viewer reported holding the last packet it was forwarded, and nothing
-// newer followed for idleDecoderQuiet. Its picture is intact; relayed,
-// the request would make the publisher's encoder open the next change of
-// the screen with a keyframe, the largest frame exactly when the bitrate
-// is needed most.
+// decoder timing out on a stream the publisher stopped sending. Either
+// the stream is still paused: the viewer reported holding the last packet
+// it was forwarded, and nothing newer followed for idleDecoderQuiet. Or
+// the stream was paused that long until resumeGrace ago at most, and the
+// viewer reported holding everything forwarded before the pause: the
+// request and the first frames after the pause crossed. Its picture is
+// intact; relayed, the request would make the publisher's encoder open
+// the next change of the screen with a keyframe, the largest frame exactly
+// when the bitrate is needed most.
 func idleKeyframeRequest(sent munger, received receivedUpTo, now time.Time) bool {
-	return sent.started && received.known && !seqNewer(sent.lastSeq, received.seq) && now.Sub(sent.lastAt) >= idleDecoderQuiet
+	if !sent.started || !received.known {
+		return false
+	}
+
+	if now.Sub(sent.lastAt) >= idleDecoderQuiet {
+		return !seqNewer(sent.lastSeq, received.seq)
+	}
+
+	return now.Sub(sent.resumedAt) < resumeGrace && !seqNewer(sent.pausedSeq, received.seq)
 }
 
 // viewerRate tracks a sustainable downlink bitrate for one viewer,

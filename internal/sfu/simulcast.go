@@ -282,6 +282,13 @@ type munger struct {
 	started bool
 	lastAt  time.Time
 
+	// resumedAt is when a frame was last forwarded after a pause of
+	// idleDecoderQuiet or more, and pausedSeq the last sequence number
+	// forwarded before that pause: what idleKeyframeRequest needs to know
+	// a request that crossed the end of a pause.
+	resumedAt time.Time
+	pausedSeq uint16
+
 	seqDelta uint16
 	tsDelta  uint32
 	picDelta uint16
@@ -297,7 +304,7 @@ type munger struct {
 
 func newMunger() munger {
 	return munger{
-		started: false, lastAt: time.Time{},
+		started: false, lastAt: time.Time{}, resumedAt: time.Time{}, pausedSeq: 0,
 		seqDelta: 0, tsDelta: 0, picDelta: 0, tl0Delta: 0,
 		lastSeq: 0, lastTS: 0, lastPic: 0, lastTL0: 0, hasPic: false, hasTL0: false,
 	}
@@ -345,11 +352,18 @@ func (m *munger) applyHeader(header rtp.Header, now time.Time) rtp.Header {
 	header.SequenceNumber += m.seqDelta
 	header.Timestamp += m.tsDelta
 
+	before := m.lastSeq
+
 	if !m.started || seqNewer(header.SequenceNumber, m.lastSeq) {
 		m.lastSeq = header.SequenceNumber
 	}
 
 	if !m.started || tsNewer(header.Timestamp, m.lastTS) {
+		if m.started && now.Sub(m.lastAt) >= idleDecoderQuiet {
+			m.resumedAt = now
+			m.pausedSeq = before
+		}
+
 		m.lastTS = header.Timestamp
 		m.lastAt = now
 	}
