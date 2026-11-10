@@ -372,8 +372,8 @@ export async function launchFirefox(firefox, idx, dir, { headless = true } = {})
 }
 
 // Injected before the app loads: records peer connections, the E2EE
-// worker's stats and the audio worklets built, so the probe can read
-// them from page context.
+// worker's stats, the audio worklets built and the layers the page asks
+// the SFU for, so the probe can read them from page context.
 export const hook = (relayTransport) => `
 (() => {
   window.__pcs = [];
@@ -423,10 +423,19 @@ export const hook = (relayTransport) => `
   };
   window.__sockets = [];
   window.__welcomes = 0;
+  window.__layerRequests = [];
   const OrigWS = window.WebSocket;
   window.WebSocket = function (...a) {
     const ws = new OrigWS(...a);
     window.__sockets.push(ws);
+    const send = ws.send.bind(ws);
+    ws.send = (data) => {
+      if (typeof data === 'string' && data.includes('"type":"layer"')) {
+        const { kind, layer } = JSON.parse(data);
+        window.__layerRequests.push({ kind, layer, at: performance.now() });
+      }
+      return send(data);
+    };
     ws.addEventListener('message', (ev) => {
       if (typeof ev.data !== 'string') return;
       try {

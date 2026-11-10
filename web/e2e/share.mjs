@@ -127,7 +127,9 @@ export const remoteScreen = `
 })()
 `
 
-// What the viewer made of the share, read at `at` on the page's clock.
+// What the viewer received of the share and what became of it, read at
+// `at` on the page's clock, and every layer the page has asked the SFU
+// for on a share, with when it asked on the same clock.
 export const shareReceiveCounters = `
 (async () => {
   const tile = (${tileByLabel.toString()})('screen')
@@ -135,7 +137,7 @@ export const shareReceiveCounters = `
   for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
     for (const r of (await pc.getStats()).values()) {
       if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
-        return { at: performance.now(), decoded: r.framesDecoded || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
+        return { at: performance.now(), asks: window.__layerRequests.filter((request) => request.kind === 'screen'), received: r.framesReceived || 0, decoded: r.framesDecoded || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
       }
     }
   }

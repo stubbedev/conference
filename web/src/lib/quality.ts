@@ -12,10 +12,10 @@ const LAYERS: readonly Layer[] = ['l', 'm', 'h']
 
 const TOP_LAYER: Layer = 'h'
 
-const DROPPED_FRAMES_LIMIT = 3
+export const DROPPED_FRAMES_LIMIT = 3
 const DROPPED_FRAMES_SHARE = 0.1
 
-const LOST_PACKETS_LIMIT = 20
+export const LOST_PACKETS_LIMIT = 20
 const LOST_PACKETS_SHARE = 0.05
 
 /** Clean samples in a row before one layer is added back. */
