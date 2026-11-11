@@ -1,0 +1,45 @@
+[
+  {
+    "type": "welcome",
+    "self": { "id": "anna", "short": 1, "name": "Anna", "mic": true, "cam": false, "sharing": false },
+    "members": [{ "id": "bo", "short": 2, "name": "Bo", "mic": false, "cam": true, "sharing": true }],
+    "iceServers": [{ "urls": ["turn:127.0.0.1:3478?transport=udp"], "username": "anna", "credential": "secret" }],
+    "resume": "resume-token",
+    "recorder": "bo",
+    "translatingBy": ""
+  },
+  { "type": "member-joined", "id": "cy", "short": 3, "name": "Cy", "replaces": "cy-before" },
+  { "type": "member-left", "id": "cy" },
+  { "type": "member-state", "id": "bo", "mic": true, "cam": false, "sharing": true },
+  { "type": "error", "code": "record-busy", "text": "sfu: the call is already being recorded" },
+  { "type": "recording", "from": "bo", "on": true },
+  { "type": "translating", "from": "anna", "on": false },
+  { "type": "layers", "pc": "up", "mid": "1", "active": [true, false, true] },
+  { "type": "lang", "from": "bo", "iv": "iv", "ct": "ct" },
+  { "type": "caption", "from": "bo", "iv": "iv", "ct": "ct" },
+  { "type": "chat", "from": "bo", "iv": "iv", "ct": "ct", "ts": 1700000000000 },
+  { "type": "forced", "action": "mute" },
+  { "type": "forced", "action": "lang", "from": "bo", "iv": "iv", "ct": "ct" },
+  { "type": "kicked" },
+  { "type": "answer", "pc": "up", "sdp": "v=0" },
+  {
+    "type": "offer",
+    "pc": "down-bo",
+    "sdp": "v=0",
+    "tracks": [
+      { "mid": "0", "kind": "camera" },
+      { "mid": "1", "kind": "audio" }
+    ]
+  },
+  {
+    "type": "ice",
+    "pc": "down-bo",
+    "candidate": {
+      "candidate": "candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host",
+      "sdpMid": "0",
+      "sdpMLineIndex": 0,
+      "usernameFragment": null
+    }
+  },
+  { "type": "translate-token", "token": "speech-token" }
+]

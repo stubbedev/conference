@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"syscall"
 
 	"github.com/pion/turn/v5"
 
@@ -44,11 +45,13 @@ var (
 	errNotSFU        = errors.New("relay: peer is not the SFU")
 	errNoFamily      = errors.New("relay: the SFU has no address in the requested family")
 	errNotUDPAddress = errors.New("relay: not a UDP address")
+	errNoPickedPort  = errors.New("relay: no port the kernel picked was free over both UDP and TCP")
 )
 
 // Config locates the TURN listeners.
 type Config struct {
-	// Port is the UDP and TCP port TURN listens on.
+	// Port is the UDP and TCP port TURN listens on; 0 lets the kernel
+	// pick one.
 	Port int
 
 	// TLSHost, when set, is a hostname whose port 443 terminates TLS
@@ -116,41 +119,124 @@ func (c *Credentials) password(username string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
+// Listener holds the TURN sockets, bound before the server runs so that
+// the credentials it hands out name the port it really got.
+type Listener struct {
+	packet  net.PacketConn
+	stream  net.Listener
+	sockets *recvbuf.Sizer
+	creds   *Credentials
+}
+
+// Listen binds UDP and TCP, dual-stack, on cfg.Port, or on one port the
+// kernel picks for both when cfg.Port is 0. Its UDP sockets are sized by
+// sockets.
+func Listen(ctx context.Context, cfg Config, sockets *recvbuf.Sizer) (*Listener, error) {
+	packet, stream, port, err := listenPair(ctx, sockets, cfg.Port)
+	if err != nil {
+		return nil, err
+	}
+
+	listener := &Listener{packet: packet, stream: stream, sockets: sockets, creds: nil}
+
+	listener.creds, err = NewCredentials(Config{Port: port, TLSHost: cfg.TLSHost})
+	if err != nil {
+		_ = listener.Close()
+
+		return nil, err
+	}
+
+	return listener, nil
+}
+
+// Close releases the sockets of a listener that is not served.
+func (l *Listener) Close() error {
+	err := errors.Join(l.packet.Close(), l.stream.Close())
+	if err != nil {
+		return fmt.Errorf("relay: close listener %s: %w", l.stream.Addr(), err)
+	}
+
+	return nil
+}
+
+// Port is the UDP and TCP port the listener is bound to.
+func (l *Listener) Port() int {
+	return l.creds.cfg.Port
+}
+
+// Credentials mints the credentials for this listener's port.
+func (l *Listener) Credentials() *Credentials {
+	return l.creds
+}
+
+const pickedPortAttempts = 8
+
+func listenPair(ctx context.Context, sockets *recvbuf.Sizer, port int) (net.PacketConn, net.Listener, int, error) {
+	if port != 0 {
+		return bindPair(ctx, sockets, port)
+	}
+
+	for range pickedPortAttempts {
+		packet, stream, picked, err := bindPair(ctx, sockets, 0)
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return packet, stream, picked, err
+		}
+	}
+
+	return nil, nil, 0, fmt.Errorf("%w after %d attempts", errNoPickedPort, pickedPortAttempts)
+}
+
+func bindPair(ctx context.Context, sockets *recvbuf.Sizer, port int) (net.PacketConn, net.Listener, int, error) {
+	packet, err := listenMedia(ctx, sockets, "udp", net.JoinHostPort("", strconv.Itoa(port)))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	local, err := addrPort(packet.LocalAddr())
+	if err != nil {
+		_ = packet.Close()
+
+		return nil, nil, 0, err
+	}
+
+	addr := net.JoinHostPort("", strconv.Itoa(int(local.Port())))
+
+	var listenConfig net.ListenConfig
+
+	stream, err := listenConfig.Listen(ctx, "tcp", addr)
+	if err != nil {
+		_ = packet.Close()
+
+		return nil, nil, 0, fmt.Errorf("relay: listen tcp %s: %w", addr, err)
+	}
+
+	return packet, stream, int(local.Port()), nil
+}
+
 // Server is a running TURN server.
 type Server struct {
 	turn *turn.Server
 }
 
-// Start listens on cfg.Port (UDP and TCP, dual-stack) and relays to
-// media only. Its UDP sockets are sized by sockets. live reports whether
-// a member ID belongs to a member currently in a call; every TURN
-// request re-checks it.
-func Start(
-	ctx context.Context,
-	creds *Credentials,
-	media []MediaAddr,
-	sockets *recvbuf.Sizer,
-	live func(memberID string) bool,
-) (*Server, error) {
-	relays, err := newSFURelay(media, sockets)
+// Serve runs the TURN server on the listener's sockets and relays to
+// media only. live reports whether a member ID belongs to a member
+// currently in a call; every TURN request re-checks it. On failure the
+// listener is closed.
+func (l *Listener) Serve(media []MediaAddr, live func(memberID string) bool) (*Server, error) {
+	server, err := l.serve(media, live)
 	if err != nil {
+		_ = l.Close()
+
 		return nil, err
 	}
 
-	addr := net.JoinHostPort("", strconv.Itoa(creds.cfg.Port))
+	return server, nil
+}
 
-	packetConn, err := listenMedia(ctx, sockets, "udp", addr)
+func (l *Listener) serve(media []MediaAddr, live func(memberID string) bool) (*Server, error) {
+	relays, err := newSFURelay(media, l.sockets)
 	if err != nil {
 		return nil, err
-	}
-
-	var listenConfig net.ListenConfig
-
-	listener, err := listenConfig.Listen(ctx, "tcp", addr)
-	if err != nil {
-		_ = packetConn.Close()
-
-		return nil, fmt.Errorf("relay: listen tcp %s: %w", addr, err)
 	}
 
 	server, err := turn.NewServer(turn.ServerConfig{
@@ -160,26 +246,23 @@ func Start(
 				return "", nil, false
 			}
 
-			key := turn.GenerateAuthKey(attrs.Username, attrs.Realm, creds.password(attrs.Username))
+			key := turn.GenerateAuthKey(attrs.Username, attrs.Realm, l.creds.password(attrs.Username))
 
 			return attrs.Username, key, true
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{{
-			PacketConn:            packetConn,
+			PacketConn:            l.packet,
 			RelayAddressGenerator: relays,
 			PermissionHandler:     relays.permits,
 		}},
 		ListenerConfigs: []turn.ListenerConfig{{
-			Listener:              listener,
+			Listener:              l.stream,
 			RelayAddressGenerator: relays,
 			PermissionHandler:     relays.permits,
 		}},
 	})
 	if err != nil {
-		_ = packetConn.Close()
-		_ = listener.Close()
-
-		return nil, fmt.Errorf("relay: start turn on %s: %w", addr, err)
+		return nil, fmt.Errorf("relay: start turn on port %d: %w", l.Port(), err)
 	}
 
 	return &Server{turn: server}, nil

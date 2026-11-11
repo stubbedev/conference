@@ -1,14 +1,14 @@
 // The local live-translation stack shared by translate-demo.mjs and
 // translate-lan.mjs: a freshly built meeting server whose speech service
 // runs on the chosen engines, and cleanup of everything started.
-import { spawn, spawnSync } from 'node:child_process'
-import { openSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import { createWriteStream } from 'node:fs'
+import { join } from 'node:path'
 
-import { freePort, sleep, stopProcess } from './browser.mjs'
+import { stopProcess } from './browser.mjs'
+import { buildServer as buildGoServer, repoRoot, serverEnv, startServer as startGoServer } from './server.mjs'
 
-export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+export { repoRoot }
 
 /** Processes to stop on exit, newest first. */
 const started = []
@@ -21,25 +21,7 @@ function run(cmd, args, cwd) {
 // The server embeds web/dist, so the UI is built first.
 export function buildServer(dir) {
   run('npm', ['run', 'build', '--silent'], join(repoRoot, 'web'))
-  const bin = join(dir, 'server')
-  run('go', ['build', '-o', bin, './cmd/server'], repoRoot)
-  return bin
-}
-
-async function healthy(url) {
-  try {
-    return (await fetch(url)).ok
-  } catch {
-    return false
-  }
-}
-
-export async function waitHealthy(url, what, seconds) {
-  for (let i = 0; i < seconds * 5; i++) {
-    if (await healthy(url)) return
-    await sleep(200)
-  }
-  throw new Error(`${what} did not come up on ${url}`)
+  return buildGoServer(dir, { race: false })
 }
 
 // The engines these demos use unless the environment names others; the
@@ -79,25 +61,15 @@ export function speechEngines(openai) {
 
 /** Starts the built meeting server on loopback with these speech engines; returns its base URL. */
 export async function startServer(bin, dir, engines) {
-  const port = await freePort()
-  track(
-    spawn(bin, [], {
-      env: {
-        ...process.env,
-        PORT: String(port),
-        BIND: '127.0.0.1',
-        ICE_UDP_PORT: String(await freePort()),
-        TURN_PORT: String(await freePort()),
-        DB_PATH: join(dir, 'translate.db'),
-        ...engines,
-      },
-      // SERVER_LOG=path keeps the meeting server's log for debugging.
-      stdio: process.env.SERVER_LOG ? ['ignore', openSync(process.env.SERVER_LOG, 'a'), openSync(process.env.SERVER_LOG, 'a')] : 'ignore',
-    }),
-  )
-  const base = `http://127.0.0.1:${port}`
-  await waitHealthy(`${base}/api/config`, 'the meeting server', 10)
-  return base
+  const server = await startGoServer(bin, serverEnv(dir, { BIND: '127.0.0.1', ...engines }))
+  if (process.env.SERVER_LOG) {
+    const out = track(createWriteStream(process.env.SERVER_LOG, { flags: 'a' }))
+    out.write(server.log())
+    server.proc.stdout.pipe(out, { end: false })
+    server.proc.stderr.pipe(out, { end: false })
+  }
+  track(server.proc)
+  return server.base
 }
 
 /** Registers something with a close() or a child process for cleanup. */

@@ -287,9 +287,17 @@ their files under `files` (left out below):
   and the sentences before the one it translates. `mt.pairs` gives a
   language pair, source-target, a smaller model of its own (OPUS-MT), and
   `mt.builtin` lets a browser with a built-in translator (Chrome's
-  `Translator`) translate first. With pairs, a translator or
-  encoder-decoder `mt.model` is only downloaded by a member who needs a
-  pair OPUS-MT does not have.
+  `Translator`) translate first. A pair with no model of its own whose
+  two legs through English are both in `mt.pairs`, such as de-da with
+  de-en and en-da, is translated through English with those two models
+  wherever the shared model that runs would be an encoder-decoder model:
+  an encoder-decoder `mt.model`, or `mt.fallback` on a browser that cannot
+  run the translator or language model. A translator or language model
+  that runs translates such a pair itself. A browser whose GPU might run
+  it loads it first to find out; one without a GPU it can use knows it
+  will not without loading anything. With pairs, a
+  translator or encoder-decoder `mt.model` is only downloaded by a member
+  who needs a pair the pairs do not cover.
   The pairs and the built-in translator follow no prompt, so a room that
   needs the glossary or the form of address leaves both out. `mt.fallback`
   names the encoder-decoder model a browser translates with when it cannot
@@ -411,8 +419,11 @@ about 52 GB, of which the cache only holds what browsers ask for. A pair is the 
 Helsinki-NLP's OPUS-MT model, `Xenova/opus-mt-<source>-<target>` or
 else `onnx-community/opus-mt-<source>-<target>`. A pair with neither, or
 whose repository lacks the `--pair-dtype` or 8-bit export, is left out of
-`models.json` and named on stderr, and the multilingual model translates
-it, as it does every pair `models.json` does not list.
+`models.json` and named on stderr with the route it takes instead: the
+multilingual model, or English in between, with both of its legs from
+`models.json`, where the encoder-decoder model would translate it. That
+needs `en` among `--pair-languages`, and the script warns when it is
+left out.
 
 Voices are chosen by quality first, medium before high, low and x_low,
 and a voice with one speaker before one with several. A voice with
@@ -423,14 +434,17 @@ Macedonian or Maltese, so those get subtitles only; the script says so
 and carries on. The Moonshine models for the fallback are found the same
 way, by looking for one per language.
 
-A pair with no model of its own is translated by the multilingual model.
+A pair with no model of its own is translated by the multilingual model,
+or through English where both legs have one and the multilingual model
+that runs is an encoder-decoder model such as m2m100.
 Portuguese, Catalan and Romanian reach English through the shared
 `Xenova/opus-mt-ROMANCE-en`. The group models that need a target-language
 token, such as `gem-gem` and `en-ROMANCE`, are not used: through
 transformers.js the token ends up in the translation.
 
 Between English, German and Danish, OPUS-MT has a pair model for every
-direction but German to Danish, which m2m100 translates:
+direction but German to Danish, which TranslateGemma translates, or
+English in between where m2m100 would:
 
 | Pair | Model |
 |---|---|
@@ -439,7 +453,7 @@ direction but German to Danish, which m2m100 translates:
 | en-da | `Xenova/opus-mt-en-da` |
 | da-en | `Xenova/opus-mt-da-en` |
 | da-de | `Xenova/opus-mt-da-de` |
-| de-da | none, m2m100 translates it |
+| de-da | none: the multilingual model, or `Xenova/opus-mt-de-en` then `Xenova/opus-mt-en-da` instead of m2m100 |
 
 Every model and voice file is served from the server's own origin under
 `/speech/`, with immutable caching, so nothing comes from a model hub or

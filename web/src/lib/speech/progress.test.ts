@@ -12,7 +12,7 @@ test('nothing loading shows nothing', () => {
 test('the total is the announced size, so files a worker starts later do not move it', () => {
   const progress = new Progress()
   progress.begin('transcription')
-  progress.expect('transcription', 800 * MB)
+  progress.expect('transcription', 'whisper', 800 * MB)
 
   progress.file('transcription', 'whisper/encoder.onnx', 100 * MB, 300 * MB)
   const early = overall(progress.snapshot() ?? [])
@@ -24,10 +24,29 @@ test('the total is the announced size, so files a worker starts later do not mov
   assert.deepEqual(later, { loaded: 100 * MB, total: 800 * MB })
 })
 
+test('two models of one part add up, so a second one loading does not fill the bar', () => {
+  const progress = new Progress()
+  progress.expect('translation', 'opus-mt-de-en', 100 * MB)
+  progress.file('translation', 'opus-mt-de-en/model.onnx', 100 * MB, 100 * MB)
+  progress.expect('translation', 'opus-mt-en-da', 120 * MB)
+  progress.file('translation', 'opus-mt-en-da/model.onnx', 20 * MB, 120 * MB)
+
+  assert.deepEqual(overall(progress.snapshot() ?? []), { loaded: 120 * MB, total: 220 * MB })
+})
+
+test('a model announced again, as another export, replaces its own size', () => {
+  const progress = new Progress()
+  progress.begin('translation')
+  progress.expect('translation', 'opus-mt-en-de', 300 * MB)
+  progress.expect('translation', 'opus-mt-en-de', 100 * MB)
+
+  assert.deepEqual(overall(progress.snapshot() ?? []), { loaded: 0, total: 100 * MB })
+})
+
 test('a part loads no more than its total, even when the announced size was short', () => {
   const progress = new Progress()
   progress.begin('voice')
-  progress.expect('voice', 60 * MB)
+  progress.expect('voice', 'piper/voice', 60 * MB)
   progress.file('voice', 'piper/voice.onnx', 63 * MB, 63 * MB)
 
   assert.deepEqual(progress.snapshot(), [{ part: 'voice', loaded: 60 * MB, total: 60 * MB, retry: null }])
@@ -44,8 +63,8 @@ test('a part without an announced size counts what its files report', () => {
 test('parts are listed in a fixed order, a part that finished shows full while the others still load', () => {
   const progress = new Progress()
   for (const part of ['voice', 'runtime', 'translation'] as const) progress.begin(part)
-  progress.expect('translation', 400 * MB)
-  progress.expect('voice', 60 * MB)
+  progress.expect('translation', 'm2m', 400 * MB)
+  progress.expect('voice', 'piper/voice', 60 * MB)
   progress.file('runtime', '/ort/ort.wasm', 27 * MB, 27 * MB)
   progress.end('runtime', true)
   progress.file('voice', 'piper/voice.onnx', 30 * MB, 60 * MB)

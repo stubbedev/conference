@@ -191,7 +191,7 @@ func downID(source *testPeer) string {
 }
 
 // next returns the next non-ICE message, failing the test on timeout.
-func (p *testPeer) next(t *testing.T, msgType string) sfu.Message {
+func (p *testPeer) next(t *testing.T, msgType sfu.MessageType) sfu.Message {
 	t.Helper()
 
 	deadline := time.After(testTimeout)

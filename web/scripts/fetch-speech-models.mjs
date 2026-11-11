@@ -27,7 +27,9 @@
 //
 // The default translator is TranslateGemma, a language model trained to
 // translate between any two of its languages, for every pair without an
-// OPUS-MT model of its own.
+// OPUS-MT model of its own. Where an encoder-decoder model such as m2m100
+// would translate such a pair instead, it goes through English when
+// OPUS-MT has a model into and one out of it.
 //
 // Usage: node scripts/fetch-speech-models.mjs <target dir> [options]
 //   --languages=en,de,da or all, the server's own list
@@ -43,6 +45,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+import { mtRoute, PIVOT, sharedRun } from '../src/lib/speech/models.ts'
 import { CPU_DTYPE, GPU_LADDER } from '../src/lib/speech/runtime.ts'
 
 const HUB = 'https://huggingface.co'
@@ -418,9 +421,28 @@ async function pairModels(languages, dtype) {
   return { pairs, files, skipped }
 }
 
-function reportPairs(pairs, skipped, multilingual) {
-  for (const { pair, model } of pairs) process.stderr.write(`${pair}: ${model}\n`)
-  for (const { pair, reason } of skipped) console.warn(`warning: no OPUS-MT export for ${pair}, so ${multilingual} translates it: ${reason}`)
+const WITHOUT_GPU = { gpu: false, halves: false }
+
+function withoutGpu(mt) {
+  if (mt.kind === 'seq2seq') return `instead of ${mt.model}`
+  return mt.fallback ? `on a browser that runs ${mt.fallback.model} instead of ${mt.model}` : `on a browser that cannot run ${mt.model}`
+}
+
+export function pairReport(mt, skipped, pairLanguages) {
+  const shared = sharedRun(mt, WITHOUT_GPU, {}, null)
+  const found = Object.entries(mt.pairs).map(([pair, { model }]) => `${pair}: ${model}`)
+  const missing = skipped.map(({ pair, reason }) => {
+    const [source, target] = pair.split('-')
+    const route = mtRoute(mt.pairs, shared, source, target)
+    if (route.kind !== 'pivot') return `warning: no OPUS-MT export for ${pair}, so ${mt.model} translates it: ${reason}`
+    const through = `through ${route.via} with ${route.into.model} and ${route.out.model} ${withoutGpu(mt)}`
+    return mt.kind === 'seq2seq'
+      ? `${pair}: ${through}, since it has no OPUS-MT export of its own: ${reason}`
+      : `warning: no OPUS-MT export for ${pair}, so ${mt.model} translates it, or ${through}: ${reason}`
+  })
+  const unpivoted =
+    skipped.length > 0 && !pairLanguages.includes(PIVOT) ? [`warning: --pair-languages leaves out ${PIVOT}, so a pair without an OPUS-MT export cannot go through ${PIVOT} ${withoutGpu(mt)}`] : []
+  return [...found, ...missing, ...unpivoted]
 }
 
 // QUALITIES is the order a voice is chosen in: a medium voice runs in
@@ -518,7 +540,7 @@ async function main() {
 
   const fallbackLanguages = {}
   const paired = pairOption ? await pairModels(pairLanguages, pairOption.dtype) : { pairs: [], files: [], skipped: [] }
-  const pairs = Object.fromEntries(paired.pairs.map(({ pair, model }) => [pair, model]))
+  const pairs = Object.fromEntries(paired.pairs.map(({ pair, model }) => [pair, { model, dtype: pairOption.dtype }]))
 
   const files = [
     ...(await modelFiles(asr.model, 'seq2seq', exportsFor(asr.dtype, fallback === null))),
@@ -557,7 +579,7 @@ async function main() {
 
   const plain = mt.kind === 'seq2seq' ? mt.model : mt.fallback?.model
   if (plain) await warnUntranslatable(manifest, plain, languages, pairs)
-  reportPairs(paired.pairs, paired.skipped, mt.model)
+  for (const line of pairReport({ ...mt, pairs }, paired.skipped, pairLanguages)) process.stderr.write(`${line}\n`)
 
   const choices = {
     asr: {
@@ -570,9 +592,7 @@ async function main() {
       model: mt.model,
       dtype: mt.dtype,
       ...(mt.fallback ? { fallback: mt.fallback } : {}),
-      ...(Object.keys(pairs).length > 0
-        ? { pairs: Object.fromEntries(Object.entries(pairs).map(([pair, model]) => [pair, { model, dtype: pairOption.dtype }])) }
-        : {}),
+      ...(Object.keys(pairs).length > 0 ? { pairs } : {}),
       ...(builtin ? { builtin: true } : {}),
     },
     tts,

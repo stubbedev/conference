@@ -17,7 +17,7 @@ import (
 
 // Defaults, overridable through the environment.
 const (
-	defaultHTTPPort       = "8080"
+	defaultHTTPPort       = 8080
 	defaultDBPath         = "conference.db"
 	defaultICEUDPPort     = 5000
 	defaultTURNPort       = 3478
@@ -60,7 +60,7 @@ type Config struct {
 	// restrict the other domains served by the same process.
 	OpenCreateHosts []string
 
-	ICEUDPPort  int          // single UDP port for the ICE mux
+	ICEUDPPort  int          // UDP port of the ICE mux; 0 lets the kernel pick
 	ExternalIPs []netip.Addr // NAT 1:1 addresses announced as host candidates
 	Relay       relay.Config // embedded TURN server
 
@@ -100,14 +100,14 @@ func envInt(key string, def int) (int, error) {
 	return n, nil
 }
 
-// envPort reads a port that must be bound: 1-65535.
+// envPort reads a port to bind: 1-65535, or 0 for one the kernel picks.
 func envPort(key string, def int) (int, error) {
 	port, err := envInt(key, def)
 	if err != nil {
 		return 0, err
 	}
 
-	if port < 1 || port > maxPort {
+	if port < 0 || port > maxPort {
 		return 0, fmt.Errorf("%w: %s=%d", errPortRange, key, port)
 	}
 
@@ -139,7 +139,7 @@ func splitList(v string) []string {
 }
 
 var (
-	errPortRange = errors.New("port out of range 1-65535")
+	errPortRange = errors.New("port out of range 0-65535")
 	errPortClash = errors.New("ports must differ")
 	errOrigin    = errors.New("must be an http(s) origin such as https://meet.example.com, with no path, query or fragment")
 )
@@ -203,14 +203,12 @@ func FromEnv() (*Config, error) {
 
 // applyHTTPConfig fills the addressing and authentication settings.
 func applyHTTPConfig(cfg *Config) error {
-	port := env("PORT", defaultHTTPPort)
-
-	_, err := strconv.Atoi(port)
+	port, err := envPort("PORT", defaultHTTPPort)
 	if err != nil {
-		return fmt.Errorf("PORT: %w", err)
+		return err
 	}
 
-	cfg.HTTPAddr = net.JoinHostPort(env("BIND", ""), port)
+	cfg.HTTPAddr = net.JoinHostPort(env("BIND", ""), strconv.Itoa(port))
 
 	cfg.BaseURL, err = parseOrigin(env("BASE_URL", ""))
 	if err != nil {
@@ -332,7 +330,7 @@ func applyMediaConfig(cfg *Config) error {
 		return err
 	}
 
-	if turnPort == udpPort {
+	if turnPort != 0 && turnPort == udpPort {
 		return fmt.Errorf("%w: TURN_PORT and ICE_UDP_PORT are both %d", errPortClash, udpPort)
 	}
 

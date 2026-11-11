@@ -78,6 +78,7 @@ const (
 	minViewerBitrate    = 9_600
 	minPublisherBitrate = 100_000
 	rembInterval        = time.Second
+	rembRepeatInterval  = 100 * time.Millisecond
 
 	// The SSRC the server names itself by in the feedback it sends a
 	// publisher, on a connection where it sends no media of its own.
@@ -119,14 +120,6 @@ type MemberInfo struct {
 	Sharing bool   `json:"sharing"`
 }
 
-// RoomInfo describes the room in the welcome message.
-type RoomInfo struct {
-	Slug  string `json:"slug"`
-	Name  string `json:"name"`
-	Live  int    `json:"live"`
-	Limit int    `json:"limit"`
-}
-
 // JoinRequest carries the persisted room attributes the hub needs to
 // spawn a live room.
 type JoinRequest struct {
@@ -146,79 +139,79 @@ type JoinRequest struct {
 	Resume string
 }
 
-// Message is the single JSON shape exchanged over the signaling
-// WebSocket. Only the fields relevant to Type are meaningful.
+// Message is a frame exchanged over the signaling WebSocket. Only the
+// fields relevant to Type are meaningful, and a frame to a member is
+// written in its type's shape (see MarshalJSON).
 type Message struct {
-	Type string `json:"type"`
+	Type MessageType `json:"type"`
 
 	// join
-	Room    string `json:"room,omitempty"`
-	Session string `json:"session,omitempty"`
-	Name    string `json:"name,omitempty"`
+	Room    string `json:"room"`
+	Session string `json:"session"`
+	Name    string `json:"name"`
 
 	// join (the token to resume with) and welcome (the token to resume
 	// this membership later)
-	Resume string `json:"resume,omitempty"`
+	Resume string `json:"resume"`
 
 	// member-joined: the stale member this one replaces
-	Replaces string `json:"replaces,omitempty"`
+	Replaces string `json:"replaces"`
 
 	// member events
-	ID    string `json:"id,omitempty"`
-	Short uint32 `json:"short,omitempty"`
+	ID    string `json:"id"`
+	Short uint32 `json:"short"`
 
 	// welcome
-	Self     *MemberInfo  `json:"self,omitempty"`
-	RoomInfo *RoomInfo    `json:"roomInfo,omitempty"`
-	Members  []MemberInfo `json:"members,omitempty"`
+	Self    *MemberInfo  `json:"self"`
+	Members []MemberInfo `json:"members"`
 
-	ICEServers []relay.ICEServer `json:"iceServers,omitempty"`
+	ICEServers []relay.ICEServer `json:"iceServers"`
 
 	// media (PC names the peer connection: an upstream such as "up" or
 	// "up-screen", or "down-<source>"; close names an upstream to drop)
-	PC        string                   `json:"pc,omitempty"`
-	SDP       string                   `json:"sdp,omitempty"`
-	Tracks    []TrackInfo              `json:"tracks,omitempty"`
-	Candidate *webrtc.ICECandidateInit `json:"candidate,omitempty"`
+	PC        string                   `json:"pc"`
+	SDP       string                   `json:"sdp"`
+	Tracks    []TrackInfo              `json:"tracks"`
+	Candidate *webrtc.ICECandidateInit `json:"candidate"`
 
 	// pli / state / chat
-	Member  string `json:"member,omitempty"`
-	Mic     bool   `json:"mic,omitempty"`
-	Cam     bool   `json:"cam,omitempty"`
-	Sharing bool   `json:"sharing,omitempty"`
-	From    string `json:"from,omitempty"`
-	IV      string `json:"iv,omitempty"`
-	CT      string `json:"ct,omitempty"`
-	TS      int64  `json:"ts,omitempty"`
+	Member  string `json:"member"`
+	Mic     bool   `json:"mic"`
+	Cam     bool   `json:"cam"`
+	Sharing bool   `json:"sharing"`
+	From    string `json:"from"`
+	IV      string `json:"iv"`
+	CT      string `json:"ct"`
+	TS      int64  `json:"ts"`
 
 	// recording announce and state (Recorder in welcome replays the
 	// flag to late joiners)
-	On       bool   `json:"on,omitempty"`
-	Recorder string `json:"recorder,omitempty"`
+	On       bool   `json:"on"`
+	Recorder string `json:"recorder"`
 
 	// live translation: TranslatingBy in welcome replays the room mode (the
 	// member who switched it on; empty when off); translate-token carries
 	// this member's token for the speech stream
-	TranslatingBy string `json:"translatingBy,omitempty"`
-	Token         string `json:"token,omitempty"`
+	TranslatingBy string `json:"translatingBy"`
+	Token         string `json:"token"`
 
 	// layer (Member names the source, Kind its camera or screen, Layer
 	// is a simulcast rid)
-	Kind  Kind   `json:"kind,omitempty"`
-	Layer string `json:"layer,omitempty"`
+	Kind  Kind   `json:"kind"`
+	Layer string `json:"layer"`
 
 	// layers: which encodings of the publisher's track (Mid on the
 	// upstream named by PC) any viewer wants, indexed low to high
-	Mid    string `json:"mid,omitempty"`
-	Active []bool `json:"active,omitempty"`
+	Mid    string `json:"mid"`
+	Active []bool `json:"active"`
 
 	// moderate
-	Target string `json:"target,omitempty"`
-	Action string `json:"action,omitempty"`
+	Target string `json:"target"`
+	Action string `json:"action"`
 
 	// error
-	Code string `json:"code,omitempty"`
-	Text string `json:"text,omitempty"`
+	Code string `json:"code"`
+	Text string `json:"text"`
 }
 
 // Hub holds all live rooms.
@@ -319,7 +312,7 @@ func (h *Hub) CloseRoom(slug string) bool {
 	}
 
 	for _, member := range room.snapshot() {
-		member.send(Message{Type: "error", Code: "room-closed", Text: "This room was closed by the operator."})
+		member.send(Message{Type: msgError, Code: "room-closed", Text: "This room was closed by the operator."})
 
 		member.Leave()
 	}
@@ -467,8 +460,7 @@ func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 	self := member.Info()
 
 	member.send(Message{
-		Type: "welcome", Self: &self, Members: others, Recorder: r.recorder, TranslatingBy: r.translatingBy,
-		RoomInfo:   &RoomInfo{Slug: r.slug, Name: r.name, Live: len(r.members), Limit: r.limit},
+		Type: msgWelcome, Self: &self, Members: others, Recorder: r.recorder, TranslatingBy: r.translatingBy,
 		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
 	})
 
@@ -494,7 +486,7 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 	}
 
 	r.broadcastExcept(member.ID, Message{
-		Type: "member-joined", ID: member.ID, Short: member.Short, Name: member.Name, Replaces: replaces,
+		Type: msgMemberJoined, ID: member.ID, Short: member.Short, Name: member.Name, Replaces: replaces,
 	})
 
 	// While live translation is on, a joiner translates its own speech too.
@@ -554,10 +546,10 @@ func (r *Room) removeMember(member *Member) {
 	}
 
 	if recorderLeft {
-		r.broadcast(Message{Type: "recording", From: member.ID, On: false})
+		r.broadcast(Message{Type: msgRecording, From: member.ID, On: false})
 	}
 
-	r.broadcast(Message{Type: "member-left", ID: member.ID})
+	r.broadcast(Message{Type: msgMemberLeft, ID: member.ID})
 }
 
 // claimRecording makes id the room's single announced recorder and
@@ -610,7 +602,9 @@ func (r *Room) broadcastExcept(exceptID string, msg Message) {
 }
 
 // startRembTicker periodically measures every publisher connection and
-// feeds each the bandwidth it may use via REMB.
+// feeds each the bandwidth it may use via REMB, and repeats the REMB in
+// between on the connections whose estimate it is, which a network route
+// change resets until the next REMB arrives.
 func (r *Room) startRembTicker() {
 	r.mu.Lock()
 
@@ -626,16 +620,21 @@ func (r *Room) startRembTicker() {
 	r.mu.Unlock()
 
 	go func() {
-		ticker := time.NewTicker(rembInterval)
-		defer ticker.Stop()
+		measure := time.NewTicker(rembInterval)
+		defer measure.Stop()
+
+		repeat := time.NewTicker(rembRepeatInterval)
+		defer repeat.Stop()
 
 		for {
 			select {
 			case <-stop:
 				return
-			case <-ticker.C:
+			case <-measure.C:
 				r.sendRemb(time.Now())
 				r.adaptLayers()
+			case <-repeat.C:
+				r.repeatRemb()
 			}
 		}
 	}()
@@ -649,15 +648,36 @@ func (r *Room) sendRemb(now time.Time) {
 	}
 }
 
+func (r *Room) repeatRemb() {
+	for _, peer := range r.snapshot() {
+		for _, upPeer := range peer.upstreamPeers() {
+			upPeer.repeatRemb()
+		}
+	}
+}
+
 // sendRemb closes one measurement period of this connection and feeds it
 // the bandwidth it may use, so each upstream's estimate follows only the
 // tracks it carries and the link they share.
 func (up *UpPeer) sendRemb(now time.Time) {
 	sample := up.measure(now)
 
-	limit := up.viewerLimit()
 	if up.which.feedback() == feedbackReceiverEstimate {
 		up.uplink = up.uplink.next(sample)
+	}
+
+	up.feedLimit()
+}
+
+func (up *UpPeer) repeatRemb() {
+	if up.which.feedback() == feedbackReceiverEstimate {
+		up.feedLimit()
+	}
+}
+
+func (up *UpPeer) feedLimit() {
+	limit := up.viewerLimit()
+	if up.which.feedback() == feedbackReceiverEstimate {
 		limit = limit.tighter(up.uplink.limit)
 	}
 
@@ -674,21 +694,6 @@ func (up *UpPeer) sendRemb(now time.Time) {
 	up.rembCapped = limit.bound
 
 	up.writeRemb(bitrate, ssrcs)
-}
-
-// openUplink sends a connection's first REMB the moment its first video
-// packet arrives, not at the next tick: libwebrtc only starts its
-// estimate from a REMB that lands within two seconds of its first
-// receiver report, and a share whose first REMB missed that window
-// climbs 8% a second from where it started instead. Nothing has been
-// measured on the connection yet, so nothing limits it.
-func (up *UpPeer) openUplink(ssrc webrtc.SSRC) {
-	up.opened.Do(func() {
-		bitrate, send := rembFor(up.which.feedback(), unlimited, false)
-		if send {
-			up.writeRemb(bitrate, []uint32{uint32(ssrc)})
-		}
-	})
 }
 
 func (up *UpPeer) writeRemb(bitrate uint64, ssrcs []uint32) {
@@ -741,7 +746,7 @@ func (r *Room) adaptLayers() {
 			r.requestLayerKeyframes(source, track, track.retarget(now, true))
 
 			if wanted, changed := track.updateDemand(now); changed {
-				source.send(Message{Type: "layers", PC: track.key.up.PCID(), Mid: track.key.mid, Active: wanted[:]})
+				source.send(Message{Type: msgLayers, PC: track.key.up.PCID(), Mid: track.key.mid, Active: wanted[:]})
 			}
 		}
 	}
@@ -976,39 +981,44 @@ func (m *Member) enqueue(task func()) {
 
 func (m *Member) fail(code string, err error) {
 	log.Printf("room %s member %s: %s: %v", m.room.slug, m.ID, code, err)
-	m.send(Message{Type: "error", Code: code, Text: err.Error()})
+	m.send(Message{Type: msgError, Code: code, Text: err.Error()})
 }
 
 func (m *Member) apply(msg Message) { //nolint:cyclop // one flat case per signaling message type.
 	switch msg.Type {
-	case "offer":
+	case msgOffer:
 		m.handleUpOffer(msg)
-	case "close":
+	case msgClose:
 		m.handleUpClose(msg)
-	case "answer":
+	case msgAnswer:
 		m.handleDownAnswer(msg)
-	case "ice":
+	case msgIce:
 		m.handleICE(msg)
-	case "pli":
+	case msgPli:
 		m.handlePLI(msg)
-	case "state":
+	case msgState:
 		m.handleState(msg)
-	case "chat":
+	case msgChat:
 		m.handleChat(msg)
-	case "record":
+	case msgRecord:
 		m.handleRecord(msg)
-	case "moderate":
+	case msgModerate:
 		m.handleModerate(msg)
-	case "layer":
+	case msgLayer:
 		m.handleLayer(msg)
-	case "lang":
+	case msgLang:
 		m.handleLang(msg)
-	case "caption":
+	case msgCaption:
 		m.handleCaption(msg)
-	case "translate":
+	case msgTranslate:
 		m.handleTranslate(msg)
-	case "translate-token-request":
+	case msgTranslateTokenRequest:
 		m.handleTokenRequest()
+	case msgJoin:
+		m.fail("bad-type", fmt.Errorf("%w: %s after the member joined", ErrBadRequest, msg.Type))
+	case msgWelcome, msgMemberJoined, msgMemberLeft, msgMemberState, msgError, msgRecording, msgTranslating,
+		msgLayers, msgForced, msgKicked, msgTranslateToken:
+		m.fail("bad-type", fmt.Errorf("%w: %s is a message the server sends", ErrBadRequest, msg.Type))
 	}
 }
 
@@ -1075,7 +1085,7 @@ func (m *Member) handleState(msg Message) {
 	}
 
 	m.room.broadcastExcept(m.ID, Message{
-		Type: "member-state", ID: m.ID,
+		Type: msgMemberState, ID: m.ID,
 		Mic: next.Mic, Cam: next.Cam, Sharing: next.Sharing,
 	})
 }
@@ -1088,7 +1098,7 @@ func (m *Member) handleChat(msg Message) {
 	}
 
 	m.room.broadcastExcept(m.ID, Message{
-		Type: "chat", From: m.ID, IV: msg.IV, CT: msg.CT, TS: time.Now().UnixMilli(),
+		Type: msgChat, From: m.ID, IV: msg.IV, CT: msg.CT, TS: time.Now().UnixMilli(),
 	})
 }
 
@@ -1114,7 +1124,7 @@ func (m *Member) handleRecord(msg Message) {
 		return
 	}
 
-	m.room.broadcast(Message{Type: "recording", From: m.ID, On: msg.On})
+	m.room.broadcast(Message{Type: msgRecording, From: m.ID, On: msg.On})
 }
 
 // handleModerate applies a privileged member's action against another
@@ -1136,9 +1146,9 @@ func (m *Member) handleModerate(msg Message) {
 
 	switch msg.Action {
 	case ActionMute, ActionCam, ActionScreen:
-		target.send(Message{Type: "forced", Action: msg.Action})
+		target.send(Message{Type: msgForced, Action: msg.Action})
 	case ActionKick:
-		target.send(Message{Type: "kicked"})
+		target.send(Message{Type: msgKicked})
 		target.Leave()
 	case ActionLang:
 		if !sealed(msg, maxLangCiphertext) {
@@ -1147,7 +1157,7 @@ func (m *Member) handleModerate(msg Message) {
 			return
 		}
 
-		target.send(Message{Type: "forced", Action: ActionLang, From: m.ID, IV: msg.IV, CT: msg.CT})
+		target.send(Message{Type: msgForced, Action: ActionLang, From: m.ID, IV: msg.IV, CT: msg.CT})
 	default:
 		m.fail("bad-action", ErrBadRequest)
 	}
@@ -1245,7 +1255,6 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		sampledAt:  time.Now(),
 		uplink:     uplinkEstimate{limit: unlimited, peak: 0},
 		rembCapped: false,
-		opened:     sync.Once{},
 		flowing:    atomic.Pointer[time.Time]{},
 	}
 
@@ -1259,10 +1268,6 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		// sent media.
 		now := time.Now()
 		upPeer.flowing.CompareAndSwap(nil, &now)
-
-		if track.Kind() == webrtc.RTPCodecTypeVideo {
-			upPeer.openUplink(track.SSRC())
-		}
 
 		m.enqueue(func() {
 			if m.upstream(which) != upPeer {
@@ -1314,7 +1319,7 @@ func (m *Member) answerUp(upPeer *UpPeer, msg Message) {
 		return
 	}
 
-	m.send(Message{Type: "answer", PC: upPeer.which.PCID(), SDP: upPeer.pc.LocalDescription().SDP})
+	m.send(Message{Type: msgAnswer, PC: upPeer.which.PCID(), SDP: upPeer.pc.LocalDescription().SDP})
 
 	// Also rescan after the answer: renegotiated-away tracks (a
 	// translated voice stopped) must be torn down and fanned out.
@@ -1333,7 +1338,7 @@ func (m *Member) iceSender(pcID string) func(*webrtc.ICECandidate) {
 
 		init := c.ToJSON()
 
-		m.send(Message{Type: "ice", PC: pcID, Candidate: &init})
+		m.send(Message{Type: msgIce, PC: pcID, Candidate: &init})
 	}
 }
 
@@ -1568,10 +1573,6 @@ type UpPeer struct {
 	sampledAt  time.Time
 	uplink     uplinkEstimate
 	rembCapped bool
-
-	// opened sends the connection's first REMB once, on its first video
-	// packet; see openUplink.
-	opened sync.Once
 
 	// flowing is when the connection's first packet arrived, nil before.
 	flowing atomic.Pointer[time.Time]
@@ -2590,7 +2591,7 @@ func (dp *DownPeer) negotiate(viewer *Member) {
 		return
 	}
 
-	var tracks []TrackInfo
+	tracks := []TrackInfo{}
 
 	for _, transceiver := range dp.pc.GetTransceivers() {
 		sender := transceiver.Sender()
@@ -2612,7 +2613,7 @@ func (dp *DownPeer) negotiate(viewer *Member) {
 
 	log.Printf("sfu: offer %s viewer=%.6s source=%.6s [%s]", viewer.room.slug, viewer.ID, dp.sourceID, sdpFingerprint(sdp))
 
-	viewer.send(Message{Type: "offer", PC: dp.pcID(), SDP: sdp, Tracks: tracks})
+	viewer.send(Message{Type: msgOffer, PC: dp.pcID(), SDP: sdp, Tracks: tracks})
 }
 
 func (dp *DownPeer) applyAnswer(sdp string, viewer *Member) {

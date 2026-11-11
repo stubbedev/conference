@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { externalData, manifestOf, parseArgs, planPairs, retryAfterSeconds, treeFiles, voiceFiles } from './fetch-speech-models.mjs'
+import { externalData, manifestOf, pairReport, parseArgs, planPairs, retryAfterSeconds, treeFiles, voiceFiles } from './fetch-speech-models.mjs'
 
 test('pair languages are their own list beside every language', () => {
   const options = parseArgs(['/srv/models', '--languages=all', '--pair-languages=en, de,da,en', '--pair-dtype=q4'])
@@ -68,6 +68,56 @@ test('a pair without an export is skipped by name, in a stable order', () => {
 
   assert.deepEqual(found.map((entry) => entry.pair), ['de-da'])
   assert.deepEqual(skipped, [{ pair: 'da-de', reason: 'none of Xenova/opus-mt-da-de, onnx-community/opus-mt-da-de is on the hub' }])
+})
+
+const opus = (pair) => ({ model: `Xenova/opus-mt-${pair}`, dtype: 'q4' })
+const missing = (pair) => ({ pair, reason: `none of Xenova/opus-mt-${pair} is on the hub` })
+
+const pivotPairs = Object.fromEntries(['en-de', 'de-en', 'en-da', 'da-en', 'da-de'].map((pair) => [pair, opus(pair)]))
+const m2m100 = (pairs) => ({ kind: 'seq2seq', model: 'Xenova/m2m100_418M', dtype: 'q8', fallback: null, pairs })
+const gemma = (pairs, fallback = { model: 'Xenova/m2m100_418M', dtype: 'q8' }) => ({ kind: 'translator', model: 'onnx-community/translategemma-text-4b-it-ONNX', dtype: 'q4', fallback, pairs })
+const NO_DE_DA = 'none of Xenova/opus-mt-de-da is on the hub'
+
+test('a pair without an export whose legs through English were found goes through English instead of m2m100', () => {
+  assert.deepEqual(pairReport(m2m100(pivotPairs), [missing('de-da')], ['en', 'de', 'da']), [
+    'en-de: Xenova/opus-mt-en-de',
+    'de-en: Xenova/opus-mt-de-en',
+    'en-da: Xenova/opus-mt-en-da',
+    'da-en: Xenova/opus-mt-da-en',
+    'da-de: Xenova/opus-mt-da-de',
+    `de-da: through en with Xenova/opus-mt-de-en and Xenova/opus-mt-en-da instead of Xenova/m2m100_418M, since it has no OPUS-MT export of its own: ${NO_DE_DA}`,
+  ])
+})
+
+test('a translator translates a pair without an export, and English goes in between where m2m100 would instead', () => {
+  assert.equal(
+    pairReport(gemma(pivotPairs), [missing('de-da')], ['en', 'de', 'da']).at(-1),
+    `warning: no OPUS-MT export for de-da, so onnx-community/translategemma-text-4b-it-ONNX translates it, or through en with Xenova/opus-mt-de-en and Xenova/opus-mt-en-da on a browser that runs Xenova/m2m100_418M instead of onnx-community/translategemma-text-4b-it-ONNX: ${NO_DE_DA}`,
+  )
+  assert.equal(
+    pairReport(gemma(pivotPairs, null), [missing('de-da')], ['en', 'de', 'da']).at(-1),
+    `warning: no OPUS-MT export for de-da, so onnx-community/translategemma-text-4b-it-ONNX translates it, or through en with Xenova/opus-mt-de-en and Xenova/opus-mt-en-da on a browser that cannot run onnx-community/translategemma-text-4b-it-ONNX: ${NO_DE_DA}`,
+  )
+})
+
+test('a pair with a leg through English missing is left to the multilingual model', () => {
+  assert.equal(pairReport(m2m100({ 'de-en': opus('de-en') }), [missing('de-da')], ['en', 'de', 'da']).at(-1), `warning: no OPUS-MT export for de-da, so Xenova/m2m100_418M translates it: ${NO_DE_DA}`)
+  assert.equal(pairReport(gemma({}), [missing('de-da')], ['en', 'de', 'da']).at(-1), `warning: no OPUS-MT export for de-da, so onnx-community/translategemma-text-4b-it-ONNX translates it: ${NO_DE_DA}`)
+})
+
+test('pair languages without English say that nothing goes through it', () => {
+  const pairs = { 'da-de': opus('da-de') }
+
+  assert.deepEqual(pairReport(m2m100(pairs), [missing('de-da')], ['de', 'da']), [
+    'da-de: Xenova/opus-mt-da-de',
+    `warning: no OPUS-MT export for de-da, so Xenova/m2m100_418M translates it: ${NO_DE_DA}`,
+    'warning: --pair-languages leaves out en, so a pair without an OPUS-MT export cannot go through en instead of Xenova/m2m100_418M',
+  ])
+  assert.equal(
+    pairReport(gemma(pairs), [missing('de-da')], ['de', 'da']).at(-1),
+    'warning: --pair-languages leaves out en, so a pair without an OPUS-MT export cannot go through en on a browser that runs Xenova/m2m100_418M instead of onnx-community/translategemma-text-4b-it-ONNX',
+  )
+  assert.deepEqual(pairReport(m2m100(pairs), [], ['de', 'da']), ['da-de: Xenova/opus-mt-da-de'])
 })
 
 test('a rate-limited hub call waits as long as the hub asks, within bounds', () => {

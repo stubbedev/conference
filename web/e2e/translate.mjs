@@ -31,15 +31,13 @@
 //
 //   node web/e2e/translate.mjs
 
-import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 
-import { consoleOf, createRoom, evalJs, findChrome, freePort, joinRoom, launchChrome, sleep, stopProcess, waitFor } from './browser.mjs'
+import { consoleOf, createRoom, evalJs, findChrome, joinRoom, launchChrome, sleep, stopProcess, waitFor } from './browser.mjs'
+import { buildServer, repoRoot, serverEnv, startServer } from './server.mjs'
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const chrome = process.env.CHROME ?? findChrome()
 const runtime = process.env.SPEECH_RUNTIME === 'browser' ? 'browser' : 'server'
 const TIMEOUT_MS = 45_000
@@ -52,52 +50,19 @@ function check(label, condition, detail) {
   if (!condition) failures.push(`${label}: ${detail}`)
 }
 
-async function waitHealthy(url, what) {
-  for (let i = 0; i < 300; i++) {
-    try {
-      if ((await fetch(url)).ok) return
-    } catch {
-      // not up yet
-    }
-    await sleep(200)
-  }
-  throw new Error(`${what} did not start on ${url}`)
-}
-
-function buildServer() {
-  const bin = join(dir, 'server')
-  const res = spawnSync('go', ['build', '-race', '-o', bin, './cmd/server'], {
-    cwd: repoRoot,
-    stdio: 'inherit',
-    env: { ...process.env, CGO_ENABLED: '1' },
+async function startMeetingServer() {
+  const env = serverEnv(dir, {
+    BIND: '127.0.0.1',
+    SPEECH_ENGINES: 'fake',
+    SPEECH_RUNTIME: runtime,
+    // On the server the stand-in voice engine clones too: a higher tone in the speaker's own voice.
+    ...(runtime === 'server' ? { VOICE_CLONING: 'true' } : {}),
   })
-  if (res.status !== 0) throw new Error('go build ./cmd/server failed')
-  return bin
-}
-
-async function startServer(bin) {
-  const port = await freePort()
-  procs.push(
-    spawn(bin, [], {
-      env: {
-        ...process.env,
-        PORT: String(port),
-        BIND: '127.0.0.1',
-        ICE_UDP_PORT: String(await freePort()),
-        TURN_PORT: String(await freePort()),
-        DB_PATH: join(dir, 'translate.db'),
-        SPEECH_ENGINES: 'fake',
-        SPEECH_RUNTIME: runtime,
-        // On the server the stand-in voice engine clones too: a higher tone in the speaker's own voice.
-        ...(runtime === 'server' ? { VOICE_CLONING: 'true' } : {}),
-        GORACE: 'halt_on_error=1',
-      },
-      stdio: 'inherit',
-    }),
-  )
-  const base = `http://127.0.0.1:${port}`
-  await waitHealthy(`${base}/api/config`, 'the meeting server')
-  return base
+  const server = await startServer(buildServer(dir, { race: true }), env)
+  procs.push(server.proc)
+  server.proc.stdout.pipe(process.stdout)
+  server.proc.stderr.pipe(process.stderr)
+  return server.base
 }
 
 // Language settings the app reads from localStorage on its first load.
@@ -225,7 +190,7 @@ async function recordOwnVoice(browser) {
 }
 
 async function main() {
-  const base = await startServer(buildServer())
+  const base = await startMeetingServer()
   const room = await createRoom(base, 'translate-e2e')
 
   const fixtures = join(repoRoot, 'fixtures')

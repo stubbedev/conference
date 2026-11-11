@@ -37,9 +37,9 @@ type Engine struct {
 	mediaAddrs []relay.MediaAddr
 }
 
-// NewEngine builds the engine. udpPort > 0 binds all ICE traffic to a
-// single UDP port (easy to publish through Docker or a firewall);
-// externalIPs, when set, replace host candidates for NAT 1:1 setups.
+// NewEngine builds the engine. All ICE traffic shares the UDP mux on
+// udpPort (easy to publish through Docker or a firewall), or on ports the
+// kernel picks when it is 0; externalIPs, when set, replace host candidates for NAT 1:1 setups.
 // Every UDP socket the engine opens is sized by sockets. The returned
 // cleanup closes the UDP mux.
 func NewEngine(udpPort int, externalIPs []netip.Addr, sockets *recvbuf.Sizer) (*Engine, func(), error) {
@@ -90,9 +90,10 @@ func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr)
 type congestionFeedback int
 
 const (
-	// feedbackReceiverEstimate is REMB and receiver reports only.
+	// feedbackReceiverEstimate is REMB alone, without receiver reports.
 	feedbackReceiverEstimate congestionFeedback = iota
-	// feedbackTransportWide adds transport-wide congestion control feedback.
+	// feedbackTransportWide is REMB, receiver reports and transport-wide
+	// congestion control feedback.
 	feedbackTransportWide
 )
 
@@ -108,9 +109,9 @@ func newAPI(settingEngine webrtc.SettingEngine, feedback congestionFeedback) (*w
 	}
 
 	if feedback == feedbackTransportWide {
-		err = webrtc.ConfigureTWCCSender(mediaEngine, registry)
+		err = configureTransportWideFeedback(mediaEngine, registry)
 		if err != nil {
-			return nil, fmt.Errorf("sfu: transport-wide congestion control feedback: %w", err)
+			return nil, err
 		}
 	}
 
@@ -122,8 +123,7 @@ func newAPI(settingEngine webrtc.SettingEngine, feedback congestionFeedback) (*w
 }
 
 // MediaAddrs lists the addresses the SFU announces on its UDP mux and
-// the local sockets behind them. It is empty without a mux (ephemeral
-// ports), where no fixed address exists to relay to.
+// the local sockets behind them, with the ports they are bound to.
 func (e *Engine) MediaAddrs() []relay.MediaAddr {
 	return e.mediaAddrs
 }
@@ -155,10 +155,6 @@ func newSettingEngine(
 		if err != nil {
 			return settingEngine, nil, noop, fmt.Errorf("sfu: address rewrite %v: %w", externalIPs, err)
 		}
-	}
-
-	if udpPort == 0 {
-		return settingEngine, nil, noop, nil
 	}
 
 	mux, err := ice.NewMultiUDPMuxFromPort(udpPort, ice.UDPMuxFromPortWithNet(sockets))
@@ -322,8 +318,7 @@ func newMediaEngine() (*webrtc.MediaEngine, error) {
 }
 
 // newInterceptors builds the RTCP pipeline: NACK responses for viewers,
-// NACK generation toward publishers, and sender/receiver reports in
-// both directions.
+// NACK generation toward publishers, and sender reports.
 func newInterceptors() (*interceptor.Registry, error) {
 	registry := &interceptor.Registry{}
 
@@ -348,14 +343,23 @@ func newInterceptors() (*interceptor.Registry, error) {
 
 	registry.Add(senderReports)
 
+	return registry, nil
+}
+
+func configureTransportWideFeedback(mediaEngine *webrtc.MediaEngine, registry *interceptor.Registry) error {
 	receiverReports, err := report.NewReceiverInterceptor()
 	if err != nil {
-		return nil, fmt.Errorf("sfu: receiver reports: %w", err)
+		return fmt.Errorf("sfu: receiver reports: %w", err)
 	}
 
 	registry.Add(receiverReports)
 
-	return registry, nil
+	err = webrtc.ConfigureTWCCSender(mediaEngine, registry)
+	if err != nil {
+		return fmt.Errorf("sfu: transport-wide congestion control feedback: %w", err)
+	}
+
+	return nil
 }
 
 // NewUpstreamPeerConnection creates the connection a member publishes up on.

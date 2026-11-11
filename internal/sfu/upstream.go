@@ -46,9 +46,12 @@ func parseUpstream(pcID string) (Upstream, error) {
 // feedback is the congestion feedback the server gives a publisher on
 // this connection. The camera's connection gets transport-wide feedback,
 // so the browser's delay-based estimate tracks the uplink closely. The
-// share's connection leaves it out: the browser's loss-based estimate
-// then sits at the server's REMB ceiling instead of settling near what a
-// still screen sends.
+// share's connection gets REMB alone: without transport-wide feedback the
+// browser's estimate does not settle near what a still screen sends, and
+// without receiver reports libwebrtc stays in the start phase in which
+// its estimate is the REMB. A receiver report within a second of a REMB
+// that raised the estimate, as after every network route change
+// mid-share, would end that phase on a ramp climbing 8% a second.
 func (u Upstream) feedback() congestionFeedback {
 	if u == UpstreamScreen {
 		return feedbackReceiverEstimate

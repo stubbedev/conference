@@ -2,7 +2,7 @@ import { errorMessage } from '@/lib/errors'
 import type { AsrEngine, Engines, MtEngine, Prepared, PrepareEvents, Segmenter, SegmenterEvents, Sentence, TtsEngine } from '@/lib/speech/engines'
 import { BuiltinTranslators } from '@/lib/speech/builtin'
 import { browserFetchDeps } from '@/lib/speech/fetching'
-import { asrExport, bytesFor, exportKey, loadsUpFront, renderPrompt, voiceKey, type SpeechModels } from '@/lib/speech/models'
+import { asrExport, bytesFor, exportKey, loadsUpFront, renderPrompt, voiceKey, type Export, type SpeechModels } from '@/lib/speech/models'
 import { budgetFor, fingerprint, parseHistory, withUnusable, withQuiet, type GpuHistory } from '@/lib/speech/gpu-history'
 import { GpuWatch } from '@/lib/speech/gpu-watch'
 import { Progress } from '@/lib/speech/progress'
@@ -30,6 +30,15 @@ const MEGABYTE = 1e6
 const LOADING_REPORT_MS = 250
 const GPU_HISTORY_KEY = 'speech-gpu-history'
 
+interface Expected {
+  model: string
+  key: string
+}
+
+function expectedExport(wanted: Export): Expected {
+  return { model: wanted.model, key: exportKey(wanted) }
+}
+
 interface TextReply extends WorkerReply {
   text: string
 }
@@ -51,8 +60,8 @@ class Channel {
   private readonly rpc: WorkerRpc
   private readonly queue = new Serial()
 
-  constructor(worker: Worker, onEvent: (event: WorkerEvent) => void) {
-    this.rpc = new WorkerRpc(worker, onEvent)
+  constructor(worker: Worker, name: string, onEvent: (event: WorkerEvent) => void) {
+    this.rpc = new WorkerRpc(worker, name, onEvent)
   }
 
   call<T extends WorkerReply>(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
@@ -97,7 +106,7 @@ class BrowserEngines implements Engines {
 
   private readonly models: SpeechModels
   private readonly languages: readonly Language[]
-  private readonly workers = new Workers<Purpose, Channel>((purpose) => new Channel(start(purpose), (event) => this.event(purpose, event)))
+  private readonly workers = new Workers<Purpose, Channel>((purpose) => new Channel(start(purpose), PARTS[purpose], (event) => this.event(purpose, event)))
   private readonly progress = new Progress()
   private readonly noGpu = new Set<Purpose>()
   private readonly gpuRefused = new Set<Purpose>()
@@ -335,7 +344,7 @@ class BrowserEngines implements Engines {
         this.gpuRefused.add(purpose)
         return
       case 'expect':
-        this.progress.expect(PARTS[purpose], this.models.sizes[String(event.key)] ?? 0)
+        this.progress.expect(PARTS[purpose], String(event.model), this.models.sizes[String(event.key)] ?? 0)
         this.reportLoading()
         return
       case 'loading':
@@ -418,25 +427,25 @@ class BrowserEngines implements Engines {
 
   private loadAsr(lang: string): Promise<WorkerReply> {
     const primary = asrExport(this.models.asr, 'primary', lang)
-    return this.load('asr', { base: this.models.base, asr: this.models.asr, sizes: this.models.sizes, lang }, primary ? exportKey(primary) : null)
+    return this.load('asr', { base: this.models.base, asr: this.models.asr, sizes: this.models.sizes, lang }, primary ? expectedExport(primary) : null)
   }
 
   private loadMt(): Promise<WorkerReply> {
-    return this.load('mt', { base: this.models.base, mt: this.models.mt, sizes: this.models.sizes }, loadsUpFront(this.models.mt) ? exportKey(this.models.mt) : null)
+    return this.load('mt', { base: this.models.base, mt: this.models.mt, sizes: this.models.sizes }, loadsUpFront(this.models.mt) ? expectedExport(this.models.mt) : null)
   }
 
   private loadTts(lang: string): Promise<WorkerReply> {
     const voice = this.models.voices[lang]
-    return this.load('tts', { base: this.models.base, voices: this.models.voices, lang }, voice === undefined ? null : voiceKey(voice))
+    return this.load('tts', { base: this.models.base, voices: this.models.voices, lang }, voice === undefined ? null : { model: voiceKey(voice), key: voiceKey(voice) })
   }
 
-  private load(purpose: Purpose, settings: Record<string, unknown>, expected: string | null): Promise<WorkerReply> {
+  private load(purpose: Purpose, settings: Record<string, unknown>, expected: Expected | null): Promise<WorkerReply> {
     return this.cpuAfterGpu(purpose, () => this.init(purpose, settings, expected))
   }
 
-  private init(purpose: Purpose, settings: Record<string, unknown>, expected: string | null): Promise<WorkerReply> {
+  private init(purpose: Purpose, settings: Record<string, unknown>, expected: Expected | null): Promise<WorkerReply> {
     return this.workers.load(purpose, (channel) => {
-      if (expected !== null) this.progress.expect(PARTS[purpose], this.models.sizes[expected] ?? 0)
+      if (expected !== null) this.progress.expect(PARTS[purpose], expected.model, this.models.sizes[expected.key] ?? 0)
       return this.tracked(PARTS[purpose], async () => {
         const runtime = await this.fetchRuntime()
         return channel.call<WorkerReply>({ ...settings, gpu: !this.noGpu.has(purpose), runtime, type: 'init' })

@@ -71,7 +71,7 @@ func expectToken(t *testing.T, peer *testPeer) {
 }
 
 // expectNo asserts that no message of msgType is queued for peer.
-func expectNo(t *testing.T, peer *testPeer, msgType string) {
+func expectNo(t *testing.T, peer *testPeer, msgType sfu.MessageType) {
 	t.Helper()
 
 	time.Sleep(100 * time.Millisecond)
@@ -248,7 +248,7 @@ func TestCaptionsFromAnyMember(t *testing.T) {
 
 	for _, bad := range []sfu.Message{
 		{Type: msgCaption, IV: "iv", CT: ""},
-		{Type: msgCaption, IV: "iv", CT: strings.Repeat("x", 4<<10+1)},
+		{Type: msgCaption, IV: "iv", CT: strings.Repeat("x", sfu.MaxCaptionCiphertext+1)},
 	} {
 		guest.member.Handle(bad)
 
@@ -334,12 +334,12 @@ func keepToggling(switcher *sfu.Member) func() {
 	}
 }
 
-func firstMessageOfJoin(t *testing.T, hub *sfu.Hub, req sfu.JoinRequest, left <-chan string) string {
+func firstMessageOfJoin(t *testing.T, hub *sfu.Hub, req sfu.JoinRequest, left <-chan string) sfu.MessageType {
 	t.Helper()
 
 	var (
 		mu    sync.Mutex
-		first string
+		first sfu.MessageType
 	)
 
 	joiner, err := hub.JoinRoom(req, func(msg sfu.Message) {

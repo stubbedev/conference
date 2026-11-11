@@ -6,7 +6,7 @@ interface FileProgress {
 }
 
 interface PartState {
-  expected: number
+  expected: Map<string, number>
   files: Map<string, FileProgress>
   retry: LoadingRetry | null
   pending: number
@@ -14,7 +14,7 @@ interface PartState {
 }
 
 function emptyPart(): PartState {
-  return { expected: 0, files: new Map(), retry: null, pending: 0, settled: null }
+  return { expected: new Map(), files: new Map(), retry: null, pending: 0, settled: null }
 }
 
 function incomplete(part: PartState): boolean {
@@ -28,7 +28,9 @@ function shown(part: LoadingPart, state: PartState): PartLoading {
     loaded += file.loaded
     reported += file.total
   }
-  const total = state.expected > 0 ? state.expected : reported
+  let expected = 0
+  for (const bytes of state.expected.values()) expected += bytes
+  const total = expected > 0 ? expected : reported
   return { part, loaded: state.settled === 'loaded' ? total : Math.min(loaded, total), total, retry: state.retry }
 }
 
@@ -58,8 +60,8 @@ export class Progress {
     if (state.pending === 0) state.settled = succeeded ? 'loaded' : 'failed'
   }
 
-  expect(part: LoadingPart, bytes: number): void {
-    this.part(part).expected = bytes
+  expect(part: LoadingPart, model: string, bytes: number): void {
+    this.part(part).expected.set(model, bytes)
   }
 
   file(part: LoadingPart, file: string, loaded: number, total: number): void {

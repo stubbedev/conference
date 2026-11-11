@@ -4,10 +4,13 @@ import { useSearchParams } from 'react-router-dom'
 import { resumeAudio } from '@/hooks/media'
 import { api, PasswordRefused, type RoomInfo } from '@/lib/api'
 import { errorMessage } from '@/lib/errors'
+import { roomFailure, type RoomFailure } from '@/lib/room-failure'
 import { deriveProof, fromB64, importPassword, openKeyblob, toB64 } from '@/lib/roomkeys'
 import { forgetRoomPassword, rememberRoomPassword, savedRoomPassword } from '@/lib/roompass'
 
 export type Phase = 'checking' | 'gate' | 'prejoin' | 'joining' | 'live' | 'error'
+
+type Stage = Exclude<Phase, 'error'>
 
 function supportsE2EE(): boolean {
   return 'RTCRtpScriptTransform' in window
@@ -15,10 +18,10 @@ function supportsE2EE(): boolean {
 
 export function useRoomSession(slug: string, onReady: () => Promise<void>) {
   const [searchParams] = useSearchParams()
-  const [phase, setPhase] = useState<Phase>('checking')
+  const [stage, setStage] = useState<Stage>('checking')
   const [gateBusy, setGateBusy] = useState(false)
   const [gateError, setGateError] = useState('')
-  const [fatalError, setFatalError] = useState('')
+  const [failure, setFailure] = useState<RoomFailure | null>(null)
   const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null)
   const [roomKeyText, setRoomKeyText] = useState('')
   const [privileged, setPrivileged] = useState(false)
@@ -53,7 +56,7 @@ export function useRoomSession(slug: string, onReady: () => Promise<void>) {
           const pass = password ? await importPassword(password) : await savedRoomPassword(slug)
           if (!pass) {
             setGateError('')
-            setPhase('gate')
+            setStage('gate')
             return
           }
           if (!info.authSalt) throw new Error('This room is missing its password salt.')
@@ -73,7 +76,7 @@ export function useRoomSession(slug: string, onReady: () => Promise<void>) {
 
         if (!keyB64) {
           setGateError('')
-          setPhase('gate')
+          setStage('gate')
           return
         }
 
@@ -86,16 +89,14 @@ export function useRoomSession(slug: string, onReady: () => Promise<void>) {
         sessionRef.current = session
         roomKeyRef.current = fromB64(keyB64)
         setRoomKeyText(keyB64)
-        setPhase('prejoin')
+        setStage('prejoin')
         void onReady()
       } catch (err) {
-        const message = errorMessage(err)
         if (err instanceof PasswordRefused) {
-          setGateError(message)
-          setPhase('gate')
+          setGateError(errorMessage(err))
+          setStage('gate')
         } else {
-          setFatalError(message)
-          setPhase('error')
+          setFailure(roomFailure(err))
         }
       } finally {
         setGateBusy(false)
@@ -117,34 +118,42 @@ export function useRoomSession(slug: string, onReady: () => Promise<void>) {
     [bootstrap],
   )
 
+  const retry = useCallback(() => {
+    setFailure(null)
+    setStage('checking')
+    void bootstrap()
+  }, [bootstrap])
+
   const join = useCallback(
     async (connect: () => Promise<unknown>) => {
       if (!roomInfo || !roomKeyRef.current) return
 
       resumeAudio()
-      setPhase('joining')
+      setStage('joining')
       try {
         await connect()
-        setPhase('live')
+        setStage('live')
       } catch (err) {
-        setFatalError(errorMessage(err))
-        setPhase('error')
+        setFailure(roomFailure(err))
       }
     },
     [roomInfo],
   )
 
+  const phase: Phase = failure ? 'error' : stage
+
   return {
     phase,
     gateBusy,
     gateError,
-    fatalError,
+    failure,
     roomInfo,
     roomKeyText,
     privileged,
     sessionRef,
     roomKeyRef,
     submitPassword,
+    retry,
     join,
   }
 }

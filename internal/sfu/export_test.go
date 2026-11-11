@@ -34,3 +34,7 @@ func NewLoopbackEngine() (*Engine, func(), error) {
 
 // BrowserMaxBitrate is the REMB that limits nothing.
 const BrowserMaxBitrate = browserMaxBitrate
+
+const RembRepeatInterval = rembRepeatInterval
+
+const MaxCaptionCiphertext = maxCaptionCiphertext

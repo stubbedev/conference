@@ -1,5 +1,6 @@
 import { CanvasCompositor } from '@/lib/blur-2d'
 import { GlCompositor, gpuCompositing, type BlurCanvas, type Compositor } from '@/lib/blur-gl'
+import { loadChunk } from '@/lib/chunks'
 import { ElementSource, endGenerator, FrameSource, frameApis, type FrameApis, type FrameWriter, type VideoSource } from '@/lib/frames'
 import { modelFor, segmentCadence, stabiliseMask, type SegmentShape } from '@/lib/mask'
 import type { Mask, Segmenter } from '@/lib/vision'
@@ -224,7 +225,7 @@ class GlBlur implements BlurPipeline {
 let loader: typeof import('@/lib/vision').loadSegmenter | null = null
 
 async function loadSegmenterFor(shape: SegmentShape): Promise<Segmenter> {
-  loader ??= (await import('@/lib/vision')).loadSegmenter
+  loader ??= (await loadChunk('the background-blur code', () => import('@/lib/vision'))).loadSegmenter
   return loader(shape)
 }
 

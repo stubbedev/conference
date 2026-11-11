@@ -5,21 +5,9 @@
 // assertions that a call really carries media.
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:net'
 import { join } from 'node:path'
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-export function freePort() {
-  return new Promise((resolvePort, reject) => {
-    const srv = createServer()
-    srv.on('error', reject)
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address()
-      srv.close(() => resolvePort(port))
-    })
-  })
-}
 
 export function findChrome() {
   for (const name of ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser']) {

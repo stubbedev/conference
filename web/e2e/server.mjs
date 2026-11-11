@@ -1,11 +1,8 @@
 // The server under test: built from this checkout, started on free ports
 // with a scratch database, and stopped by the caller.
 import { spawn, spawnSync } from 'node:child_process'
-import { createSocket } from 'node:dgram'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-
-import { freePort, sleep } from './browser.mjs'
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -25,17 +22,6 @@ export function parseArgs(argv) {
   return out
 }
 
-function freeUdpPort() {
-  return new Promise((resolvePort, reject) => {
-    const sock = createSocket('udp4')
-    sock.on('error', reject)
-    sock.bind(0, () => {
-      const { port } = sock.address()
-      sock.close(() => resolvePort(port))
-    })
-  })
-}
-
 // The race detector stops the server at the first data race a test
 // provokes, at the price of a much slower forwarding loop; a test that
 // measures media rates builds without it.
@@ -50,37 +36,63 @@ export function buildServer(dir, { race }) {
   return bin
 }
 
-export async function serverEnv(dir, port) {
+export const NO_TRANSLATION = { SPEECH_ENGINES: 'real', TRANSLATE_MODEL: '' }
+
+export function serverEnv(dir, settings = NO_TRANSLATION) {
   return {
     ...process.env,
-    PORT: String(port),
-    ICE_UDP_PORT: String(await freeUdpPort()),
-    TURN_PORT: String(await freePort()),
-    DB_PATH: join(dir, 'smoke.db'),
-    SPEECH_ENGINES: 'real',
-    TRANSLATE_MODEL: '',
+    PORT: '0',
+    ICE_UDP_PORT: '0',
+    TURN_PORT: '0',
+    DB_PATH: join(dir, 'server.db'),
     GORACE: 'halt_on_error=1',
+    ...settings,
   }
 }
 
-export async function startServer(bin, env) {
-  const port = env.PORT
-  const proc = spawn(bin, [], {
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+const READY_LINE = /^ready (.*)$/m
+const READY_TIMEOUT_MS = 30_000
+
+export function startServer(bin, env) {
+  const proc = spawn(bin, [], { env, stdio: ['ignore', 'pipe', 'pipe'] })
   let log = ''
-  proc.stdout.on('data', (d) => (log += d))
-  proc.stderr.on('data', (d) => (log += d))
-  for (let i = 0; i < 50; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/config`)
-      if (res.ok) return { proc, log: () => log }
-    } catch {
-      // not up yet
+  let stdout = ''
+  proc.stdout.setEncoding('utf8')
+  proc.stderr.setEncoding('utf8')
+  return new Promise((resolveStart, reject) => {
+    let settled = false
+    const settle = () => {
+      if (settled) return false
+      settled = true
+      clearTimeout(timer)
+      return true
     }
-    await sleep(200)
-  }
-  proc.kill('SIGKILL')
-  throw new Error(`server did not start:\n${log}`)
+    const fail = (reason) => {
+      if (!settle()) return
+      proc.kill('SIGKILL')
+      reject(new Error(`server ${bin} ${reason}:\n${log}`))
+    }
+    const announced = (line) => {
+      let ready
+      try {
+        ready = JSON.parse(line)
+      } catch (err) {
+        return fail(`printed an unreadable ready line ${JSON.stringify(line)}: ${err.message}`)
+      }
+      const port = Number(new URL(`http://${ready.http}`).port)
+      if (!port) return fail(`announced no HTTP port in ${JSON.stringify(line)}`)
+      if (settle()) resolveStart({ proc, log: () => log, ready, port, base: `http://127.0.0.1:${port}` })
+    }
+    const timer = setTimeout(() => fail(`printed no ready line within ${READY_TIMEOUT_MS / 1000} s`), READY_TIMEOUT_MS)
+    proc.stderr.on('data', (d) => (log += d))
+    proc.stdout.on('data', (d) => {
+      log += d
+      if (settled) return
+      stdout += d
+      const match = READY_LINE.exec(stdout)
+      if (match && stdout.includes('\n', match.index)) announced(match[1])
+    })
+    proc.once('error', (err) => fail(`could not start: ${err.message}`))
+    proc.once('exit', (code, signal) => fail(`exited (code ${code}, signal ${signal}) before it was ready`))
+  })
 }

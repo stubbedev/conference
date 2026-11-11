@@ -312,12 +312,10 @@ func grownTo(bps uint64) bitrateLimit {
 // rembFor is the REMB a publisher connection gets this period, if any.
 //
 // On a connection without transport-wide feedback the server's REMB is
-// the browser's only receiver estimate. libwebrtc caps its target at the
-// REMB and, for the first two seconds, starts its estimate from it; with
-// no REMB at all it starts at 300 kbps and climbs 8% a second, so a
-// share would take most of a minute to reach the rate a scroll needs.
-// That connection therefore always gets one, at the browser's maximum
-// when nothing limits it.
+// the browser's only feedback, and libwebrtc's estimate is that REMB, up
+// as well as down (see Upstream.feedback); with no REMB at all it stays
+// at 300 kbps. That connection therefore always gets one, at the
+// browser's maximum when nothing limits it.
 //
 // With transport-wide feedback the browser's delay-based estimate
 // measures the uplink itself, and a REMB is only sent to carry a limit,

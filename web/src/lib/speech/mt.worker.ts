@@ -3,9 +3,9 @@ import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers, loadingModel } from './hf'
 import { attempting, expectLoading, gpuCapabilities, reportLoading, reportRefused, reportWarning } from './loading'
-import { exportKey, hostedIn, loadsUpFront, pairFor, type Export, type MtChoice, type MtKind, type Sizes } from './models'
+import { exportKey, loadsUpFront, mtRoute, mtRungs, sharedRun, type Export, type MtChoice, type MtKind, type MtRoute, type Sizes } from './models'
 import { errorMessage } from '../errors'
-import { firstThatRuns, rungsFor, type Capabilities, type Rung } from './runtime'
+import { firstThatRuns, type Capabilities, type Rung } from './runtime'
 import { serve } from './serve'
 import type { TranslationLevel } from '../translate/types'
 import { parseRuntime } from './wasm'
@@ -43,6 +43,12 @@ interface Generator<Message> {
 
 type Model = { kind: 'seq2seq'; run: Seq2Seq } | { kind: 'llm'; run: Generator<ChatMessage> } | { kind: 'translator'; run: Generator<TranslationRequest> }
 
+interface Step {
+  model: Model
+  source: string
+  target: string
+}
+
 let choice: MtChoice | null = null
 let capabilities: Capabilities = { gpu: false, halves: false }
 let sizes: Sizes = {}
@@ -68,7 +74,7 @@ function modelFor(wanted: Export, kind: MtKind): Promise<Model> {
 }
 
 async function load(wanted: Export, kind: MtKind): Promise<Model> {
-  const rungs = rungsFor(wanted.dtype, capabilities, hostedIn(sizes, wanted.model), kind === 'seq2seq')
+  const rungs = mtRungs(wanted, kind, capabilities, sizes)
   try {
     return await firstThatRuns(
       rungs,
@@ -81,7 +87,7 @@ async function load(wanted: Export, kind: MtKind): Promise<Model> {
 }
 
 async function start(name: string, kind: MtKind, rung: Rung): Promise<Model> {
-  expectLoading(exportKey({ model: name, dtype: rung.dtype }))
+  expectLoading(name, exportKey({ model: name, dtype: rung.dtype }))
   const options = { device: rung.device, dtype: rung.dtype as DataType, progress_callback: reportLoading }
   const model: Model =
     kind === 'seq2seq'
@@ -120,9 +126,39 @@ async function sharedModel(): Promise<Model> {
   }
 }
 
-function modelForPair(source: string, target: string): Promise<Model> {
-  const pair = pairFor(chosen(), source, target)
-  return pair ? modelFor(pair, 'seq2seq') : sharedModel()
+async function pivotSteps(route: Extract<MtRoute, { kind: 'pivot' }>, source: string, target: string): Promise<Step[]> {
+  try {
+    const into = await modelFor(route.into, 'seq2seq')
+    const out = await modelFor(route.out, 'seq2seq')
+    return [
+      { model: into, source, target: route.via },
+      { model: out, source: route.via, target },
+    ]
+  } catch (err) {
+    throw new Error(`${source} to ${target} is translated through ${route.via}, and ${errorMessage(err)}`, { cause: err })
+  }
+}
+
+async function stepsFor(source: string, target: string): Promise<Step[]> {
+  const mt = chosen()
+  const route = mtRoute(mt.pairs ?? {}, sharedRun(mt, capabilities, sizes, (primary ?? fallback)?.kind ?? null), source, target)
+  switch (route.kind) {
+    case 'pair':
+      return [{ model: await modelFor(route.pair, 'seq2seq'), source, target }]
+    case 'pivot':
+      return pivotSteps(route, source, target)
+    case 'shared':
+      return [{ model: await sharedModel(), source, target }]
+    case 'settle-shared':
+      await sharedModel()
+      return stepsFor(source, target)
+  }
+}
+
+async function translateAlong(steps: readonly Step[], text: string, system: string): Promise<string> {
+  let translated = text
+  for (const step of steps) translated = await translateWith(step.model, translated, step.source, step.target, system)
+  return translated
 }
 
 function answerOf(output: { generated_text: { role: string; content: unknown }[] } | undefined, target: string): string {
@@ -173,15 +209,13 @@ serve(async (request) => {
     }
 
     case 'warm-up': {
-      await modelForPair(String(request.source), String(request.target))
+      await stepsFor(String(request.source), String(request.target))
       return
     }
 
     case 'translate': {
-      const source = String(request.source)
-      const target = String(request.target)
-      const model = await modelForPair(source, target)
-      return [{ text: await translateWith(model, String(request.text), source, target, String(request.system ?? '')) }]
+      const steps = await stepsFor(String(request.source), String(request.target))
+      return [{ text: await translateAlong(steps, String(request.text), String(request.system ?? '')) }]
     }
 
     default:

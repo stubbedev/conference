@@ -1,8 +1,7 @@
-import { CircleAlert, Loader2 } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 
 import { HudBackdrop } from '@/components/HudBackdrop'
 import { JoinGate } from '@/components/JoinGate'
-import { Button } from '@/components/ui/button'
 
 export function CheckingScreen() {
   return (
@@ -27,26 +26,6 @@ export function GateScreen({ busy, roomName, error, onSubmit }: GateScreenProps)
     <div className="relative grid h-dvh place-items-center bg-muted/40">
       <HudBackdrop />
       <JoinGate open busy={busy} roomName={roomName} error={error} onSubmit={onSubmit} />
-    </div>
-  )
-}
-
-interface ErrorScreenProps {
-  message: string
-  onBack: () => void
-}
-
-export function ErrorScreen({ message, onBack }: ErrorScreenProps) {
-  return (
-    <div className="grid h-dvh place-items-center">
-      <div className="grid gap-3 text-center">
-        <CircleAlert className="mx-auto size-8 text-muted-foreground" />
-        <p className="text-lg font-medium">Could not open this room</p>
-        <p className="text-sm text-muted-foreground">{message}</p>
-        <Button variant="secondary" onClick={onBack}>
-          Back to start
-        </Button>
-      </div>
     </div>
   )
 }

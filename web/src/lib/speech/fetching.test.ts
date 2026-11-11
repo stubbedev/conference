@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { errorVerdict, FETCH_ATTEMPTS, headFirst, headFirstFetch, resilientFetch, retryDelay, statusVerdict, type FetchDeps, type Retrying } from './fetching.ts'
+import { backoffDelay } from '../backoff.ts'
+import { errorVerdict, FETCH_BACKOFF, headFirst, headFirstFetch, resilientFetch, statusVerdict, type FetchDeps, type Retrying } from './fetching.ts'
+
+const FETCH_ATTEMPTS = FETCH_BACKOFF.attempts
 
 const URL_ = '/speech/model.onnx'
 const BYTES = Uint8Array.from({ length: 10 }, (_, i) => i)
@@ -68,7 +71,7 @@ test('network failures and server errors are transient, everything the server re
 
 test('the delay doubles from a second and stops after the last attempt', () => {
   assert.deepEqual(
-    Array.from({ length: FETCH_ATTEMPTS }, (_, i) => retryDelay(i + 1)),
+    Array.from({ length: FETCH_ATTEMPTS }, (_, i) => backoffDelay(FETCH_BACKOFF, i + 1)),
     [1000, 2000, 4000, 8000, null],
   )
 })

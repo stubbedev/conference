@@ -266,6 +266,29 @@ func TestShareConnectionLeavesOutTransportWideFeedback(t *testing.T) {
 	}
 }
 
+const receiverReportInterval = time.Second
+
+func TestShareConnectionGetsNoReceiverReports(t *testing.T) {
+	t.Parallel()
+
+	call := newShareCall(t)
+
+	cameraReports := watchRTCP[*rtcp.ReceiverReport](call.sent[cameraID].sender)
+	screenReports := watchRTCP[*rtcp.ReceiverReport](call.sent[screenID].sender)
+
+	select {
+	case <-cameraReports:
+	case <-time.After(testTimeout):
+		t.Fatal("the camera's connection never received a receiver report")
+	}
+
+	select {
+	case <-screenReports:
+		t.Fatal("the share's connection received a receiver report, which ends the start phase in which libwebrtc's estimate is the REMB")
+	case <-time.After(2 * receiverReportInterval):
+	}
+}
+
 // TestShareConnectionKeepsItsOwnRemb checks that each connection gets
 // its own REMB: a viewer whose downlink caps the camera does not drag
 // the share down with it, and the share, losing nothing, is limited by
@@ -294,10 +317,10 @@ func TestShareConnectionKeepsItsOwnRemb(t *testing.T) {
 }
 
 // firstRembDelay bounds how long after its first packet a share may wait
-// for its first REMB: well inside the two seconds libwebrtc starts its
-// estimate from one, and well short of the REMB ticker's period, so a
-// REMB that waits for the next tick fails.
+// for its first REMB: well short of the REMB ticker's measurement period.
 const firstRembDelay = 250 * time.Millisecond
+
+const cadenceWindow = 2 * time.Second
 
 // waitPublisherConnected waits until the publisher's connection can send
 // media: its DTLS handshake, which the server finishes first, is done.
@@ -317,7 +340,8 @@ func waitPublisherConnected(t *testing.T, peerConn *webrtc.PeerConnection) {
 
 // TestShareGetsItsFirstRembWithItsFirstPacket starts a share on a still
 // screen, one frame and nothing after, and checks that the REMB lifting
-// its estimate arrives right after that frame instead of at the next tick.
+// its estimate arrives right after that frame instead of a measurement
+// period later.
 func TestShareGetsItsFirstRembWithItsFirstPacket(t *testing.T) {
 	t.Parallel()
 
@@ -346,6 +370,48 @@ func TestShareGetsItsFirstRembWithItsFirstPacket(t *testing.T) {
 
 	if waited := time.Since(start); waited > firstRembDelay {
 		t.Fatalf("the share's first REMB came %v after its first frame, want within %v", waited, firstRembDelay)
+	}
+}
+
+func TestShareRembRepeatsBetweenMeasurements(t *testing.T) {
+	t.Parallel()
+
+	call := newShareCall(t)
+	rembs := watchRembOnPublisher(call.sent[screenID].sender)
+
+	waitRemb(t, rembs, "a first REMB on the share", func(float64) bool { return true })
+
+	var gaps []time.Duration
+
+	last := time.Now()
+	deadline := time.After(cadenceWindow)
+
+	for {
+		select {
+		case _, open := <-rembs:
+			if !open {
+				t.Fatal("the publisher's RTCP reader closed while counting the share's REMBs")
+			}
+
+			now := time.Now()
+			gaps = append(gaps, now.Sub(last))
+			last = now
+
+			continue
+		case <-deadline:
+		}
+
+		break
+	}
+
+	want := int(cadenceWindow/sfu.RembRepeatInterval) * 3 / 4
+	if len(gaps) < want {
+		t.Fatalf("the share got %d REMBs in %v, want at least %d: a route change would leave its estimate at 300 kbps until the next",
+			len(gaps), cadenceWindow, want)
+	}
+
+	if longest := slices.Max(gaps); longest > 3*sfu.RembRepeatInterval {
+		t.Fatalf("the share went %v without a REMB, want at most %v", longest, 3*sfu.RembRepeatInterval)
 	}
 }
 
