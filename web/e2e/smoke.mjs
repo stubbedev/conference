@@ -38,7 +38,7 @@ import {
   waitFor,
 } from './browser.mjs'
 import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
-import { SCREEN_LAYER_RIDS } from '../src/lib/encodings.ts'
+import { LAYER_RIDS, SCREEN_LAYER_RIDS } from '../src/lib/encodings.ts'
 import {
   clickButtonByTitle,
   fakeDisplay,
@@ -108,6 +108,18 @@ function medianFrameGap(times, from, to) {
   return gaps[Math.floor(gaps.length / 2)]
 }
 
+const formatGap = (gap) => (gap === Infinity ? 'unbounded, fewer than two frames' : `${Math.round(gap * 1000)} ms`)
+
+function checkKeepsPaceHidden(failures, label, subject, visibleGap, hiddenGap) {
+  console.log(`${label}: median frame gap ${formatGap(visibleGap)} visible, ${formatGap(hiddenGap)} hidden`)
+  check(
+    failures,
+    label,
+    hiddenGap < THROTTLED_TIMER_S / 2,
+    `${subject}'s median frame gap was ${formatGap(hiddenGap)} while its tab was hidden, against ${formatGap(visibleGap)} visible: its frame clock is throttled or stalled with the tab`,
+  )
+}
+
 // A hidden tab: another tab in front of it, which is what throttles a page's
 // timers and stops its animation frames.
 async function hideTab(browser) {
@@ -120,7 +132,6 @@ async function hideTab(browser) {
 
 const RECORDING_VISIBLE_S = 5
 const RECORDING_HIDDEN_S = 8
-const HIDDEN_RECORDING_MIN_FPS = 10
 const THROTTLED_TIMER_S = 1
 
 const recordingBadgePresent = `(() => { const h = document.querySelector('header'); return Boolean(h && [...h.querySelectorAll('span')].some(s => s.textContent.trim() === 'Recording')); })()`
@@ -258,26 +269,24 @@ async function checkJoinWithoutMedia(failures, dir, base) {
   }
 }
 
-const countPreviewFrames = `(() => {
+const recordPreviewFrames = `(() => {
   const track = document.querySelector('video').srcObject.getVideoTracks()[0].clone()
   const reader = new MediaStreamTrackProcessor({ track }).readable.getReader()
-  window.__previewFrames = 0
+  window.__previewFrameTimes = []
   void (async () => {
     for (;;) {
       const { value, done } = await reader.read()
       if (done) return
       value.close()
-      window.__previewFrames++
+      window.__previewFrameTimes.push(performance.now() / 1000)
     }
   })()
   return true
 })()`
 
-async function previewFps(browser, seconds) {
-  const before = await evalJs(browser, 'window.__previewFrames')
-  await sleep(seconds * 1000)
-  return ((await evalJs(browser, 'window.__previewFrames')) - before) / seconds
-}
+const pageSeconds = 'performance.now() / 1000'
+const PREVIEW_VISIBLE_S = 3
+const PREVIEW_HIDDEN_S = 4
 
 async function checkBackgroundBlur(failures, dir, base) {
   const camera = join(dir, 'blur-camera.y4m')
@@ -306,18 +315,16 @@ async function checkBackgroundBlur(failures, dir, base) {
     const composited = await evalJs(browser, previewCameraLabel)
     check(failures, 'blur', composited !== cameraLabel, `the preview still carries the raw camera (${composited})`)
 
-    await evalJs(browser, countPreviewFrames)
-    const visibleFps = await previewFps(browser, 3)
+    await evalJs(browser, recordPreviewFrames)
+    const visibleFrom = await evalJs(browser, pageSeconds)
+    await sleep(PREVIEW_VISIBLE_S * 1000)
     const show = await hideTab(browser)
-    const hiddenFps = await previewFps(browser, 4)
+    const hiddenFrom = await evalJs(browser, pageSeconds)
+    await sleep(PREVIEW_HIDDEN_S * 1000)
+    const hiddenTo = await evalJs(browser, pageSeconds)
     await show()
-    console.log(`blur: ${visibleFps.toFixed(1)} fps visible, ${hiddenFps.toFixed(1)} fps hidden`)
-    check(
-      failures,
-      'blur',
-      hiddenFps >= HIDDEN_RECORDING_MIN_FPS && hiddenFps >= visibleFps / 2,
-      `the blurred camera stalls in a hidden tab (${hiddenFps.toFixed(1)} fps hidden against ${visibleFps.toFixed(1)} visible)`,
-    )
+    const previewTimes = await evalJs(browser, 'window.__previewFrameTimes')
+    checkKeepsPaceHidden(failures, 'blur', 'the blurred camera', medianFrameGap(previewTimes, visibleFrom, hiddenFrom), medianFrameGap(previewTimes, hiddenFrom, hiddenTo))
 
     const errors = await evalJs(browser, 'window.__errors')
     check(failures, 'blur', errors.length === 0, `blur page errors: ${errors.join(' | ')}`)
@@ -406,6 +413,66 @@ async function checkRemoteTilePlays(failures, label, browser, phase) {
   return after
 }
 
+const ENCODING_WINDOW_MS = 3000
+const ENCODING_SETTLE_MS = 20000
+
+const videoReceived = (findVideo) => `
+(async () => {
+  const video = (${findVideo})()
+  const trackId = video?.srcObject?.getVideoTracks()[0]?.id
+  for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
+    for (const r of (await pc.getStats()).values()) {
+      if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
+        return { width: video.videoWidth, rendered: video.getVideoPlaybackQuality().totalVideoFrames, received: r.framesReceived || 0, bytes: r.bytesReceived || 0, frameWidth: r.frameWidth || 0, fps: r.framesPerSecond || 0, lost: r.packetsLost || 0, plis: r.pliCount || 0, freezes: r.freezeCount || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0 }
+      }
+    }
+  }
+  return null
+})()
+`
+
+const countMismatch = (received, sent) => (received > 0 && sent > 0 ? Math.abs(Math.log(received / sent)) : received === sent ? 0 : Infinity)
+
+function closestEncoding(received, encodings) {
+  const distances = Object.entries(encodings).map(([rid, sent]) => [rid, countMismatch(received.frames, sent.frames) + countMismatch(received.bytes, sent.bytes) + countMismatch(received.width, sent.width)])
+  const [rid, distance] = distances.reduce((best, next) => (next[1] < best[1] ? next : best), [null, Infinity])
+  return distance === Infinity ? null : rid
+}
+
+async function receivedEncoding({ publisher, sent, viewer, received }) {
+  const sample = () => Promise.all([evalJs(viewer, received), evalJs(publisher, sent)])
+  const [viewedBefore, sentBefore] = await sample()
+  await sleep(ENCODING_WINDOW_MS)
+  const [viewedAfter, sentAfter] = await sample()
+  const encodings = Object.fromEntries(
+    Object.entries(sentAfter ?? {}).map(([rid, layer]) => {
+      const before = sentBefore?.[rid]
+      return [rid, { frames: layer.encoded - (before?.encoded ?? 0), bytes: layer.bytes - (before?.bytes ?? 0), width: layer.width, limit: layer.limit }]
+    }),
+  )
+  if (!viewedBefore || !viewedAfter) return { width: 0, fps: 0, received: null, encoding: null, encodings, stats: viewedAfter }
+  const counts = { frames: viewedAfter.received - viewedBefore.received, bytes: viewedAfter.bytes - viewedBefore.bytes, width: viewedAfter.frameWidth }
+  return { width: viewedAfter.width, fps: (viewedAfter.rendered - viewedBefore.rendered) / (ENCODING_WINDOW_MS / 1000), received: counts, encoding: closestEncoding(counts, encodings), encodings, stats: viewedAfter }
+}
+
+const describeCounts = ({ frames, bytes, width }) => `${frames} frames, ${bytes} bytes, ${width}px`
+
+async function settledEncoding(label, stream, rids) {
+  const deadline = Date.now() + ENCODING_SETTLE_MS
+  for (;;) {
+    const measured = await receivedEncoding(stream)
+    const encoded = Object.entries(measured.encodings).map(([name, encoding]) => `${name} ${describeCounts(encoding)} (${encoding.limit})`)
+    console.log(`  ${label} ${measured.width}px at ${measured.fps.toFixed(1)} fps, received ${measured.received ? describeCounts(measured.received) : 'nothing'} in ${ENCODING_WINDOW_MS / 1000} s: the ${measured.encoding ?? 'unidentified'} encoding; ${JSON.stringify(measured.stats)}; publisher sent ${encoded.join(', ')}`)
+    if ((rids.includes(measured.encoding) && measured.fps > 0) || Date.now() > deadline) return measured
+  }
+}
+
+function checkEncoding(failures, label, where, measured, rids) {
+  console.log(`${label} ${where}: ${measured.width}px at ${measured.fps.toFixed(1)} fps on the ${measured.encoding ?? 'unidentified'} encoding`)
+  check(failures, label, measured.fps > 0, `${where}: the video does not play`)
+  check(failures, label, rids.includes(measured.encoding), `${where}: the viewer plays the ${measured.encoding ?? 'unidentified'} encoding (received ${JSON.stringify(measured.received)} against ${JSON.stringify(measured.encodings)}), not ${rids.join(' or ')}`)
+}
+
 const sentLayers = `
 (async () => {
   const layers = {};
@@ -416,7 +483,7 @@ const sentLayers = `
         if (r.type === 'outbound-rtp' && r.rid) stats[r.rid] = r;
       }
       for (const { rid, active } of sender.getParameters().encodings.filter((encoding) => encoding.rid)) {
-        layers[rid] = { active, bytes: stats[rid]?.bytesSent || 0, width: stats[rid]?.frameWidth || 0 };
+        layers[rid] = { active, bytes: stats[rid]?.bytesSent || 0, encoded: stats[rid]?.framesEncoded || 0, width: stats[rid]?.frameWidth || 0, limit: stats[rid]?.qualityLimitationReason };
       }
     }
   }
@@ -424,12 +491,10 @@ const sentLayers = `
 })()
 `
 
-const remoteVideoWidth = `
-(() => {
-  const remote = document.querySelector('audio')?.closest('.group');
-  return remote?.querySelector('video')?.videoWidth ?? 0;
-})()
-`
+const remoteCameraReceived = videoReceived("() => document.querySelector('audio')?.closest('.group')?.querySelector('video')")
+
+const [, , TOP_LAYER_RID] = LAYER_RIDS
+const BELOW_TOP_LAYER_RIDS = LAYER_RIDS.filter((rid) => rid !== TOP_LAYER_RID)
 
 function clickLocalPin(label) {
   const local = [...document.querySelectorAll('.group')].find((g) => g.querySelector('video') && !g.querySelector('audio'))
@@ -468,28 +533,15 @@ async function checkSimulcast(failures, publisher, viewer) {
   check(failures, 'simulcast', sent.ok, `publisher is not sending the lowest and the wanted layer: ${JSON.stringify(sent.value)}`)
   await checkLayerPaused(failures, publisher, 'm', 'the middle layer is still encoded although nobody in a grid of two wants it')
 
-  // Sizes are compared with each other, not with pixels: which resolution
-  // the capture and the encoder settle on is the browser's business, that
-  // a filmstrip tile gets a fraction of a pinned one is this app's.
-  const full = await waitFor(viewer, remoteVideoWidth, (width) => width >= 640, 20000)
-  console.log(`simulcast grid of two: remote video ${full.value}px wide`)
-  check(failures, 'simulcast', full.ok, `grid of two: remote video ${full.value}px wide, want the largest layer`)
+  const camera = { publisher, sent: sentLayers, viewer, received: remoteCameraReceived }
+  checkEncoding(failures, 'simulcast', 'grid of two', await settledEncoding('simulcast', camera, [TOP_LAYER_RID]), [TOP_LAYER_RID])
 
   check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Pin to main view'), 'no "Pin to main view" button on the viewer\'s own tile')
-
-  const filmstrip = await waitFor(viewer, remoteVideoWidth, (width) => width > 0 && width * 2 <= full.value, 20000)
-  console.log(`simulcast filmstrip: remote video ${filmstrip.value}px wide against ${full.value}px`)
-  check(failures, 'simulcast', filmstrip.ok, `filmstrip: remote video ${filmstrip.value}px wide, not a layer below ${full.value}px`)
-  await checkLayerPaused(failures, publisher, 'h', 'the top layer is still encoded although the only viewer shows a thumbnail')
+  checkEncoding(failures, 'simulcast', 'filmstrip', await settledEncoding('simulcast', camera, BELOW_TOP_LAYER_RIDS), BELOW_TOP_LAYER_RIDS)
+  await checkLayerPaused(failures, publisher, TOP_LAYER_RID, 'the top layer is still encoded although the only viewer shows a thumbnail')
 
   check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
-
-  // What is being checked is that the layer climbs back up, so the bar is
-  // relative to the filmstrip: a capture that settles on a different size
-  // mid-call (a busy machine will do that) must not read as a failure.
-  const back = await waitFor(viewer, remoteVideoWidth, (width) => width >= filmstrip.value * 2, 20000)
-  console.log(`simulcast grid again: remote video ${back.value}px wide against ${filmstrip.value}px in the filmstrip`)
-  check(failures, 'simulcast', back.ok, `grid again: remote video ${back.value}px wide, not a layer above ${filmstrip.value}px`)
+  checkEncoding(failures, 'simulcast', 'grid again', await settledEncoding('simulcast', camera, [TOP_LAYER_RID]), [TOP_LAYER_RID])
 }
 
 function clickTilePin(suffix, label) {
@@ -500,11 +552,7 @@ function clickTilePin(suffix, label) {
   return true
 }
 
-const SHARE_FPS_WINDOW_MS = 3000
-
 const [SLOW_SHARE_RID, FLUID_SHARE_RID] = SCREEN_LAYER_RIDS
-
-const SHARE_SETTLE_MS = 20000
 
 const TIMELINE_SECONDS = 20
 
@@ -534,64 +582,14 @@ async function shareTimeline(publisher, viewer) {
   return samples
 }
 
-const screenReceived = `
-(async () => {
-  const tile = (${tileByLabel.toString()})('screen')
-  const video = tile?.querySelector('video')
-  const trackId = video?.srcObject?.getVideoTracks()[0]?.id
-  for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
-    for (const r of (await pc.getStats()).values()) {
-      if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
-        return { width: video.videoWidth, rendered: video.getVideoPlaybackQuality().totalVideoFrames, received: r.framesReceived || 0, bytes: r.bytesReceived || 0, fps: r.framesPerSecond || 0, lost: r.packetsLost || 0, plis: r.pliCount || 0, freezes: r.freezeCount || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0 }
-      }
-    }
-  }
-  return null
-})()
-`
+const screenReceived = videoReceived(`() => (${tileByLabel.toString()})('screen')?.querySelector('video')`)
 
-const countMismatch = (received, sent) => (received > 0 && sent > 0 ? Math.abs(Math.log(received / sent)) : received === sent ? 0 : Infinity)
+const shareLayersSent = `(async () => {
+  const sent = await ${screenSent}
+  return sent && Object.fromEntries(Object.entries(sent.layers).map(([rid, layer]) => [rid, { ...layer, encoded: layer.frames }]))
+})()`
 
-function closestEncoding(received, encodings) {
-  const distances = Object.entries(encodings).map(([rid, sent]) => [rid, countMismatch(received.frames, sent.frames) + countMismatch(received.bytes, sent.bytes)])
-  const [rid, distance] = distances.reduce((best, next) => (next[1] < best[1] ? next : best), [null, Infinity])
-  return distance === Infinity ? null : rid
-}
-
-async function receivedShare(publisher, viewer) {
-  const sample = () => Promise.all([evalJs(viewer, screenReceived), evalJs(publisher, shareSendCounters)])
-  const [viewedBefore, sentBefore] = await sample()
-  await sleep(SHARE_FPS_WINDOW_MS)
-  const [viewedAfter, sentAfter] = await sample()
-  const seconds = SHARE_FPS_WINDOW_MS / 1000
-  const encodings = Object.fromEntries(
-    Object.entries(sentAfter?.layers ?? {}).map(([rid, layer]) => {
-      const before = sentBefore?.layers[rid]
-      return [rid, { frames: layer.encoded - (before?.encoded ?? 0), bytes: layer.bytes - (before?.bytes ?? 0), limit: layer.limit }]
-    }),
-  )
-  if (!viewedBefore || !viewedAfter) return { width: 0, fps: 0, received: null, encoding: null, encodings }
-  const received = { frames: viewedAfter.received - viewedBefore.received, bytes: viewedAfter.bytes - viewedBefore.bytes }
-  return { width: viewedAfter.width, fps: (viewedAfter.rendered - viewedBefore.rendered) / seconds, received, encoding: closestEncoding(received, encodings), encodings, stats: viewedAfter }
-}
-
-const describeCounts = ({ frames, bytes }) => `${frames} frames, ${bytes} bytes`
-
-async function settledShare(publisher, viewer, rid) {
-  const deadline = Date.now() + SHARE_SETTLE_MS
-  for (;;) {
-    const share = await receivedShare(publisher, viewer)
-    const encoded = Object.entries(share.encodings).map(([name, encoding]) => `${name} ${describeCounts(encoding)} (${encoding.limit})`)
-    console.log(`  share ${share.width}px at ${share.fps.toFixed(1)} fps, received ${share.received ? describeCounts(share.received) : 'nothing'} in ${SHARE_FPS_WINDOW_MS / 1000} s: the ${share.encoding ?? 'unidentified'} encoding; ${JSON.stringify(share.stats)}; publisher sent ${encoded.join(', ')}`)
-    if ((share.encoding === rid && share.fps > 0) || Date.now() > deadline) return share
-  }
-}
-
-function checkShareEncoding(failures, where, share, rid) {
-  console.log(`screen share ${where}: ${share.width}px at ${share.fps.toFixed(1)} fps on the ${share.encoding ?? 'unidentified'} encoding`)
-  check(failures, 'screen share', share.fps > 0, `the share ${where} does not play`)
-  check(failures, 'screen share', share.encoding === rid, `the share ${where} plays the ${share.encoding ?? 'unidentified'} encoding (received ${JSON.stringify(share.received)} against ${JSON.stringify(share.encodings)}), not ${rid}`)
-}
+const shareStream = (publisher, viewer) => ({ publisher, sent: shareLayersSent, viewer, received: screenReceived })
 
 function checkFluidRate(failures, where, share) {
   const limit = share.encodings[FLUID_SHARE_RID]?.limit
@@ -636,19 +634,20 @@ async function checkScreenShare(failures, publisher, viewer) {
   check(failures, 'screen share', pinned.ok, `the pinned share arrives ${pinned.value?.width}px wide, not ${SHARE_WIDTH}px`)
   console.log('screen share timeline while pinned:')
   await shareTimeline(publisher, viewer)
-  const fluid = await settledShare(publisher, viewer, FLUID_SHARE_RID)
-  checkShareEncoding(failures, 'pinned', fluid, FLUID_SHARE_RID)
+  const share = shareStream(publisher, viewer)
+  const fluid = await settledEncoding('screen share', share, [FLUID_SHARE_RID])
+  checkEncoding(failures, 'screen share', 'pinned', fluid, [FLUID_SHARE_RID])
   checkFluidRate(failures, 'pinned', fluid)
 
   check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Pin to main view'), 'no "Pin to main view" button on the viewer\'s own tile')
-  const slow = await settledShare(publisher, viewer, SLOW_SHARE_RID)
-  checkShareEncoding(failures, 'in the strip', slow, SLOW_SHARE_RID)
+  const slow = await settledEncoding('screen share', share, [SLOW_SHARE_RID])
+  checkEncoding(failures, 'screen share', 'in the strip', slow, [SLOW_SHARE_RID])
   check(failures, 'screen share', slow.width === SHARE_WIDTH, `the share in the strip arrives ${slow.width}px wide, not at full size`)
 
   check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
   check(failures, 'screen share', await callJs(viewer, clickTilePin, 'screen', 'Pin to main view'), 'no "Pin to main view" button on the share')
-  const back = await settledShare(publisher, viewer, FLUID_SHARE_RID)
-  checkShareEncoding(failures, 'pinned again', back, FLUID_SHARE_RID)
+  const back = await settledEncoding('screen share', share, [FLUID_SHARE_RID])
+  checkEncoding(failures, 'screen share', 'pinned again', back, [FLUID_SHARE_RID])
   checkFluidRate(failures, 'pinned again', back)
 
   await evalJs(publisher, shareMode('still'))
@@ -1009,15 +1008,9 @@ async function main() {
         const times = download ? frameTimes(join(dlDir, download.name)) : []
         const visibleGap = medianFrameGap(times, 1, RECORDING_VISIBLE_S)
         const hiddenGap = medianFrameGap(times, RECORDING_VISIBLE_S + 1, RECORDING_VISIBLE_S + RECORDING_HIDDEN_S - 1)
-        const gapMs = (gap) => (gap === Infinity ? 'unbounded, fewer than two frames' : `${Math.round(gap * 1000)} ms`)
-        check(
-          failures,
-          'recording',
-          hiddenGap < THROTTLED_TIMER_S / 2,
-          `the recording's median frame gap was ${gapMs(hiddenGap)} while its tab was hidden, against ${gapMs(visibleGap)} visible: its frame clock is throttled or stalled with the tab`,
-        )
+        checkKeepsPaceHidden(failures, 'recording', 'the recording', visibleGap, hiddenGap)
 
-        console.log(`recording: late-joiner replay, recorder-leave clearing, median frame gap ${gapMs(visibleGap)} visible and ${gapMs(hiddenGap)} hidden, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
+        console.log(`recording: late-joiner replay, recorder-leave clearing, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
 
         // Round three: a recording the browser ends on its own (the
         // encoder failed, the way a long recording can die) must still
