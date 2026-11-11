@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { asrExport, asrRungs, bytesFor, exportKey, hostedIn, loadsUpFront, pairFor, renderPrompt, type AsrChoice, type SpeechModels } from './models.ts'
+import { asrExport, asrRungs, bytesFor, exportKey, hostedIn, loadsUpFront, mtRoute, renderPrompt, sharedRun, type AsrChoice, type Export, type MtChoice, type SharedRun, type SpeechModels } from './models.ts'
 
 const models: SpeechModels = {
   base: '/speech/',
@@ -36,9 +36,68 @@ test('a language loads its own model where it has one, at either tier', () => {
   assert.equal(asrExport({ model: 'a/b', dtype: 'q4' }, 'fallback', 'de'), null)
 })
 
-test('a pair is looked up source first', () => {
-  assert.equal(pairFor(models.mt, 'en', 'de')?.model, 'Xenova/opus-mt-en-de')
-  assert.equal(pairFor(models.mt, 'de', 'en'), null)
+const opus = (pair: string): Export => ({ model: `Xenova/opus-mt-${pair}`, dtype: 'q4' })
+const pairs = Object.fromEntries(['en-de', 'de-en', 'en-da', 'da-en', 'da-de', 'fr-de'].map((pair) => [pair, opus(pair)]))
+const SHARED_RUNS: readonly SharedRun[] = ['seq2seq', 'generative', 'untried', 'none']
+
+const gemma: MtChoice = { kind: 'translator', model: 'google/translategemma', dtype: 'q4', fallback: { model: 'Xenova/m2m100_418M', dtype: 'q4' }, pairs }
+const gemmaSizes = { 'google/translategemma:q4': 1, 'Xenova/m2m100_418M:q4': 1, 'Xenova/m2m100_418M:q8': 1 }
+const GPU = { gpu: true, halves: false }
+const CPU = { gpu: false, halves: false }
+
+test('a translator only the GPU runs leaves m2m100 to run on a browser without one, decided without loading either', () => {
+  assert.equal(sharedRun(gemma, CPU, gemmaSizes, null), 'seq2seq')
+  assert.equal(sharedRun({ ...gemma, fallback: undefined }, CPU, gemmaSizes, null), 'none')
+})
+
+test('a translator a GPU may run is untried until it has loaded or fallen back', () => {
+  assert.equal(sharedRun(gemma, GPU, gemmaSizes, null), 'untried')
+  assert.equal(sharedRun(gemma, GPU, gemmaSizes, 'translator'), 'generative')
+  assert.equal(sharedRun(gemma, GPU, gemmaSizes, 'seq2seq'), 'seq2seq')
+})
+
+test('an encoder-decoder shared model is what runs, and a language model that loaded is generative', () => {
+  assert.equal(sharedRun({ ...gemma, kind: 'seq2seq', model: 'Xenova/m2m100_418M' }, GPU, gemmaSizes, null), 'seq2seq')
+  assert.equal(sharedRun({ ...gemma, kind: 'llm' }, GPU, gemmaSizes, 'llm'), 'generative')
+})
+
+test('a pair with a model of its own translates with it, looked up source first, whatever the shared model', () => {
+  for (const shared of SHARED_RUNS) {
+    assert.deepEqual(mtRoute(pairs, shared, 'en', 'de'), { kind: 'pair', pair: opus('en-de') })
+    assert.deepEqual(mtRoute(pairs, shared, 'da', 'de'), { kind: 'pair', pair: opus('da-de') })
+  }
+})
+
+test('instead of m2m100, a pair without a model of its own goes through English when both legs have one', () => {
+  assert.deepEqual(mtRoute(pairs, 'seq2seq', 'de', 'da'), { kind: 'pivot', via: 'en', into: opus('de-en'), out: opus('en-da') })
+  assert.deepEqual(mtRoute(pairs, 'none', 'de', 'da'), { kind: 'pivot', via: 'en', into: opus('de-en'), out: opus('en-da') })
+})
+
+test('the default translator manifest goes through English on a browser without a GPU', () => {
+  assert.equal(mtRoute(gemma.pairs ?? {}, sharedRun(gemma, CPU, gemmaSizes, null), 'de', 'da').kind, 'pivot')
+})
+
+test('a translator or language model that runs translates a pair without a model of its own itself', () => {
+  assert.deepEqual(mtRoute(pairs, 'generative', 'de', 'da'), { kind: 'shared' })
+  assert.deepEqual(mtRoute(gemma.pairs ?? {}, sharedRun(gemma, GPU, gemmaSizes, 'translator'), 'de', 'da'), { kind: 'shared' })
+  assert.deepEqual(mtRoute(pairs, sharedRun({ ...gemma, kind: 'llm' }, GPU, gemmaSizes, 'llm'), 'de', 'da'), { kind: 'shared' })
+})
+
+test('a shared model not yet tried is settled before a pair that could go through English is routed', () => {
+  assert.deepEqual(mtRoute(pairs, 'untried', 'de', 'da'), { kind: 'settle-shared' })
+})
+
+test('a pair with a leg missing is left to the shared model, which need not be settled for it', () => {
+  for (const shared of SHARED_RUNS) {
+    assert.deepEqual(mtRoute(pairs, shared, 'fr', 'da'), { kind: 'shared' })
+    assert.deepEqual(mtRoute(pairs, shared, 'de', 'fr'), { kind: 'shared' })
+    assert.deepEqual(mtRoute({}, shared, 'de', 'da'), { kind: 'shared' })
+  }
+})
+
+test('English itself has no route through English', () => {
+  assert.deepEqual(mtRoute(pairs, 'seq2seq', 'en', 'fr'), { kind: 'shared' })
+  assert.deepEqual(mtRoute(pairs, 'seq2seq', 'fr', 'en'), { kind: 'shared' })
 })
 
 test('what a member downloads is their transcription model, the translation model and their voice', () => {

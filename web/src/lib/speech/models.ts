@@ -72,8 +72,49 @@ export function loadsUpFront(mt: MtChoice): boolean {
   return mt.kind === 'llm' || Object.keys(mt.pairs ?? {}).length === 0
 }
 
-export function pairFor(mt: MtChoice, source: string, target: string): Export | null {
-  return mt.pairs?.[`${source}-${target}`] ?? null
+export const PIVOT = 'en'
+
+export type MtRoute =
+  | { kind: 'pair'; pair: Export }
+  | { kind: 'pivot'; via: typeof PIVOT; into: Export; out: Export }
+  | { kind: 'shared' }
+  | { kind: 'settle-shared' }
+
+export type SharedRun = 'seq2seq' | 'generative' | 'untried' | 'none'
+
+export function mtRungs(wanted: Export, kind: MtKind, capabilities: Capabilities, sizes: Sizes): Rung[] {
+  return rungsFor(wanted.dtype, capabilities, hostedIn(sizes, wanted.model), kind === 'seq2seq')
+}
+
+export function sharedRun(mt: MtChoice, capabilities: Capabilities, sizes: Sizes, settled: MtKind | null): SharedRun {
+  if (settled !== null) return settled === 'seq2seq' ? 'seq2seq' : 'generative'
+  if (mt.kind === 'seq2seq') return 'seq2seq'
+  if (mtRungs(mt, mt.kind, capabilities, sizes).length > 0) return 'untried'
+  return mt.fallback ? 'seq2seq' : 'none'
+}
+
+function pairOf(pairs: Readonly<Record<string, Export>>, source: string, target: string): Export | undefined {
+  const key = `${source}-${target}`
+  return Object.hasOwn(pairs, key) ? pairs[key] : undefined
+}
+
+export function mtRoute(pairs: Readonly<Record<string, Export>>, shared: SharedRun, source: string, target: string): MtRoute {
+  const pair = pairOf(pairs, source, target)
+  if (pair) return { kind: 'pair', pair }
+
+  const into = pairOf(pairs, source, PIVOT)
+  const out = pairOf(pairs, PIVOT, target)
+  if (!into || !out) return { kind: 'shared' }
+
+  switch (shared) {
+    case 'generative':
+      return { kind: 'shared' }
+    case 'untried':
+      return { kind: 'settle-shared' }
+    case 'seq2seq':
+    case 'none':
+      return { kind: 'pivot', via: PIVOT, into, out }
+  }
 }
 
 export function exportKey(wanted: Export): string {
