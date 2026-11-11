@@ -630,8 +630,9 @@ export async function checkCall(failures, browsers, labels, { seconds, wantPaths
     const label = labels[i]
     const before = failures.length
     // The line carries the worker's totals; how many transforms it pipes
-    // stands in for the counters of each.
-    const e2ee = a.e2ee && { ...a.e2ee, transforms: a.e2ee.transforms.length }
+    // stands in for the counters of each. The monitor runs this against
+    // the deployed release, which may predate those counters.
+    const e2ee = a.e2ee && { ...a.e2ee, transforms: a.e2ee.transforms ? a.e2ee.transforms.length : 'not reported by this release' }
     console.log(
       `${label}: videos=${a.videos.length} frames=[${a.videos.map((v) => v.frames).join(',')}]→[${b.videos.map((v) => v.frames).join(',')}] ` +
         `audioPkts=${a.audioPackets}→${b.audioPackets} videoDecoded=${a.videoDecoded}→${b.videoDecoded} ` +
