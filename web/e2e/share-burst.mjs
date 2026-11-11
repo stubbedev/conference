@@ -60,8 +60,6 @@ const LIMITED_BY_BANDWIDTH = 'bandwidth'
 // frames a burst was sent with.
 const MIN_PLAYED_SHARE = 0.8
 
-const FREEZE_MAX_FRAME_INTERVALS = 30
-
 // The frames of a burst the presenter sent that must reach a viewer
 // watching the fluid encoding. The two ends are read a moment apart, so a
 // few frames at either edge of a burst are counted at one end only.
@@ -180,15 +178,13 @@ const total = (rows, field) => rows.reduce((sum, row) => sum + row[field], 0)
 function burstOfRows(rows) {
   const started = rows.filter((row) => burstStarted(row.second))
   const delivered = total(rows, 'encoded') > 0 ? total(rows, 'received') / total(rows, 'encoded') : 0
-  const decoded = total(rows, 'decoded')
   return {
     fluid: rows.every((row) => row.fluid),
     sentFps: perSecond(total(rows, 'encoded'), total(rows, 'sendSeconds')),
-    decodedFps: perSecond(decoded, total(rows, 'recvSeconds')),
+    decodedFps: perSecond(total(rows, 'decoded'), total(rows, 'recvSeconds')),
     delivered,
     freezes: total(started, 'freezes'),
     frozenMs: Math.max(0, ...started.map((row) => row.frozenMs)),
-    playingFrameMs: decoded > 0 ? (total(rows, 'recvSeconds') * 1000 - total(rows, 'frozenMs')) / decoded : Infinity,
     causes: heldBackBy(rows, delivered),
   }
 }
@@ -196,7 +192,7 @@ function burstOfRows(rows) {
 function heldBackBy(rows, delivered) {
   const causes = []
   const lost = total(rows, 'lost')
-  const requests = total(rows, 'viewerPlis') + total(rows, 'presenterPlis')
+  const requests = total(rows, 'presenterPlis')
   const estimates = rows.map((row) => row.estimateBps).filter((bps) => bps !== null)
   const limited = rows.filter((row) => row.limit === LIMITED_BY_BANDWIDTH).map((row) => row.second)
   if (lost > 0) causes.push(`${lost} packets lost`)
@@ -208,11 +204,8 @@ function heldBackBy(rows, delivered) {
 }
 
 function freezeFailure(burst) {
-  if (burst.freezes === 0) return null
-  if (burst.causes.length > 0) return `the share froze for ${burst.frozenMs} ms in the middle of a scrolling burst with ${burst.causes.join(', ')}`
-  const limitMs = FREEZE_MAX_FRAME_INTERVALS * burst.playingFrameMs
-  if (burst.frozenMs <= limitMs) return null
-  return `the share froze for ${burst.frozenMs} ms in the middle of a scrolling burst, over ${FREEZE_MAX_FRAME_INTERVALS} times its ${burst.playingFrameMs.toFixed(0)} ms between frames while it played (${limitMs.toFixed(0)} ms)`
+  if (burst.freezes === 0 || burst.causes.length === 0) return null
+  return `the share froze for ${burst.frozenMs} ms in the middle of a scrolling burst with ${burst.causes.join(', ')}`
 }
 
 function summarize({ rows, end }) {
@@ -357,7 +350,7 @@ async function main() {
       console.error('\nserver log tail:\n' + server.log().split('\n').slice(-20).join('\n'))
       process.exitCode = 1
     } else {
-      console.log('\nSHARE BURST OK: the share starts with the estimate a scroll needs and keeps it while the screen sits still, its encoder is never limited by bandwidth, and the bursts a viewer watched on the fluid encoding arrived, played without a freeze that anything held back or that stood far beyond their own frame gaps, and needed no keyframe')
+      console.log('\nSHARE BURST OK: the share starts with the estimate a scroll needs and keeps it while the screen sits still, its encoder is never limited by bandwidth, and the bursts a viewer watched on the fluid encoding arrived, played without a freeze that anything held them back by, and needed no keyframe')
     }
   } finally {
     await Promise.all(procs.map((p) => stopProcess(p, 'SIGKILL')))
