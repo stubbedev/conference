@@ -44,25 +44,22 @@ export function parseTrackKind(wire: unknown): TrackKind | null {
   return OWN_KINDS.find((kind) => kind === wire) ?? (isTranslationKind(wire) ? wire : null)
 }
 
-/** What an offer says its media sections carry. */
-export interface Announced {
-  /** The kind of each section, by mid. */
-  kinds: Map<string, TrackKind>
-  /** What it says of sections this client cannot place: no mid, or no kind it knows. */
-  refused: unknown[]
+export interface AnnouncedTrack {
+  mid: string
+  kind: string
 }
 
-/** Reads the track list of an offer off the wire. An offer that sends nothing has none. */
-export function announcedKinds(tracks: unknown): Announced {
-  const announced: Announced = { kinds: new Map(), refused: [] }
-  if (tracks === undefined) return announced
-  if (!Array.isArray(tracks)) return { ...announced, refused: [tracks] }
+export interface Announced {
+  kinds: Map<string, TrackKind>
+  refused: AnnouncedTrack[]
+}
 
-  for (const entry of tracks as unknown[]) {
-    const { mid, kind: wire } = (typeof entry === 'object' && entry !== null ? entry : {}) as { mid?: unknown; kind?: unknown }
-    const kind = parseTrackKind(wire)
-    if (typeof mid === 'string' && kind !== null) announced.kinds.set(mid, kind)
-    else announced.refused.push(entry)
+export function announcedKinds(tracks: readonly AnnouncedTrack[]): Announced {
+  const announced: Announced = { kinds: new Map(), refused: [] }
+  for (const track of tracks) {
+    const kind = parseTrackKind(track.kind)
+    if (kind === null) announced.refused.push(track)
+    else announced.kinds.set(track.mid, kind)
   }
   return announced
 }

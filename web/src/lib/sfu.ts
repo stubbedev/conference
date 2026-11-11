@@ -54,6 +54,7 @@ import {
 } from '@/lib/encodings'
 import {
   announcedKinds,
+  type AnnouncedTrack,
   AUDIO_KIND,
   CAMERA_KIND,
   isAudioKind,
@@ -1119,7 +1120,7 @@ export class RoomClient {
     }
   }
 
-  private async handleDownOffer(sourceId: string, sdp: string, tracks: readonly { mid: string; kind: string }[]): Promise<void> {
+  private async handleDownOffer(sourceId: string, sdp: string, tracks: readonly AnnouncedTrack[]): Promise<void> {
     const down = this.downs.get(sourceId) ?? this.openDown(sourceId)
     const { pc } = down
 

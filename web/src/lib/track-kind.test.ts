@@ -68,15 +68,13 @@ test('an offer’s track list is read into the kind of each section', () => {
   assert.deepEqual(refused, [])
 })
 
-test('a section announced with no mid or no known kind is refused, and the rest are kept', () => {
+test('a section announced with a kind this client does not know is refused, and the rest are kept', () => {
   const unknown = { mid: '1', kind: 'hologram' }
-  const unplaced = { kind: 'audio' }
-  const { kinds, refused } = announcedKinds([{ mid: '0', kind: 'audio' }, unknown, unplaced, 'camera', null])
+  const { kinds, refused } = announcedKinds([{ mid: '0', kind: 'audio' }, unknown])
   assert.deepEqual([...kinds], [['0', AUDIO_KIND]])
-  assert.deepEqual(refused, [unknown, unplaced, 'camera', null])
+  assert.deepEqual(refused, [unknown])
 })
 
-test('an offer that sends nothing announces nothing, and a track list that is no list is refused whole', () => {
-  assert.deepEqual(announcedKinds(undefined), { kinds: new Map(), refused: [] })
-  assert.deepEqual(announcedKinds({ mid: '0', kind: 'audio' }), { kinds: new Map(), refused: [{ mid: '0', kind: 'audio' }] })
+test('an offer that announces no tracks has no kinds', () => {
+  assert.deepEqual(announcedKinds([]), { kinds: new Map(), refused: [] })
 })
