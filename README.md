@@ -116,7 +116,7 @@ All settings are environment variables.
 
 | Variable            | Default         | What it does                                                                              |
 | ------------------- | --------------- | ----------------------------------------------------------------------------------------- |
-| `PORT`              | `8080`          | HTTP listen port                                                                          |
+| `PORT`              | `8080`          | HTTP listen port; `0` lets the kernel pick one. Once every port is bound the server prints `ready {…}` with the bound addresses as JSON on stdout |
 | `BIND`              | all interfaces  | Listen host                                                                               |
 | `BASE_URL`          | —               | Public origin such as `https://meet.example.com`, used in room links and link previews; the server refuses to start if it has a path, query or no `http(s)` scheme |
 | `PUBLIC_ORIGINS`    | —               | Comma-separated further origins the same server answers on (e.g. `https://meet.example.org`); requests on one of them get links and preview images on that origin instead of `BASE_URL` |
@@ -125,9 +125,9 @@ All settings are environment variables.
 | `JOIN_ONLY`         | `false`         | Hide room creation on the home page so people can only join; requires `API_KEYS`          |
 | `OPEN_CREATE_HOSTS` | —               | Hostnames where anyone may create rooms despite `API_KEYS`/`JOIN_ONLY`                    |
 | `ROOM_TTL_DAYS`     | `365`           | Delete rooms nobody has joined for this long (checked hourly, live rooms are skipped); `0` keeps them forever |
-| `ICE_UDP_PORT`      | `5000`          | The single UDP port for all video and audio                                               |
+| `ICE_UDP_PORT`      | `5000`          | The single UDP port for all video and audio; `0` lets the kernel pick one per interface   |
 | `EXTERNAL_IPS`      | —               | Comma-separated public IPs to advertise when behind NAT                                   |
-| `TURN_PORT`         | `3478`          | UDP and TCP port of the built-in relay                                                    |
+| `TURN_PORT`         | `3478`          | UDP and TCP port of the built-in relay; `0` lets the kernel pick one for both             |
 | `TURN_TLS_HOST`     | —               | Hostname whose port 443 forwards to the relay over TLS                                    |
 | `MAX_ROOM_MEMBERS`  | `16`            | Default maximum people per room                                                           |
 | `TRUSTED_PROXIES`   | —               | Comma-separated IPs or CIDRs of reverse proxies whose `X-Forwarded-For` names the real client, so rate limits apply per visitor instead of per proxy |

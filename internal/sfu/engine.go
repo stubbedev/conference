@@ -37,9 +37,9 @@ type Engine struct {
 	mediaAddrs []relay.MediaAddr
 }
 
-// NewEngine builds the engine. udpPort > 0 binds all ICE traffic to a
-// single UDP port (easy to publish through Docker or a firewall);
-// externalIPs, when set, replace host candidates for NAT 1:1 setups.
+// NewEngine builds the engine. All ICE traffic shares the UDP mux on
+// udpPort (easy to publish through Docker or a firewall), or on ports the
+// kernel picks when it is 0; externalIPs, when set, replace host candidates for NAT 1:1 setups.
 // Every UDP socket the engine opens is sized by sockets. The returned
 // cleanup closes the UDP mux.
 func NewEngine(udpPort int, externalIPs []netip.Addr, sockets *recvbuf.Sizer) (*Engine, func(), error) {
@@ -122,8 +122,7 @@ func newAPI(settingEngine webrtc.SettingEngine, feedback congestionFeedback) (*w
 }
 
 // MediaAddrs lists the addresses the SFU announces on its UDP mux and
-// the local sockets behind them. It is empty without a mux (ephemeral
-// ports), where no fixed address exists to relay to.
+// the local sockets behind them, with the ports they are bound to.
 func (e *Engine) MediaAddrs() []relay.MediaAddr {
 	return e.mediaAddrs
 }
@@ -155,10 +154,6 @@ func newSettingEngine(
 		if err != nil {
 			return settingEngine, nil, noop, fmt.Errorf("sfu: address rewrite %v: %w", externalIPs, err)
 		}
-	}
-
-	if udpPort == 0 {
-		return settingEngine, nil, noop, nil
 	}
 
 	mux, err := ice.NewMultiUDPMuxFromPort(udpPort, ice.UDPMuxFromPortWithNet(sockets))

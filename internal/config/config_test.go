@@ -48,6 +48,21 @@ func TestMediaDefaults(t *testing.T) {
 	}
 }
 
+func TestKernelPickedPorts(t *testing.T) {
+	t.Setenv("PORT", "0")
+	t.Setenv("ICE_UDP_PORT", "0")
+	t.Setenv("TURN_PORT", "0")
+
+	cfg, err := config.FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.HTTPAddr != ":0" || cfg.ICEUDPPort != 0 || cfg.Relay.Port != 0 {
+		t.Fatalf("got http %q, ice %d, turn %d", cfg.HTTPAddr, cfg.ICEUDPPort, cfg.Relay.Port)
+	}
+}
+
 func TestExternalIPs(t *testing.T) {
 	t.Setenv("EXTERNAL_IPS", "203.0.113.10, 2001:db8::1")
 	t.Setenv("TURN_TLS_HOST", "turn.example.com")
@@ -73,7 +88,8 @@ func TestMediaConfigRejects(t *testing.T) {
 		env  map[string]string
 	}{
 		{name: "hostname as external IP", env: map[string]string{"EXTERNAL_IPS": "meet.example.com"}},
-		{name: "ephemeral ICE port", env: map[string]string{"ICE_UDP_PORT": "0"}},
+		{name: "HTTP port out of range", env: map[string]string{"PORT": "65536"}},
+		{name: "negative HTTP port", env: map[string]string{"PORT": "-1"}},
 		{name: "ICE port out of range", env: map[string]string{"ICE_UDP_PORT": "70000"}},
 		{name: "negative TURN port", env: map[string]string{"TURN_PORT": "-1"}},
 		{name: "TURN on the ICE port", env: map[string]string{"TURN_PORT": "5000"}},

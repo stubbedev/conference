@@ -32,7 +32,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { consoleOf, createRoom, evalJs, findChrome, findFirefox, freePort, joinRoom, launchChrome, launchFirefox, stopProcess, waitFor } from './browser.mjs'
+import { consoleOf, createRoom, evalJs, findChrome, findFirefox, joinRoom, launchChrome, launchFirefox, stopProcess, waitFor } from './browser.mjs'
 import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
 import { clickButtonByTitle, fakeDisplay, remoteScreen, SHARE_WIDTH, shareReceiveCounters, shareSendCounters, shareState } from './share.mjs'
 
@@ -170,10 +170,9 @@ async function main() {
   const failures = []
   try {
     const bin = args.server ? resolve(args.server) : buildServer(dir, { race: true })
-    const port = await freePort()
-    const server = await startServer(bin, await serverEnv(dir, port))
+    const server = await startServer(bin, serverEnv(dir))
     procs.push(server.proc)
-    const base = `http://127.0.0.1:${port}`
+    const { base } = server
 
     for (let i = 0; i < load; i++) loops.push(spawn('sh', ['-c', 'while :; do :; done'], { stdio: 'ignore' }))
     if (load > 0) console.log(`share start: ${load} busy loops running`)

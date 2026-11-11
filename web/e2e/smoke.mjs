@@ -30,7 +30,6 @@ import {
   createRoom,
   evalJs,
   findChrome,
-  freePort,
   hook,
   joinRoom,
   launchChrome,
@@ -803,10 +802,9 @@ async function main() {
   const failures = []
   try {
     const bin = args.server ? resolve(args.server) : buildServer(dir, { race: true })
-    const port = await freePort()
-    const env = await serverEnv(dir, port)
-    let server = await startServer(bin, env)
+    let server = await startServer(bin, serverEnv(dir))
     procs.push(server.proc)
+    const { port } = server
 
     const room = await createRoom(`http://127.0.0.1:${port}`, 'smoke')
     const { url, privUrl } = room
@@ -845,7 +843,7 @@ async function main() {
     await checkStillInRoom(failures, 'dropped signaling', browsers)
 
     await stopProcess(server.proc, 'SIGTERM')
-    server = await startServer(bin, env)
+    server = await startServer(bin, { ...serverEnv(dir), PORT: String(port) })
     procs.push(server.proc)
     await checkCall(failures, browsers, ['server restart 0', 'server restart 1'], { seconds })
     await checkStillInRoom(failures, 'server restart', browsers)

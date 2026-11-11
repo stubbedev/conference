@@ -7,11 +7,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -70,51 +72,122 @@ func run() error {
 
 	defer func() { _ = database.Close() }()
 
-	sockets := recvbuf.NewSizer()
-
-	engine, closeEngine, err := sfu.NewEngine(cfg.ICEUDPPort, cfg.ExternalIPs, sockets)
-	if err != nil {
-		return fmt.Errorf("sfu engine: %w", err)
-	}
-
-	defer closeEngine()
-
-	creds, err := relay.NewCredentials(cfg.Relay)
-	if err != nil {
-		return fmt.Errorf("relay: %w", err)
-	}
-
 	speech, err := newLiveTranslation(cfg)
 	if err != nil {
 		return err
 	}
 
-	hub := newHub(cfg, engine, creds, speech)
-
-	turnServer, err := relay.Start(context.Background(), creds, engine.MediaAddrs(), sockets, hub.MemberLive)
+	bound, err := bind(context.Background(), cfg, recvbuf.NewSizer())
 	if err != nil {
-		return fmt.Errorf("relay: %w", err)
+		return err
+	}
+
+	defer bound.closeEngine()
+	defer func() { _ = bound.http.Close() }()
+
+	hub := newHub(cfg, bound.engine, bound.turn.Credentials(), speech)
+
+	turnServer, err := bound.turn.Serve(bound.engine.MediaAddrs(), hub.MemberLive)
+	if err != nil {
+		return fmt.Errorf("turn: %w", err)
 	}
 
 	defer func() { _ = turnServer.Close() }()
 
 	go reapLoop(database, hub, cfg.RoomTTL)
 
-	mux, err := buildMux(database, hub, cfg, speech, sockets)
+	mux, err := buildMux(database, hub, cfg, speech, bound.sockets)
 	if err != nil {
 		return err
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
 		Handler:           logRequests(isolate(mux)),
 		ReadHeaderTimeout: headerReadTimeout,
 	}
 
-	log.Printf("conference listening on %s (db: %s, ice udp: %d, turn udp+tcp: %d, turns host: %q)",
-		cfg.HTTPAddr, cfg.DBPath, cfg.ICEUDPPort, cfg.Relay.Port, cfg.Relay.TLSHost)
+	err = announce(os.Stdout, bound.readiness(cfg))
+	if err != nil {
+		return err
+	}
 
-	return serveUntilShutdown(srv, hub, speech)
+	return serveUntilShutdown(srv, bound.http, hub, speech)
+}
+
+type listeners struct {
+	sockets     *recvbuf.Sizer
+	engine      *sfu.Engine
+	closeEngine func()
+	turn        *relay.Listener
+	http        net.Listener
+}
+
+func bind(ctx context.Context, cfg *config.Config, sockets *recvbuf.Sizer) (*listeners, error) {
+	engine, closeEngine, err := sfu.NewEngine(cfg.ICEUDPPort, cfg.ExternalIPs, sockets)
+	if err != nil {
+		return nil, fmt.Errorf("sfu engine: %w", err)
+	}
+
+	turn, err := relay.Listen(ctx, cfg.Relay, sockets)
+	if err != nil {
+		closeEngine()
+
+		return nil, fmt.Errorf("turn: %w", err)
+	}
+
+	var listenConfig net.ListenConfig
+
+	httpListener, err := listenConfig.Listen(ctx, "tcp", cfg.HTTPAddr)
+	if err != nil {
+		_ = turn.Close()
+
+		closeEngine()
+
+		return nil, fmt.Errorf("http: listen %s: %w", cfg.HTTPAddr, err)
+	}
+
+	return &listeners{sockets: sockets, engine: engine, closeEngine: closeEngine, turn: turn, http: httpListener}, nil
+}
+
+type readiness struct {
+	HTTP      string   `json:"http"`
+	ICEUDP    []string `json:"iceUdp"`
+	TURN      int      `json:"turn"`
+	TURNSHost string   `json:"turnsHost"`
+	DB        string   `json:"db"`
+}
+
+func (l *listeners) readiness(cfg *config.Config) readiness {
+	media := l.engine.MediaAddrs()
+	ice := make([]string, 0, len(media))
+
+	for _, addr := range media {
+		ice = append(ice, addr.Local.String())
+	}
+
+	return readiness{
+		HTTP:      l.http.Addr().String(),
+		ICEUDP:    ice,
+		TURN:      l.turn.Port(),
+		TURNSHost: cfg.Relay.TLSHost,
+		DB:        cfg.DBPath,
+	}
+}
+
+const readyPrefix = "ready "
+
+func announce(out io.Writer, ready readiness) error {
+	line, err := json.Marshal(ready)
+	if err != nil {
+		return fmt.Errorf("announce %+v: %w", ready, err)
+	}
+
+	_, err = fmt.Fprintf(out, "%s%s\n", readyPrefix, line)
+	if err != nil {
+		return fmt.Errorf("announce: %w", err)
+	}
+
+	return nil
 }
 
 // liveTranslation is what the server runs for live translation: its
@@ -213,11 +286,11 @@ func buildMux(
 
 // serveUntilShutdown runs the HTTP server until an interrupt or a
 // terminal error, then ends the speech streams and drains live rooms.
-func serveUntilShutdown(srv *http.Server, hub *sfu.Hub, translation liveTranslation) error {
+func serveUntilShutdown(srv *http.Server, listener net.Listener, hub *sfu.Hub, translation liveTranslation) error {
 	serverErr := make(chan error, 1)
 
 	go func() {
-		serverErr <- srv.ListenAndServe()
+		serverErr <- srv.Serve(listener)
 	}()
 
 	stop := make(chan os.Signal, 1)

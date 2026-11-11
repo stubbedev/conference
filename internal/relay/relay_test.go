@@ -5,8 +5,9 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"slices"
+	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -51,30 +52,16 @@ func addrPort(t *testing.T, addr net.Addr) netip.AddrPort {
 	return udp.AddrPort()
 }
 
-func freeTURNPort(t *testing.T) int {
+func listen(t *testing.T) *relay.Listener {
 	t.Helper()
 
-	var listenConfig net.ListenConfig
-
-	listener, err := listenConfig.Listen(t.Context(), "tcp4", "127.0.0.1:0")
+	listener, err := relay.Listen(t.Context(), relay.Config{Port: 0, TLSHost: ""}, recvbuf.NewSizer())
 	if err != nil {
-		t.Fatalf("reserve tcp port: %v", err)
+		t.Fatal(err)
 	}
 
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("reserve tcp port: %v is not TCP", listener.Addr())
-	}
-
-	err = listener.Close()
-	if err != nil {
-		t.Fatalf("release tcp port %d: %v", addr.Port, err)
-	}
-
-	return addr.Port
+	return listener
 }
-
-const relayBindAttempts = 10
 
 // startRelay runs a TURN server for media and returns credentials for
 // the always-live member.
@@ -85,37 +72,20 @@ func startRelay(t *testing.T, media []relay.MediaAddr) (int, relay.ICEServer) {
 }
 
 // startRelayFor runs a TURN server for media and the members live
-// reports, and returns credentials for member. The port is reserved over
-// TCP, so its UDP twin can still be taken by a parallel test; the start
-// is retried on a fresh port then.
+// reports, and returns credentials for member.
 func startRelayFor(t *testing.T, media []relay.MediaAddr, live func(id string) bool) (int, relay.ICEServer) {
 	t.Helper()
 
-	for range relayBindAttempts {
-		port := freeTURNPort(t)
+	listener := listen(t)
 
-		creds, err := relay.NewCredentials(relay.Config{Port: port, TLSHost: ""})
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		server, err := relay.Start(t.Context(), creds, media, recvbuf.NewSizer(), live)
-		if errors.Is(err, syscall.EADDRINUSE) {
-			continue
-		}
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		t.Cleanup(func() { _ = server.Close() })
-
-		return port, creds.ICEServers("127.0.0.1", member)[0]
+	server, err := listener.Serve(media, live)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	t.Fatalf("no free TURN port after %d attempts", relayBindAttempts)
+	t.Cleanup(func() { _ = server.Close() })
 
-	return 0, relay.ICEServer{URLs: nil, Username: "", Credential: ""}
+	return listener.Port(), listener.Credentials().ICEServers("127.0.0.1", member)[0]
 }
 
 // turnClient is a TURN client of the relay on port, listening for its
@@ -344,16 +314,53 @@ func TestRelayRejectsNonMembers(t *testing.T) {
 	}
 }
 
-func TestStartRequiresMediaAddrs(t *testing.T) {
+func TestServeRequiresMediaAddrs(t *testing.T) {
 	t.Parallel()
 
-	creds, err := relay.NewCredentials(relay.Config{Port: freeTURNPort(t), TLSHost: ""})
+	_, err := listen(t).Serve(nil, func(string) bool { return true })
+	if err == nil {
+		t.Fatal("started a relay with nothing to relay to")
+	}
+}
+
+func TestPickedPortIsAdvertised(t *testing.T) {
+	t.Parallel()
+
+	listener := listen(t)
+	port := listener.Port()
+
+	server, err := listener.Serve([]relay.MediaAddr{{Announced: netip.MustParseAddrPort("127.0.0.1:5000"), Local: netip.MustParseAddrPort("127.0.0.1:5000")}}, func(string) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = relay.Start(t.Context(), creds, nil, recvbuf.NewSizer(), func(string) bool { return true })
-	if err == nil {
-		t.Fatal("started a relay with nothing to relay to")
+	t.Cleanup(func() { _ = server.Close() })
+
+	if port == 0 {
+		t.Fatal("the listener reports port 0")
+	}
+
+	want := []string{
+		"turn:127.0.0.1:" + strconv.Itoa(port) + "?transport=udp",
+		"turn:127.0.0.1:" + strconv.Itoa(port) + "?transport=tcp",
+	}
+
+	urls := listener.Credentials().ICEServers("127.0.0.1", member)[0].URLs
+	if !slices.Equal(urls, want) {
+		t.Fatalf("URLs %v, want %v", urls, want)
+	}
+
+	var dialer net.Dialer
+
+	conn, err := dialer.DialContext(t.Context(), "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("TURN over TCP on the advertised port: %v", err)
+	}
+
+	_ = conn.Close()
+
+	_, err = allocate(t, port, member, listener.Credentials().ICEServers("127.0.0.1", member)[0].Credential)
+	if err != nil {
+		t.Fatalf("TURN over UDP on the advertised port: %v", err)
 	}
 }

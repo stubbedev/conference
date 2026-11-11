@@ -27,7 +27,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { createRoom, evalJs, findChrome, findFirefox, freePort, joinRoom, launchChrome, launchFirefox, sleep, stopProcess, waitFor } from './browser.mjs'
+import { createRoom, evalJs, findChrome, findFirefox, joinRoom, launchChrome, launchFirefox, sleep, stopProcess, waitFor } from './browser.mjs'
 import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
 import { SCREEN_LAYER_RIDS, SCREEN_SHARE_FLUID_MAX_BITRATE } from '../src/lib/encodings.ts'
 import { DROPPED_FRAMES_LIMIT, LOST_PACKETS_LIMIT } from '../src/lib/quality.ts'
@@ -276,10 +276,9 @@ async function main() {
   const failures = []
   try {
     const bin = args.server ? resolve(args.server) : buildServer(dir, { race: false })
-    const port = await freePort()
-    const server = await startServer(bin, await serverEnv(dir, port))
+    const server = await startServer(bin, serverEnv(dir))
     procs.push(server.proc)
-    const base = `http://127.0.0.1:${port}`
+    const { base } = server
 
     const presenters = [['chrome', (idx) => launchChrome(chromeBinary, idx, dir)]]
     if (firefoxBinary) presenters.push(['firefox', (idx) => launchFirefox(firefoxBinary, idx, dir)])
