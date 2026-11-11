@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/stubbe/conference/internal/config"
+	"github.com/stubbe/conference/internal/recvbuf"
 	"github.com/stubbe/conference/internal/roomcrypt"
 	"github.com/stubbe/conference/internal/sfu"
 	"github.com/stubbe/conference/internal/speech/service"
@@ -50,19 +51,28 @@ type Server struct {
 	SlackClient *http.Client
 
 	translation   service.Status
+	sockets       *recvbuf.Sizer
 	authLimiter   *limiter
 	createLimiter *limiter
 }
 
 // New creates an API server around the shared store, hub, and config,
-// reporting translation as whether live translation can run.
-func New(storage *store.Store, hub *sfu.Hub, cfg *config.Config, translation service.Status) *Server {
+// reporting translation as whether live translation can run and sockets
+// as what the kernel granted the media sockets.
+func New(
+	storage *store.Store,
+	hub *sfu.Hub,
+	cfg *config.Config,
+	translation service.Status,
+	sockets *recvbuf.Sizer,
+) *Server {
 	return &Server{
 		Store:         storage,
 		Hub:           hub,
 		Cfg:           cfg,
 		SlackClient:   &http.Client{Timeout: slackFollowUpTimeout},
 		translation:   translation,
+		sockets:       sockets,
 		authLimiter:   newLimiter(authLimiterCapacity, authLimiterRefill),
 		createLimiter: newLimiter(createLimiterCapacity, createLimiterRefill),
 	}
@@ -70,9 +80,7 @@ func New(storage *store.Store, hub *sfu.Hub, cfg *config.Config, translation ser
 
 // Routes registers API endpoints on mux.
 func (s *Server) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	})
+	mux.HandleFunc("GET /api/healthz", s.health)
 	mux.HandleFunc("GET /api/config", s.getConfig)
 	mux.HandleFunc("POST /api/rooms", s.createRoom)
 	mux.HandleFunc("GET /api/rooms", s.listRooms)
@@ -87,6 +95,18 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not-found", "No such API endpoint.")
 	})
+}
+
+// healthResponse is the server's account of itself: that it answers, and
+// whether the kernel gave its media sockets the receive buffer they ask
+// for, which an operator otherwise only learns from the log.
+type healthResponse struct {
+	OK            bool           `json:"ok"`
+	ReceiveBuffer recvbuf.Status `json:"receiveBuffer"`
+}
+
+func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, healthResponse{OK: true, ReceiveBuffer: s.sockets.Status()})
 }
 
 type configResponse struct {

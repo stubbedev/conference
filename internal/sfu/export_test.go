@@ -4,6 +4,8 @@ import (
 	"net"
 
 	"github.com/pion/webrtc/v4"
+
+	"github.com/stubbe/conference/internal/recvbuf"
 )
 
 // NewLoopbackEngine builds an engine whose peers gather only the IPv4
@@ -11,7 +13,7 @@ import (
 // gathering on every interface of a multi-homed machine multiplies the
 // candidate pairs until ICE cannot finish its checks in time.
 func NewLoopbackEngine() (*Engine, func(), error) {
-	sockets, err := newMediaNet()
+	sockets, err := newMediaNet(recvbuf.NewSizer())
 	if err != nil {
 		return nil, nil, err
 	}

@@ -10,19 +10,20 @@ import { LocalTranslator } from '@/lib/speech/local'
 import { StandInEngines } from '@/lib/speech/standin'
 import type { MemberInfo, RoomClient } from '@/lib/sfu'
 import { readStored, storedFields } from '@/lib/storage'
-import { withLocalVoices, withoutVoice, withVoice, type Translations, type Voices } from '@/lib/tiles'
+import { withoutVoice, withVoice, type Translations, type Voices } from '@/lib/tiles'
 import { translationLang } from '@/lib/track-kind'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
 import type { OwnVoiceSample } from '@/lib/translate/own-voice'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
-import { isVoiceChoice, type CaptionLine, type LangPrefs, type TranslatorStatus } from '@/lib/translate/types'
+import { isVoiceChoice, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
 
 const CAPTION_HOLD_MS = 5000
 const INTERIM_HOLD_MS = 10_000
 const CAPTION_PRUNE_MS = 500
 const LANG_PREFS_KEY = 'conference:translation'
 const NO_LOCAL_VOICES: Readonly<Record<string, MediaStream>> = {}
+const NOBODY: ReadonlyMap<string, LangAnnouncement> = new Map()
 
 const TRANSLATION_CHECKING: TranslationConfig = {
   available: false,
@@ -42,10 +43,11 @@ function translationUnknown(err: unknown): TranslationConfig {
 }
 
 export interface ShownCaption {
-  segId: string
   text: string
   final: boolean
   at: number
+  /** The member who put the line into this member's language, when another member than its speaker did. */
+  translatedBy: string | null
 }
 
 function storedLangChoice(): boolean {
@@ -98,15 +100,14 @@ export function useLiveTranslation(
   const [captions, setCaptions] = useState<Record<string, ShownCaption>>({})
   const [publishedVoices, setPublishedVoices] = useState<Voices<MediaStream>>({})
   const [localVoices, setLocalVoices] = useState(NO_LOCAL_VOICES)
-  const [memberLangs, setMemberLangs] = useState<Record<string, string>>({})
-  const [ownVoices, setOwnVoices] = useState<Record<string, boolean>>({})
-  const ownVoiceSampleRef = useLatest(ownVoiceSample)
+  const [announced, setAnnounced] = useState(NOBODY)
   const [translatorStatus, setTranslatorStatus] = useState<TranslatorStatus | null>(null)
   const [translationFailure, setTranslationFailure] = useState('')
   const translatorRef = useRef<Translator | null>(null)
   const [langChosenBefore] = useState(storedLangChoice)
   const langChosenRef = useRef(langChosenBefore)
   const [langPrefs, setLangPrefs] = usePersistentState(LANG_PREFS_KEY, { parse: parseLangPrefs })
+  const ownVoiceSampleRef = useLatest(ownVoiceSample)
   const translationRef = useLatest(translation)
   const langPrefsRef = useLatest(langPrefs)
 
@@ -141,17 +142,27 @@ export function useLiveTranslation(
     setLangPrefs({ ...langPrefs, lang: codes.includes(DEFAULT_LANGUAGE) ? DEFAULT_LANGUAGE : codes[0] })
   }, [translation, langPrefs, setLangPrefs])
 
+  // A remembered own voice falls back to the default where the server makes none.
+  useEffect(() => {
+    if (translation === TRANSLATION_CHECKING || translation.ownVoice || langPrefs.voiceChoice !== 'own') return
+    setLangPrefs({ ...langPrefs, voiceChoice: 'female' })
+  }, [translation, langPrefs, setLangPrefs])
+
+  useEffect(() => {
+    translatorRef.current?.setOwnVoiceSample?.(ownVoiceSample)
+  }, [ownVoiceSample])
+
   const handleRoomCaption = useCallback(
-    (caption: CaptionLine) => {
+    (line: RoomMessage) => {
       const prefs = langPrefsRef.current
-      if (caption.lang !== prefs.lang || !prefs.subtitles) return
+      if (line.lang !== prefs.lang || !prefs.subtitles) return
       const shown: ShownCaption = {
-        segId: caption.segId,
-        text: caption.text,
-        final: caption.final,
+        text: line.text,
+        final: line.final,
         at: Date.now(),
+        translatedBy: line.k === 'translation' && line.by !== line.speaker ? line.by : null,
       }
-      setCaptions((prev) => ({ ...prev, [caption.speaker]: shown }))
+      setCaptions((prev) => ({ ...prev, [line.speaker]: shown }))
     },
     [langPrefsRef],
   )
@@ -189,7 +200,8 @@ export function useLiveTranslation(
           void stopTranslation()
         },
         onStatus: setTranslatorStatus,
-        onStream: (speaker, track) => setLocalVoices((prev) => ({ ...prev, [speaker]: new MediaStream([track]) })),
+        onVoice: (speaker, track) =>
+          setLocalVoices(({ [speaker]: _before, ...others }) => (track ? { ...others, [speaker]: new MediaStream([track]) } : others)),
       }
 
       const translator = buildTranslator(translation, langPrefsRef.current, events)
@@ -206,23 +218,6 @@ export function useLiveTranslation(
     },
     [translation, langPrefsRef, localStreamRef, ownVoiceSampleRef, handleRoomCaption, stopTranslation],
   )
-
-  useEffect(() => {
-    translatorRef.current?.setOwnVoiceSample?.(ownVoiceSample)
-  }, [ownVoiceSample])
-
-  // Listeners are told when this member's translated voice is their own.
-  const ownVoiceInUse = langPrefs.voiceChoice === 'own' && translatorStatus?.ownVoice === 'ready'
-  const ownVoiceInUseRef = useLatest(ownVoiceInUse)
-  useEffect(() => {
-    clientRef.current?.setOwnVoice(ownVoiceInUse)
-  }, [clientRef, ownVoiceInUse])
-
-  // A remembered own voice falls back to the default where the server makes none.
-  useEffect(() => {
-    if (translation === TRANSLATION_CHECKING || translation.ownVoice || langPrefs.voiceChoice !== 'own') return
-    setLangPrefs({ ...langPrefs, voiceChoice: 'female' })
-  }, [translation, langPrefs, setLangPrefs])
 
   const toggleTranslation = useCallback(() => {
     clientRef.current?.announceTranslating(translationBy === null)
@@ -256,19 +251,20 @@ export function useLiveTranslation(
   const bind = useCallback(
     (client: RoomClient) => {
       client.setLangPrefs(langPrefsRef.current)
-      client.setOwnVoice(ownVoiceInUseRef.current)
       translatorRef.current?.attach(client)
       let translatingAtJoin = false
+
+      // The client keeps what the members announced; this is its record
+      // as of the last change, for the page to render from.
+      const readAnnounced = () => setAnnounced(new Map(client.memberLangPrefs))
 
       client.on('welcome', ({ translatingBy }) => {
         setTranslationBy(translatingBy || null)
         translatingAtJoin = Boolean(translatingBy)
-        setMemberLangs({})
-        setOwnVoices({})
+        readAnnounced()
       })
-      client.on('member-left', ({ id }) => {
-        setMemberLangs(({ [id]: _left, ...rest }) => rest)
-        setOwnVoices(({ [id]: _left, ...rest }) => rest)
+      client.on('member-gone', ({ id }) => {
+        readAnnounced()
         setLocalVoices(({ [id]: _gone, ...rest }) => rest)
       })
       client.on('track', ({ sourceId, stream, kind }) => {
@@ -284,10 +280,7 @@ export function useLiveTranslation(
         if (translator) translator.receive(caption)
         else if (caption.k === 'caption') handleRoomCaption(caption)
       })
-      client.on('lang', ({ from, prefs }) => {
-        setMemberLangs((prev) => ({ ...prev, [from]: prefs.lang }))
-        setOwnVoices((prev) => ({ ...prev, [from]: prefs.ownVoice }))
-      })
+      client.on('lang', readAnnounced)
       client.on('translating', ({ from, on }) => {
         setTranslationBy(on ? from : null)
         if (on) startTranslation(client)
@@ -307,13 +300,16 @@ export function useLiveTranslation(
         else if (translatingAtJoin) startTranslation(client)
       }
     },
-    [langPrefsRef, ownVoiceInUseRef, handleRoomCaption, startTranslation, stopTranslation],
+    [langPrefsRef, handleRoomCaption, startTranslation, stopTranslation],
   )
 
   const listenLangSet = useCallback(
     (client: RoomClient) =>
       client.on('lang-set', ({ from, lang }) => {
-        if (!translationRef.current.languages.some((language) => language.code === lang)) return
+        if (!translationRef.current.languages.some((language) => language.code === lang)) {
+          console.warn(`live translation: ${from} set a language this server does not offer, which is ignored: ${lang}`)
+          return
+        }
         langChosenRef.current = true
         setLangPrefs((prefs) => ({ ...prefs, lang }))
         setCaptions({})
@@ -325,16 +321,21 @@ export function useLiveTranslation(
     [setLangPrefs, membersRef, translationRef],
   )
 
+  const memberLangs = useMemo(
+    () => Object.fromEntries([...announced].map(([id, announcement]) => [id, announcement.lang])),
+    [announced],
+  )
+
   const translations = useMemo<Translations<MediaStream>>(
     () => ({
       on: translationBy !== null,
       lang: langPrefs.lang,
       voice: langPrefs.voice,
-      spoken: memberLangs,
-      voices: withLocalVoices(publishedVoices, localVoices, langPrefs.lang),
-      ownVoices,
+      announced,
+      published: publishedVoices,
+      local: localVoices,
     }),
-    [translationBy, langPrefs.lang, langPrefs.voice, memberLangs, publishedVoices, localVoices, ownVoices],
+    [translationBy, langPrefs.lang, langPrefs.voice, announced, publishedVoices, localVoices],
   )
 
   return {

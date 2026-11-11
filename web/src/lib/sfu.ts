@@ -5,10 +5,14 @@
 // When the room is end-to-end encrypted, encoded frames are transformed
 // through the E2EE worker, so the server only ever relays ciphertext.
 
+import { isE2EEStats, type E2EEStats, type TransformOptions, type WorkerMessage } from '@/lib/e2ee'
 import { errorText } from '@/lib/errors'
 import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
+import { parseChatText, Refusals, type Refused } from '@/lib/sealed'
 import { settled } from '@/lib/settled'
+import { Election } from '@/lib/speech/election'
+import { Serial } from '@/lib/speech/serial'
 import {
   addCounts,
   countsSince,
@@ -32,6 +36,7 @@ import {
   demandParameters,
   LAYER_RIDS,
   SCREEN_CONTENT_HINT,
+  SCREEN_LAYER_RIDS,
   screenLayers,
   screenSenderParameters,
 } from '@/lib/encodings'
@@ -49,7 +54,19 @@ import {
   type TileKind,
   type TrackKind,
 } from '@/lib/track-kind'
-import { announcement, parseRoomMessage, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslationLevel } from '@/lib/translate/types'
+import {
+  parseAnnouncement,
+  parseLanguageSet,
+  parseRoomMessage,
+  PROVIDES_NOTHING,
+  sameProvides,
+  type LangAnnouncement,
+  type LangPrefs,
+  type LanguageSet,
+  type Provides,
+  type Room,
+  type RoomMessage,
+} from '@/lib/translate/types'
 
 export interface MemberInfo {
   id: string
@@ -240,10 +257,19 @@ interface WireMessage {
 /** A message as it arrives: what it says of tracks is still to be read. */
 type ReceivedMessage = Omit<WireMessage, 'tracks'> & { tracks?: unknown }
 
+// What the room's members and their sealed messages are read from. The
+// server relays each member's messages in the order that member sent
+// them, and opening one takes a turn of the event loop, so these are
+// handled one at a time: a member's announcement is known before the
+// line that member sent after it.
+const ORDERED_TYPES: ReadonlySet<string> = new Set(['member-joined', 'member-left', 'chat', 'lang', 'caption', 'forced'])
+
 interface Events {
   welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string; translatingBy: string }
   'member-joined': { member: MemberInfo; replaces: string }
   'member-left': { id: string }
+  /** A member's id will not be heard from again: the member left, or rejoined under a new one. */
+  'member-gone': { id: string }
   'member-state': { id: string; mic: boolean; cam: boolean; sharing: boolean }
   /** A track of another member starts arriving. */
   track: RemoteTrack
@@ -264,21 +290,6 @@ interface Events {
 }
 
 type AnyHandler = (payload: never) => void
-
-// E2EEStats is what the worker posts every couple of seconds: frames
-// processed and dropped per direction plus the last error text.
-export interface E2EEStats {
-  type: 'e2ee-stats'
-  send: number
-  recv: number
-  dropSend: number
-  dropRecv: number
-  lastError: string
-}
-
-function isE2EEStats(data: unknown): data is E2EEStats {
-  return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'e2ee-stats'
-}
 
 // preferCodec pins a video transceiver to a codec end-to-end encryption
 // can carry. H.264 and AV1 packetizers parse NAL units and OBUs out of
@@ -339,12 +350,19 @@ export class RoomClient {
   private translationSenders: RTCRtpSender[] = []
   private langPrefs: LangPrefs | null = null
   private memberLangs = new Map<string, LangAnnouncement>()
-  private refusedLines = new Set<string>()
-  private translates: TranslationLevel = 'none'
-  private ownVoice = false
+  private refusals = new Refusals((line, ...detail) => console.warn(`sfu: ${line}`, ...detail))
+  private sealing = new Serial()
+  private opening = new Serial()
+  private provides: Provides = PROVIDES_NOTHING
   /** The member recording the room, or '' when nobody is. */
   recorder = ''
-  private transformed = new WeakSet<object>()
+  private election = new Election()
+  private room: Room = {
+    inCall: (member) => member === this.selfId || this.members.has(member),
+    translated: (member, lang, speaker, segId) => this.election.translated(member, lang, speaker, segId),
+  }
+  private transformed = new WeakMap<RTCRtpSender | RTCRtpReceiver, number>()
+  private transforms = 0
   private selfId = ''
   private iceServers: RTCIceServer[] | null = null
   private resumeToken = ''
@@ -364,7 +382,7 @@ export class RoomClient {
   private e2eeStats: E2EEStats | null = null
   private e2eeFailureReported = { send: false, recv: false }
 
-  readonly worker: Worker
+  private readonly worker: Worker
 
   constructor(opts: RoomClientOptions) {
     this.opts = opts
@@ -377,7 +395,7 @@ export class RoomClient {
     this.worker.onerror = (ev: ErrorEvent) => {
       this.emit('error', { code: 'e2ee', text: `Media encryption worker failed: ${ev.message}` })
     }
-    this.worker.postMessage({ keyBytes: opts.mediaKey.slice() })
+    this.tellWorker({ type: 'key', keyBytes: opts.mediaKey.slice() })
   }
 
   // reportE2EEFailure turns a transform that drops everything into a
@@ -436,6 +454,7 @@ export class RoomClient {
           this.resumeToken = msg.resume ?? ''
           if (msg.self) this.selfId = msg.self.id
           this.recorder = msg.recorder ?? ''
+          this.elect()
           for (const member of msg.members ?? []) this.members.set(member.id, member)
           this.emit('welcome', {
             self: msg.self as MemberInfo,
@@ -453,7 +472,7 @@ export class RoomClient {
           this.emit('error', { code: msg.code ?? '', text: msg.text ?? '' })
           return
         }
-        void this.handle(msg)
+        void this.receive(msg)
       }
       ws.onerror = () => {
         clearTimeout(timeout)
@@ -488,6 +507,15 @@ export class RoomClient {
     return this.memberLangs
   }
 
+  /** The member the room holds as the translator into each language that has one. */
+  get translators(): ReadonlyMap<string, string> {
+    return this.election.translators
+  }
+
+  translatorFor(lang: string): string | null {
+    return this.election.translatorFor(lang)
+  }
+
   memberName(id: string): string {
     if (id === this.selfId) return this.opts.name
     return this.members.get(id)?.name ?? 'Guest'
@@ -501,7 +529,7 @@ export class RoomClient {
     this.micSender = this.localMic ? pc.addTrack(this.localMic, stream) : null
     this.camSender = this.localCam ? this.addCamera(pc, this.localCam, stream) : null
 
-    for (const sender of pc.getSenders()) this.installSenderTransform(sender)
+    for (const sender of pc.getSenders()) this.installTransform(sender)
     if (pc.getSenders().length > 0) await this.sendUpOffer(MEDIA_UP)
 
     this.state = {
@@ -524,7 +552,7 @@ export class RoomClient {
     try {
       for (const track of stream.getTracks()) {
         const sender = track.kind === 'video' ? await this.addScreenVideo(pc, track, stream) : pc.addTrack(track, stream)
-        this.installSenderTransform(sender)
+        this.installTransform(sender)
 
         if (track.kind === 'video') await tuneScreenSender(sender)
       }
@@ -567,7 +595,7 @@ export class RoomClient {
 
     this.ups.delete(id)
     this.pendingIce.delete(id)
-    up.pc.close()
+    this.closePC(up.pc)
     return true
   }
 
@@ -610,7 +638,7 @@ export class RoomClient {
     if (!sender) {
       const stream = new MediaStream([track])
       sender = kind === 'mic' ? pc.addTrack(track, stream) : this.addCamera(pc, track, stream)
-      this.installSenderTransform(sender)
+      this.installTransform(sender)
       if (kind === 'mic') this.micSender = sender
       else this.camSender = sender
       await this.sendUpOffer(MEDIA_UP)
@@ -676,7 +704,8 @@ export class RoomClient {
     if (!previous || !layout) return
 
     const quality = this.quality.get(key) ?? newQualityState()
-    const stepped = nextQuality(quality, layout, countsSince(previous, counters))
+    const rungs = kind === SCREEN_KIND ? SCREEN_LAYER_RIDS : LAYER_RIDS
+    const stepped = nextQuality(quality, layout, countsSince(previous, counters), rungs)
     this.quality.set(key, stepped)
 
     if (stepped.ceiling !== quality.ceiling) {
@@ -696,29 +725,25 @@ export class RoomClient {
     return this.state
   }
 
-  async sendChat(text: string): Promise<void> {
-    const sealed = await encryptChat(this.opts.chatKey, text)
-    this.send({ type: 'chat', iv: sealed.iv, ct: sealed.ct })
+  sendChat(text: string): Promise<void> {
+    return this.sendSealed({ type: 'chat' }, text)
   }
 
   /** Sets and announces this member's language settings; re-sent to every joiner. */
   setLangPrefs(prefs: LangPrefs): void {
     this.langPrefs = prefs
+    this.elect()
     void this.sendLang()
   }
 
-  setTranslates(translates: TranslationLevel): void {
-    if (this.translates === translates) return
-    this.translates = translates
+  /** Sets and announces what this member's translator does for the room right now. */
+  setProvides(provides: Provides): void {
+    if (sameProvides(this.provides, provides)) return
+    this.provides = provides
+    this.elect()
     void this.sendLang()
   }
 
-  /** Announces whether this member's translated voice is made from their own recording. */
-  setOwnVoice(ownVoice: boolean): void {
-    if (this.ownVoice === ownVoice) return
-    this.ownVoice = ownVoice
-    void this.sendLang()
-  }
 
   // announceTranslating switches the room's live translation on or off
   // (hosts only). While it is on, the server hands every member a
@@ -732,9 +757,9 @@ export class RoomClient {
     this.send({ type: 'translate-token-request' })
   }
 
-  async sendCaption(caption: RoomMessage): Promise<void> {
-    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify(caption))
-    this.send({ type: 'caption', iv: sealed.iv, ct: sealed.ct })
+  sendCaption(caption: RoomMessage): Promise<void> {
+    if (caption.k === 'caption') this.election.hear(caption.speaker, caption.segId)
+    return this.sendSealed({ type: 'caption' }, JSON.stringify(caption))
   }
 
   /** Publishes a translated-voice track, labelled translation-<lang> for the room. */
@@ -745,7 +770,7 @@ export class RoomClient {
     this.translationTrackLangs.set(track.id, lang)
     const sender = pc.addTrack(track, new MediaStream([track]))
     this.translationSenders.push(sender)
-    this.installSenderTransform(sender)
+    this.installTransform(sender)
     await this.sendUpOffer(MEDIA_UP)
   }
 
@@ -770,9 +795,9 @@ export class RoomClient {
   }
 
   /** Sets another member's live-translation language (host only); sealed like their own. */
-  async setMemberLanguage(target: string, lang: string): Promise<void> {
-    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify({ lang }))
-    this.send({ type: 'moderate', target, action: 'lang', iv: sealed.iv, ct: sealed.ct })
+  setMemberLanguage(target: string, lang: string): Promise<void> {
+    const set: LanguageSet = { lang }
+    return this.sendSealed({ type: 'moderate', target, action: 'lang' }, JSON.stringify(set))
   }
 
   // announceRecording claims (or releases) the room's recording badge.
@@ -812,10 +837,27 @@ export class RoomClient {
     this.ws.send(JSON.stringify(msg))
   }
 
+  // Sealing takes a turn of the event loop too, so what is sealed for
+  // the room leaves one at a time, in the order it was handed over.
+  private sendSealed(message: WireMessage, text: string): Promise<void> {
+    return this.sealing.run(async () => {
+      const sealed = await encryptChat(this.opts.chatKey, text)
+      this.send({ ...message, iv: sealed.iv, ct: sealed.ct })
+    })
+  }
+
+  // This member stands with what it announces, from the moment it knows
+  // the id the room knows it by.
+  private elect(): void {
+    const others = [...this.memberLangs].map(([id, prefs]) => ({ id, lang: prefs.lang, translates: prefs.translates }))
+    const self = this.langPrefs && this.selfId ? [{ id: this.selfId, lang: this.langPrefs.lang, translates: this.provides.translates }] : []
+    this.election.hold([...others, ...self])
+  }
+
   private async sendLang(): Promise<void> {
     if (!this.langPrefs) return
-    const sealed = await encryptChat(this.opts.chatKey, JSON.stringify({ ...this.langPrefs, translates: this.translates, ownVoice: this.ownVoice }))
-    this.send({ type: 'lang', iv: sealed.iv, ct: sealed.ct })
+    const announcement: LangAnnouncement = { ...this.langPrefs, ...this.provides }
+    await this.sendSealed({ type: 'lang' }, JSON.stringify(announcement))
   }
 
   private sendState(): void {
@@ -852,16 +894,25 @@ export class RoomClient {
   // The encoded transform is attached through the standard
   // RTCRtpScriptTransform API only. Room.tsx refuses to join without
   // it, so no untyped fallback path exists here.
-  private installSenderTransform(sender: RTCRtpSender): void {
-    if (this.transformed.has(sender)) return
-    this.transformed.add(sender)
-    sender.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'send' })
+  private installTransform(end: RTCRtpSender | RTCRtpReceiver): void {
+    if (this.transformed.has(end)) return
+
+    const options: TransformOptions = { purpose: end instanceof RTCRtpSender ? 'send' : 'recv', id: this.transforms++ }
+    this.transformed.set(end, options.id)
+    end.transform = new RTCRtpScriptTransform(this.worker, options)
   }
 
-  private installReceiverTransform(receiver: RTCRtpReceiver): void {
-    if (this.transformed.has(receiver)) return
-    this.transformed.add(receiver)
-    receiver.transform = new RTCRtpScriptTransform(this.worker, { purpose: 'recv' })
+  // closePC closes a connection and has the worker end the transforms
+  // attached on it: their streams stay open in the worker otherwise, and
+  // every share and every member that left would stay in its counters.
+  private closePC(pc: RTCPeerConnection): void {
+    const ids = [...pc.getSenders(), ...pc.getReceivers()].flatMap((end) => this.transformed.get(end) ?? [])
+    pc.close()
+    this.tellWorker({ type: 'closed', ids })
+  }
+
+  private tellWorker(message: WorkerMessage): void {
+    this.worker.postMessage(message)
   }
 
   private async addScreenVideo(pc: RTCPeerConnection, track: MediaStreamTrack, stream: MediaStream): Promise<RTCRtpSender> {
@@ -921,6 +972,10 @@ export class RoomClient {
     return CAMERA_KIND
   }
 
+  private receive(msg: ReceivedMessage): Promise<void> {
+    return ORDERED_TYPES.has(msg.type) ? this.opening.run(() => this.handle(msg)) : this.handle(msg)
+  }
+
   private async handle(msg: ReceivedMessage): Promise<void> {
     switch (msg.type) {
       case 'answer': {
@@ -978,9 +1033,20 @@ export class RoomClient {
           })
         }
         return
-      case 'chat':
-        await this.handleChat(msg)
+      case 'chat': {
+        const what = 'a chat message'
+        const opened = await this.openSealed(msg, what)
+        if (!opened) return
+
+        const chat = this.read(what, opened.from, parseChatText(opened.text))
+        if (!chat) return
+        if (msg.ts === undefined) {
+          this.refusals.report(what, opened.from, 'the server gave it no time')
+          return
+        }
+        this.emit('chat', { id: `${opened.from}:${msg.ts}`, name: this.memberName(opened.from), text: chat.text, ts: msg.ts, mine: false })
         return
+      }
       case 'recording':
         if (msg.from) {
           if (msg.on) this.recorder = msg.from
@@ -989,21 +1055,28 @@ export class RoomClient {
         }
         return
       case 'lang': {
-        const prefs = announcement(await this.openSealed(msg))
-        if (msg.from && prefs) {
-          this.memberLangs.set(msg.from, prefs)
-          this.emit('lang', { from: msg.from, prefs })
-        }
+        const what = 'a language announcement'
+        const opened = await this.openSealedJSON(msg, what)
+        if (!opened) return
+
+        const { from } = opened
+        const prefs = this.read(what, from, parseAnnouncement(opened.value))
+        if (!prefs) return
+        this.memberLangs.set(from, prefs)
+        this.elect()
+        this.emit('lang', { from, prefs })
         return
       }
       case 'caption': {
-        const from = msg.from
-        const sealed = await this.openSealed(msg)
-        if (!from || sealed === undefined) return
+        const what = 'a caption or translation'
+        const opened = await this.openSealedJSON(msg, what)
+        if (!opened) return
 
-        const caption = parseRoomMessage(sealed, from, (member) => member === this.selfId || this.members.has(member))
-        if ('refused' in caption) this.reportRefused(caption.refused, from)
-        else this.emit('caption', { from, caption })
+        const { from } = opened
+        const caption = this.read(what, from, parseRoomMessage(opened.value, from, this.room))
+        if (!caption) return
+        if (caption.k === 'caption') this.election.hear(caption.speaker, caption.segId)
+        this.emit('caption', { from, caption })
         return
       }
       case 'translating':
@@ -1017,9 +1090,13 @@ export class RoomClient {
         if (action === 'mute' || action === 'cam' || action === 'screen') {
           this.emit('forced', { action })
         } else if (action === 'lang') {
-          const sealed = await this.openSealed(msg)
-          const lang = (sealed as { lang?: unknown } | undefined)?.lang
-          if (msg.from && typeof lang === 'string') this.emit('lang-set', { from: msg.from, lang })
+          const what = 'a language set by a host'
+          const opened = await this.openSealedJSON(msg, what)
+          if (!opened) return
+
+          const { from } = opened
+          const set = this.read(what, from, parseLanguageSet(opened.value))
+          if (set) this.emit('lang-set', { from, lang: set.lang })
         }
         return
       }
@@ -1047,9 +1124,10 @@ export class RoomClient {
       this.quality.delete(key)
       this.inbound.delete(key)
     }
-    this.memberLangs.delete(id)
+    if (this.memberLangs.delete(id)) this.elect()
     const known = this.members.delete(id)
     this.closeDown(id)
+    if (known) this.emit('member-gone', { id })
     return known
   }
 
@@ -1058,7 +1136,7 @@ export class RoomClient {
     this.downs.set(sourceId, down)
     this.startQualityWatch()
     down.pc.ontrack = (ev) => {
-      this.installReceiverTransform(ev.receiver)
+      this.installTransform(ev.receiver)
       const mid = ev.transceiver.mid
       const kind = mid === null ? undefined : down.kinds.get(mid)
       if (mid === null || kind === undefined || isAudioKind(kind) !== (ev.track.kind === 'audio')) {
@@ -1087,7 +1165,7 @@ export class RoomClient {
     if (!down) return
 
     this.downs.delete(sourceId)
-    down.pc.close()
+    this.closePC(down.pc)
     this.removeTracks(down, [...down.tracks])
   }
 
@@ -1109,7 +1187,7 @@ export class RoomClient {
     await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp ?? '' })
     this.flushIce(`down-${sourceId}`, pc)
 
-    for (const receiver of pc.getReceivers()) this.installReceiverTransform(receiver)
+    for (const receiver of pc.getReceivers()) this.installTransform(receiver)
 
     const answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
@@ -1149,38 +1227,43 @@ export class RoomClient {
     }
   }
 
-  private async handleChat(msg: ReceivedMessage): Promise<void> {
-    if (!msg.iv || !msg.ct) return
+  /** What a parser read, or nothing once the reason it refused is logged. */
+  private read<T extends object>(what: string, from: string, parsed: T | Refused): T | undefined {
+    if (!('refused' in parsed)) return parsed
+    this.refusals.report(what, from, parsed.refused)
+    return undefined
+  }
 
+  /**
+   * The text a member of the call sealed in msg, and who that member is.
+   * Nothing, with the reason logged, when msg names no member of the
+   * call or cannot be opened with the room's key.
+   */
+  private async openSealed(msg: ReceivedMessage, what: string): Promise<{ from: string; text: string } | undefined> {
+    const { from, iv, ct } = msg
+    if (!from || !this.members.has(from)) {
+      this.refusals.report(what, from || 'nobody', 'its sender is not in the call')
+      return undefined
+    }
+    if (!iv || !ct) {
+      this.refusals.report(what, from, 'it carries nothing sealed')
+      return undefined
+    }
     try {
-      const text = await decryptChat(this.opts.chatKey, { iv: msg.iv, ct: msg.ct })
-      this.emit('chat', {
-        id: `${msg.from ?? 'unknown'}:${msg.ts ?? 0}`,
-        name: this.memberName(msg.from ?? ''),
-        text,
-        ts: msg.ts ?? Date.now(),
-        mine: msg.from === this.selfId,
-      })
+      return { from, text: await decryptChat(this.opts.chatKey, { iv, ct }) }
     } catch (err) {
-      console.warn('chat: undecryptable message', err)
+      this.refusals.report(what, from, 'it cannot be opened with the room key', err)
+      return undefined
     }
   }
 
-  // A member whose build or intent sends one line that is refused sends
-  // many, so each reason is logged once, with the first member it came from.
-  private reportRefused(reason: string, from: string): void {
-    if (this.refusedLines.has(reason)) return
-    this.refusedLines.add(reason)
-    console.warn(`sfu: dropping a caption or translation from ${from}, and every later one like it: ${reason}`)
-  }
-
-  /** Decrypts a sealed JSON message; undefined when it cannot be opened. */
-  private async openSealed(msg: ReceivedMessage): Promise<unknown> {
-    if (!msg.iv || !msg.ct) return undefined
+  private async openSealedJSON(msg: ReceivedMessage, what: string): Promise<{ from: string; value: unknown } | undefined> {
+    const opened = await this.openSealed(msg, what)
+    if (!opened) return undefined
     try {
-      return JSON.parse(await decryptChat(this.opts.chatKey, { iv: msg.iv, ct: msg.ct })) as unknown
+      return { from: opened.from, value: JSON.parse(opened.text) as unknown }
     } catch (err) {
-      console.warn('undecryptable message:', msg.type, err)
+      this.refusals.report(what, opened.from, 'it is not JSON', err)
       return undefined
     }
   }
@@ -1189,8 +1272,10 @@ export class RoomClient {
   // counters plus WebRTC transport statistics for every peer connection.
   // Built to be read from the debug overlay on a phone screen.
   async debugStats(): Promise<string> {
+    const { transforms = [], ...totals } = this.e2eeStats ?? {}
     const lines: string[] = [
-      `e2ee ${this.e2eeStats ? JSON.stringify(this.e2eeStats) : 'no stats yet'}`,
+      `e2ee ${this.e2eeStats ? JSON.stringify(totals) : 'no stats yet'}`,
+      `e2ee transforms ${transforms.map((t) => `${t.purpose}#${t.id} ${t.written}/${t.read}`).join(' ') || '-'}`,
       `self ${this.selfId || '-'}`,
     ]
 

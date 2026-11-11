@@ -21,6 +21,7 @@ import (
 
 	"github.com/stubbe/conference/internal/api"
 	"github.com/stubbe/conference/internal/config"
+	"github.com/stubbe/conference/internal/recvbuf"
 	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
 	"github.com/stubbe/conference/internal/speech/service"
@@ -69,7 +70,9 @@ func run() error {
 
 	defer func() { _ = database.Close() }()
 
-	engine, closeEngine, err := sfu.NewEngine(cfg.ICEUDPPort, cfg.ExternalIPs)
+	sockets := recvbuf.NewSizer()
+
+	engine, closeEngine, err := sfu.NewEngine(cfg.ICEUDPPort, cfg.ExternalIPs, sockets)
 	if err != nil {
 		return fmt.Errorf("sfu engine: %w", err)
 	}
@@ -88,7 +91,7 @@ func run() error {
 
 	hub := newHub(cfg, engine, creds, speech)
 
-	turnServer, err := relay.Start(context.Background(), creds, engine.MediaAddrs(), hub.MemberLive)
+	turnServer, err := relay.Start(context.Background(), creds, engine.MediaAddrs(), sockets, hub.MemberLive)
 	if err != nil {
 		return fmt.Errorf("relay: %w", err)
 	}
@@ -97,7 +100,7 @@ func run() error {
 
 	go reapLoop(database, hub, cfg.RoomTTL)
 
-	mux, err := buildMux(database, hub, cfg, speech)
+	mux, err := buildMux(database, hub, cfg, speech, sockets)
 	if err != nil {
 		return err
 	}
@@ -168,10 +171,16 @@ func newHub(cfg *config.Config, engine *sfu.Engine, creds *relay.Credentials, tr
 }
 
 // buildMux assembles the API, signaling, speech, and embedded UI routes.
-func buildMux(database *store.Store, hub *sfu.Hub, cfg *config.Config, translation liveTranslation) (*http.ServeMux, error) {
+func buildMux(
+	database *store.Store,
+	hub *sfu.Hub,
+	cfg *config.Config,
+	translation liveTranslation,
+	sockets *recvbuf.Sizer,
+) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
-	api.New(database, hub, cfg, translation.status).Routes(mux)
+	api.New(database, hub, cfg, translation.status, sockets).Routes(mux)
 
 	mux.Handle("GET "+signalingPath, &ws.Handler{
 		Hub:            hub,

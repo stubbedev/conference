@@ -36,7 +36,8 @@ export function Stage({
     const member = isLocal ? selfMember : members.find((m) => m.id === tile.sourceId)
     const playsAudio = !isLocal && !isScreen
     const speakerId = isLocal ? selfId : tile.sourceId
-    const caption = isScreen ? undefined : captions[speakerId]?.text
+    const caption = isScreen ? undefined : captions[speakerId]
+    const translator = caption?.translatedBy
     const heard = heardThrough(tile, translations)
     return (
       <VideoTile
@@ -52,8 +53,9 @@ export function Stage({
         sharing={isScreen}
         sinkId={playsAudio ? speaker : undefined}
         volume={playsAudio ? (heard.through === 'own' ? volume : 0) : undefined}
-        caption={caption}
-        aiVoice={heard.through === 'translation' ? (translations.ownVoices?.[tile.sourceId] ? 'cloned' : 'stock') : undefined}
+        caption={caption?.text}
+        captionBy={translator ? (members.find((m) => m.id === translator)?.name ?? 'another member') : undefined}
+        aiVoice={heard.through === 'translation' ? (translations.announced.get(tile.sourceId)?.ownVoice ? 'cloned' : 'stock') : undefined}
         pinned={pinnedKey === tile.key}
         onTogglePin={allTiles.length > 1 ? togglePin : undefined}
         compact={compact}

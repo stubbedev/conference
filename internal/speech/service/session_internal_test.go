@@ -33,6 +33,24 @@ func (stubEngines) speak(context.Context, string, language, voiceChoice, *refere
 	return speech{pcm: []byte{0, 0}, rate: vad.Rate, converting: 0}, nil
 }
 
+// voicelessEngines transcribe and translate like their stubEngines and
+// fail to speak.
+type voicelessEngines struct {
+	stubEngines
+}
+
+func (voicelessEngines) speak(context.Context, string, language, voiceChoice, *reference) (speech, error) {
+	return speech{pcm: nil, rate: 0, converting: 0}, errEngineDown
+}
+
+func noticed(code, lang string) func(any) bool {
+	return func(message any) bool {
+		got, ok := message.(wire.Notice)
+
+		return ok && got.Type == wire.TypeNotice && got.Code == code && got.Lang == lang
+	}
+}
+
 type outbox struct {
 	mu       sync.Mutex
 	messages []any
@@ -208,12 +226,8 @@ func TestFailedTranslationSendsTheOriginal(t *testing.T) {
 	cancel()
 	opened.close()
 
-	noticed := false
-
 	for _, message := range out.snapshot() {
 		switch got := message.(type) {
-		case wire.Notice:
-			noticed = got.Code == wire.NoticeTranslateFailed
 		case wire.Caption:
 			if got.Lang == "en" && got.Text != "said in de" {
 				t.Fatalf("English caption %q, want the untranslated original", got.Text)
@@ -223,8 +237,37 @@ func TestFailedTranslationSendsTheOriginal(t *testing.T) {
 		}
 	}
 
-	if !noticed {
-		t.Fatalf("no translation-failed notice among %+v", out.snapshot())
+	if !slices.ContainsFunc(out.snapshot(), noticed(wire.NoticeTranslateFailed, "en")) {
+		t.Fatalf("no translation-failed notice for English among %+v", out.snapshot())
+	}
+}
+
+func TestSentenceWithoutVoiceIsCaptionedAndSaidToHaveNone(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	opened, out := openSession(ctx, t, map[string]string{envEngines: enginesFake, envInterim: "0"},
+		voicelessEngines{stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations}})
+
+	speakUntilSpeaking(ctx, t, opened, "en")
+
+	err := opened.end(ctx, anna)
+	if err != nil {
+		t.Fatalf("end: %v", err)
+	}
+
+	out.waitFor(t, noticed(wire.NoticeVoiceFailed, "de"))
+	cancel()
+	opened.close()
+
+	if !slices.ContainsFunc(out.snapshot(), finalCaption("de")) {
+		t.Fatalf("no German caption for the sentence that could not be spoken among %+v", out.snapshot())
+	}
+
+	for _, message := range out.snapshot() {
+		if _, voiced := message.(voiceFrame); voiced {
+			t.Fatal("a voice was sent although the voice engine failed")
+		}
 	}
 }
 

@@ -140,11 +140,21 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
   const { product } = await cdp.send('Browser.getVersion')
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' })
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
+  const requests = new Map()
+  const networkFailures = []
+  cdp.on('Network.requestWillBeSent', ({ requestId, request }) => requests.set(requestId, request.url))
+  cdp.on('Network.loadingFailed', ({ requestId, errorText }) => networkFailures.push(`${requests.get(requestId) ?? requestId}: ${errorText}`))
+  await cdp.send('Network.enable', {}, sessionId)
   return {
     proc,
     cdp,
     sessionId,
     browser: product,
+    // Every request of the page that failed below HTTP, with the browser's
+    // reason. Chrome only: subscribing to Firefox's network.fetchError makes
+    // its browsingContext.navigate fail with "A new navigation interrupted
+    // an unfinished navigation".
+    networkFailures: () => [...networkFailures],
     async addInitScript(source) {
       await cdp.send('Page.enable', {}, sessionId)
       await cdp.send('Runtime.enable', {}, sessionId)
@@ -372,8 +382,8 @@ export async function launchFirefox(firefox, idx, dir, { headless = true } = {})
 }
 
 // Injected before the app loads: records peer connections, the E2EE
-// worker's stats and the audio worklets built, so the probe can read
-// them from page context.
+// worker's stats, the audio worklets built and the layers the page asks
+// the SFU for, so the probe can read them from page context.
 export const hook = (relayTransport) => `
 (() => {
   window.__pcs = [];
@@ -423,10 +433,19 @@ export const hook = (relayTransport) => `
   };
   window.__sockets = [];
   window.__welcomes = 0;
+  window.__layerRequests = [];
   const OrigWS = window.WebSocket;
   window.WebSocket = function (...a) {
     const ws = new OrigWS(...a);
     window.__sockets.push(ws);
+    const send = ws.send.bind(ws);
+    ws.send = (data) => {
+      if (typeof data === 'string' && data.includes('"type":"layer"')) {
+        const { kind, layer } = JSON.parse(data);
+        window.__layerRequests.push({ kind, layer, at: performance.now() });
+      }
+      return send(data);
+    };
     ws.addEventListener('message', (ev) => {
       if (typeof ev.data !== 'string') return;
       try {
@@ -532,12 +551,14 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
     }
     await sleep(250)
   }
-  throw new Error(`"Join call" never became clickable on ${url}: ${JSON.stringify(await evalJs(browser, joinScreenState))}`)
+  const networkFailures = browser.networkFailures ? browser.networkFailures() : 'not recorded for this browser'
+  const state = { ...(await evalJs(browser, joinScreenState)), networkFailures }
+  throw new Error(`"Join call" never became clickable on ${url}: ${JSON.stringify(state)}`)
 }
 
 // What the join screen shows when it cannot be passed: the preview's
 // tracks, the buttons and whether they are disabled, the page's text and
-// the errors it reported.
+// the errors it reported; joinRoom adds the requests that failed.
 const joinScreenState = `({
   location: location.href,
   preview: [...document.querySelectorAll('video')].map((v) => (v.srcObject ? v.srcObject.getVideoTracks().map((t) => t.readyState) : null)),
@@ -608,10 +629,14 @@ export async function checkCall(failures, browsers, labels, { seconds, wantPaths
     const b = second[i]
     const label = labels[i]
     const before = failures.length
+    // The line carries the worker's totals; how many transforms it pipes
+    // stands in for the counters of each. The monitor runs this against
+    // the deployed release, which may predate those counters.
+    const e2ee = a.e2ee && { ...a.e2ee, transforms: a.e2ee.transforms ? a.e2ee.transforms.length : 'not reported by this release' }
     console.log(
       `${label}: videos=${a.videos.length} frames=[${a.videos.map((v) => v.frames).join(',')}]→[${b.videos.map((v) => v.frames).join(',')}] ` +
         `audioPkts=${a.audioPackets}→${b.audioPackets} videoDecoded=${a.videoDecoded}→${b.videoDecoded} ` +
-        `paths=${a.pcs.map((pc) => pc.path).join(',')} e2ee=${JSON.stringify(a.e2ee)}`,
+        `paths=${a.pcs.map((pc) => pc.path).join(',')} e2ee=${JSON.stringify(e2ee)}`,
     )
     check(failures, label, a.videos.length === 2, `expected 2 video elements (self + one remote), found ${a.videos.length}`)
     check(failures, label, a.e2ee !== null, 'no E2EE worker stats received')

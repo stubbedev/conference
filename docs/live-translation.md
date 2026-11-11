@@ -469,17 +469,32 @@ machine.
   six languages between them, one member with the language model serves
   a room of phones on its own, and a listener whose browser cannot
   translate at all still gets every sentence; a member with the language
-  model is never passed over for one without it. While a member's
-  models load the browsers can briefly disagree on who translates what,
-  so a translation into a language is taken from whichever member sends
-  it first (the relay checks that it comes from the member it names). A
+  model is never passed over for one without it. A translation of what
+  a member said is taken from that member or from the translator the
+  room holds for its language, and from nobody else: what is shown under
+  a member's name is not for any member to write. A caption another
+  member translated says so, "Translated by" and their name. While an
+  announcement is on its way the browsers can briefly disagree on who
+  the translator is, so a translation is also taken from a member who
+  was the translator at some time since its sentence was first heard. A
   browser that has had a sentence, interim or final, for 5 s without any
   translation of it takes that sentence over and translates every
   version of it itself as well as it can, and one that cannot shows it
   as it was said; a translator that goes quiet before a sentence's final
-  version is covered the same way. A sentence held for its full stop is
-  also let go once it reaches 160 characters, so someone who never pauses
-  still gets their sentences finished, translated and spoken.
+  version is covered the same way, and one that stops translating, is
+  replaced or leaves is not waited for at all. A sentence held for its
+  full stop is also let go once it reaches 160 characters, so someone
+  who never pauses still gets their sentences finished, translated and
+  spoken.
+- **What a member provides is announced.** With its language, each
+  browser tells the room whether its speech is captioned right now, how
+  well it translates, and which languages its speech is published in as
+  a voice, and takes each of these back the moment it stops. A listener
+  hears a translated voice in place of a speaker's own only while the
+  speaker stands behind it that way, so a transcription that breaks, a
+  speech connection that drops or a sentence that gets a caption and no
+  voice leaves the speaker's own voice to be heard, from the moment it
+  is known until a sentence is spoken again.
 - **Keeping up.** A browser loads its models when live translation
   starts, not when the first sentence arrives, asks for persistent
   storage, refuses with the size when the models will not fit, and shows
@@ -519,8 +534,14 @@ connection's replacement takes over at once and a leaked token cannot
 open more streams, each spending on paid engines.
 
 A stream translates into the languages its `hello` names, and into
-nothing before it. If the browser goes away, the stream ends at once,
-and any sentence still being translated for it is dropped.
+nothing before it. A sentence that cannot be translated into a language,
+or cannot be spoken in it, is still captioned, with a notice that names
+the language, so the browser can tell its listeners that the sentence
+has no voice there. If the browser goes away, the stream ends at once,
+and any sentence still being translated for it is dropped. A browser
+whose stream is turned away, or drops within half a minute of opening,
+three times in a row gives up and tells its member; every attempt has
+ten seconds to be given its token and ten to open.
 
 A translation of 80 characters or more is voiced in pieces, split where
 a speaker would pause (punctuation followed by a space, at least 30
@@ -567,7 +588,8 @@ A language without `voices` uses `VOICE_NAME`.
 - the engines' requests against a stand-in API, the non-speech filter,
   and passwords kept out of errors;
 - a session's edge cases: a speaker switching language, `end`, a failed
-  translation (the listener gets the original and a notice), an interim
+  translation (the listener gets the original and a notice), a failed
+  voice (a caption and a notice), an interim
   for a sentence that has ended, a full queue holding back audio;
 - whole streams: a German and an English member at once through the real
   voice detection and protocol with stand-in engines (`SPEECH_ENGINES=fake`:

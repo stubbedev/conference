@@ -220,7 +220,7 @@ func (s *session) finishSample(ctx context.Context, speakerID, code string) erro
 
 	lang, ok := s.settings.languages.get(code)
 	if !ok || len(audio) < ownVoicePrepared {
-		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceRejected, Seconds: seconds(len(audio))})
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceRejected, Lang: "", Seconds: seconds(len(audio))})
 
 		return nil
 	}
@@ -237,7 +237,7 @@ func (s *session) prepare(ctx context.Context, current *speaker, audio []int16, 
 			logFailure(ctx, "own voice sample", err)
 		}
 
-		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceRejected, Seconds: seconds(len(audio))})
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceRejected, Lang: "", Seconds: seconds(len(audio))})
 
 		return
 	}
@@ -251,7 +251,7 @@ func (s *session) prepare(ctx context.Context, current *speaker, audio []int16, 
 
 	prepared := &reference{wav: encoded, text: text, stock: closestStock(audio)}
 	current.prepared.Store(prepared)
-	s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceReady, Seconds: seconds(len(audio))})
+	s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeOwnVoiceReady, Lang: "", Seconds: seconds(len(audio))})
 
 	if warmer, ok := s.engines.(voiceWarmer); ok {
 		err = warmer.warmVoice(ctx, prepared)
@@ -407,7 +407,7 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 	translated, err := s.engines.translate(ctx, text, job.lang, target, earlier)
 	if err != nil {
 		logFailure(ctx, "translation, sent the original", err)
-		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeTranslateFailed, Seconds: 0})
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeTranslateFailed, Lang: target.Code, Seconds: 0})
 		s.caption(ctx, current, job.seg, job.lang, target, text, true)
 
 		return
@@ -435,13 +435,26 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 		voicing.Go(func() { voiced[i] <- s.voice(ctx, current, job, target, piece, i, translating) })
 	}
 
+	failed := false
+
 	for _, frame := range voiced {
-		if sent := <-frame; sent != nil {
-			s.emit(ctx, *sent)
+		sent := <-frame
+		if sent == nil {
+			failed = true
+
+			continue
 		}
+
+		s.emit(ctx, *sent)
 	}
 
 	voicing.Wait()
+
+	// The speaker's browser publishes the voices: tell it this sentence
+	// lacks some of its voice, so its listeners aren't left with silence.
+	if failed {
+		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeVoiceFailed, Lang: target.Code, Seconds: 0})
+	}
 }
 
 // voice speaks one piece of a translation, in the speaker's own voice

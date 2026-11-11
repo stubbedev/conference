@@ -53,6 +53,8 @@ linters:
             - github.com/stubbe/conference/web
             - github.com/stubbe/conference/internal/api
             - github.com/stubbe/conference/internal/config
+            - github.com/stubbe/conference/internal/recvbuf
+            - github.com/stubbe/conference/internal/recvbuf/recvbuftest
             - github.com/stubbe/conference/internal/relay
             - github.com/stubbe/conference/internal/roomcrypt
             - github.com/stubbe/conference/internal/sfu

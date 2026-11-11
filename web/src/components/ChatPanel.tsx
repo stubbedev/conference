@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { ArrowDown, Lock, SendHorizonal } from 'lucide-react'
 
+import { CHAT_TEXT_MAX } from '@/lib/sealed'
 import type { ChatMessage } from '@/lib/sfu'
 import { Hint } from '@/components/Hint'
 import { Button } from '@/components/ui/button'
@@ -108,6 +109,7 @@ export const ChatPanel = memo(function ChatPanel({ messages, onSend }: ChatPanel
           onChange={(event) => setText(event.target.value)}
           placeholder="Message…"
           aria-label="Message everyone"
+          maxLength={CHAT_TEXT_MAX}
           autoComplete="off"
         />
         {/* A disabled button swallows pointer events and with them its

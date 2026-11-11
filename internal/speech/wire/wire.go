@@ -14,7 +14,7 @@ import (
 
 const headerLength = 2
 
-// Message types and the notice code a client acts on.
+// Message types and the notice codes a client acts on.
 const (
 	TypeHello = "hello"
 	TypeEnd   = "end"
@@ -33,6 +33,7 @@ const (
 	// NoticeOwnVoiceRejected: a recorded voice sample was too short or
 	// held no speech; the stock voice speaks.
 	NoticeOwnVoiceRejected = "own-voice-rejected"
+	NoticeVoiceFailed      = "voice-failed"
 )
 
 var (
@@ -86,11 +87,14 @@ type Caption struct {
 	Final      bool   `json:"final"`
 }
 
-// Notice tells the client about its stream without ending it: a
-// sentence sent untranslated, or whether its recorded voice is in use.
+// Notice tells the client about its stream without ending it: that a
+// sentence went out without a voice in Lang, because it could not be
+// translated or could not be spoken, or whether its recorded voice is in
+// use. The stream goes on.
 type Notice struct {
 	Type    string  `json:"type"`
 	Code    string  `json:"code"`
+	Lang    string  `json:"lang"`
 	Seconds float64 `json:"seconds,omitempty"`
 }
 

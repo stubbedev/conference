@@ -4,6 +4,11 @@
 # the WebRTC ICE mux and 3478/udp+tcp the built-in TURN relay; both must
 # stay reachable. Traefik terminates TLS for TURN_TLS_HOST on 443 and
 # forwards it to the relay, for networks that only allow HTTPS out.
+#
+# The server asks for a 4 MiB receive buffer on those two UDP ports. The
+# host grants it with `sysctl -w net.core.rmem_max=4194304` (see the
+# README); the kernel keeps one limit for every network namespace, so a
+# `sysctls:` entry here is refused.
 services:
   traefik:
     image: traefik:v3

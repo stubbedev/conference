@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/stubbe/conference/internal/api"
 	"github.com/stubbe/conference/internal/config"
+	"github.com/stubbe/conference/internal/recvbuf"
 	"github.com/stubbe/conference/internal/relay"
 	"github.com/stubbe/conference/internal/sfu"
 	"github.com/stubbe/conference/internal/speech/service"
@@ -65,7 +67,9 @@ func newTranslatingAPI(t *testing.T, cfg *config.Config, translation service.Sta
 
 	t.Cleanup(func() { _ = storage.Close() })
 
-	engine, closeEngine, err := sfu.NewEngine(0, nil)
+	sockets := recvbuf.NewSizer()
+
+	engine, closeEngine, err := sfu.NewEngine(0, nil, sockets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +89,7 @@ func newTranslatingAPI(t *testing.T, cfg *config.Config, translation service.Sta
 		Translate:  false,
 	})
 
-	return api.New(storage, hub, cfg, translation)
+	return api.New(storage, hub, cfg, translation, sockets)
 }
 
 func routes(server *api.Server) http.Handler {
@@ -313,5 +317,52 @@ func TestCreateRoomRateLimitSeesThroughTrustedProxy(t *testing.T) {
 
 	if code := createFrom(handler, "203.0.113.50:4000", untrusted); code != http.StatusTooManyRequests {
 		t.Fatalf("untrusted peer escaped the limit via X-Forwarded-For: got %d", code)
+	}
+}
+
+// TestHealthReportsTheMediaReceiveBuffer: an operator must be able to see
+// that the kernel holds the media sockets' receive buffer down without
+// reading the log, so the health endpoint says what the sockets asked for
+// and the least one of them got.
+func TestHealthReportsTheMediaReceiveBuffer(t *testing.T) {
+	t.Parallel()
+
+	var listenConfig net.ListenConfig
+
+	socket, err := listenConfig.ListenPacket(t.Context(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { _ = socket.Close() })
+
+	sockets := recvbuf.NewSizer()
+
+	err = sockets.Size(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, routes(api.New(nil, nil, testConfig(), speechStatus(t, nil), sockets)), http.MethodGet, "/api/healthz", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var health struct {
+		OK            bool           `json:"ok"`
+		ReceiveBuffer recvbuf.Status `json:"receiveBuffer"`
+	}
+
+	err = json.Unmarshal(rec.Body.Bytes(), &health)
+	if err != nil {
+		t.Fatalf("decode %s: %v", rec.Body, err)
+	}
+
+	if !health.OK || health.ReceiveBuffer != sockets.Status() {
+		t.Fatalf("health %s, want ok and the receive buffer %+v", rec.Body, sockets.Status())
+	}
+
+	if health.ReceiveBuffer.Requested != recvbuf.Requested || health.ReceiveBuffer.Granted <= 0 {
+		t.Fatalf("receive buffer %+v, want %d requested and what the kernel granted of it", health.ReceiveBuffer, recvbuf.Requested)
 	}
 }

@@ -4,13 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "vendor": "node scripts/vendor-vision.mjs && node scripts/vendor-speech.mjs",
+    "dev": "npm run vendor && vite",
+    "build": "npm run vendor && tsc -b && vite build",
     "lint": "oxlint --deny-warnings",
     "test": "node --test \"src/**/*.test.ts\" \"scripts/**/*.test.mjs\"",
-    "preview": "vite preview",
-    "prebuild": "node scripts/vendor-vision.mjs && node scripts/vendor-speech.mjs",
-    "predev": "node scripts/vendor-vision.mjs && node scripts/vendor-speech.mjs"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@diffusionstudio/piper-wasm": "^1.0.0",

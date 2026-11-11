@@ -4,21 +4,25 @@
 
 import type { RoomClient } from '@/lib/sfu'
 import type { OwnVoiceSample } from '@/lib/translate/own-voice'
-import type { CaptionLine, LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
+import type { LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
 
 export interface TranslatorEvents {
-  /** A caption for this member, as this member gets it. */
-  onCaption: (caption: CaptionLine) => void
+  /**
+   * A line for this member to read, as this member gets it: a caption, or
+   * the translation another member made of one.
+   */
+  onCaption: (line: RoomMessage) => void
   /** Transcription or translation failed; this member's speech is not translated. */
   onFailure: (reason: string) => void
   /** The bridge's state and anything that keeps speech from being translated. */
   onStatus?: (status: TranslatorStatus) => void
   /**
-   * A translated voice this member plays on its own machine, which no
-   * other member needs: the browser's own engines make one per speaker,
-   * in this member's language.
+   * The translated voice this member's own engines give a speaker, in
+   * this member's language and played on this machine only. It is null
+   * when the speaker's last sentence got no voice here: until the next
+   * one has, the speaker's own voice is what there is to hear.
    */
-  onStream?: (speaker: string, track: MediaStreamTrack) => void
+  onVoice?: (speaker: string, track: MediaStreamTrack | null) => void
 }
 
 export interface Translator {

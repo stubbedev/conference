@@ -98,6 +98,8 @@ func joinTestPeer(t *testing.T, hub *sfu.Hub, engine *sfu.Engine, req sfu.JoinRe
 		t.Fatalf("%s join: %v", req.MemberName, err)
 	}
 
+	t.Cleanup(peer.member.Leave)
+
 	go peer.pump()
 
 	return peer
@@ -1198,16 +1200,24 @@ func newSingleLayerCall(t *testing.T) singleLayerCall {
 	}
 }
 
-// report sends one receiver report, the viewer's account of what it lost.
+// report sends the viewer's account of what it lost, as a receiver whose
+// count starts over: one report at the start of the count, and one for
+// the packets since, fractionLost of every 256 of them lost. The hub
+// counts a viewer's loss between two reports, and the test peer's own
+// reports of the stream arrive in between at their own pace.
 func (c singleLayerCall) report(t *testing.T, fractionLost uint8) {
 	t.Helper()
 
-	packet := &rtcp.ReceiverReport{
-		SSRC:    1,
-		Reports: []rtcp.ReceptionReport{{SSRC: c.ssrc, FractionLost: fractionLost}},
+	const reportedPackets = 256
+
+	counted := func(packets, lost uint32) *rtcp.ReceiverReport {
+		return &rtcp.ReceiverReport{
+			SSRC:    1,
+			Reports: []rtcp.ReceptionReport{{SSRC: c.ssrc, TotalLost: lost, LastSequenceNumber: packets}},
+		}
 	}
 
-	err := c.viewer.localPC(c.down).WriteRTCP([]rtcp.Packet{packet})
+	err := c.viewer.localPC(c.down).WriteRTCP([]rtcp.Packet{counted(0, 0), counted(reportedPackets, uint32(fractionLost))})
 	if err != nil {
 		t.Fatalf("viewer receiver report: %v", err)
 	}

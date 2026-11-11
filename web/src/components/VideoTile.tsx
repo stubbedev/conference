@@ -42,6 +42,8 @@ interface VideoTileProps {
   caption?: string
   /** A translated voice is playing for this member: a stock one or their own, cloned one. */
   aiVoice?: 'stock' | 'cloned'
+  /** Who put the subtitle into the viewer's language, when another member than the speaker did. */
+  captionBy?: string
 }
 
 // Mobile browsers suspend decoding in ways that leave elements paused
@@ -88,6 +90,7 @@ export const VideoTile = memo(function VideoTile({
   onAspectRatio,
   caption,
   aiVoice,
+  captionBy,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -246,14 +249,15 @@ export const VideoTile = memo(function VideoTile({
         {sharing && <span className="shrink-0 text-white/60">screen</span>}
       </div>
       {caption && (
-        <p
+        <div
           className={cn(
-            'hud-caption pointer-events-none absolute left-1/2 line-clamp-3 w-max max-w-[90%] -translate-x-1/2 rounded-lg bg-black/75 px-3 py-1.5 text-center font-medium text-white',
+            'hud-caption pointer-events-none absolute left-1/2 w-max max-w-[90%] -translate-x-1/2 rounded-lg bg-black/75 px-3 py-1.5 text-center font-medium text-white',
             compact ? 'bottom-8 text-xs' : 'bottom-10 text-sm sm:text-base',
           )}
         >
-          {caption}
-        </p>
+          <p className="line-clamp-3">{caption}</p>
+          {captionBy && <p className="truncate text-[0.7em] font-normal opacity-70">Translated by {captionBy}</p>}
+        </div>
       )}
       {debugOn && debugStats && (
         <span className="absolute right-2 bottom-9 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">

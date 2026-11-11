@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
+import { LAYER_RIDS as CAMERA, SCREEN_LAYER_RIDS as SCREEN } from './encodings.ts'
 import { countsSince, lowerLayer, newQualityState, nextQuality, preferredLayer } from './quality.ts'
 
 const clean = { droppedFrames: 0, decodedFrames: 60, lostPackets: 0, receivedPackets: 400 }
@@ -13,49 +14,63 @@ test('a viewer asks for the layer its layout wants', () => {
 })
 
 test('dropped frames lower the ceiling at once', () => {
-  const state = nextQuality(newQualityState(), 'h', stalled)
+  const state = nextQuality(newQualityState(), 'h', stalled, CAMERA)
   assert.equal(state.ceiling, 'm')
 })
 
 test('lost packets lower it too', () => {
-  assert.equal(nextQuality(newQualityState(), 'h', lossy).ceiling, 'm')
+  assert.equal(nextQuality(newQualityState(), 'h', lossy, CAMERA).ceiling, 'm')
 })
 
 test('trouble never lifts the ceiling above the layout', () => {
-  const state = nextQuality(newQualityState(), 'l', stalled)
+  const state = nextQuality(newQualityState(), 'l', stalled, CAMERA)
   assert.equal(state.ceiling, 'l')
 })
 
 test('a clean stream earns its layer back after a run of samples', () => {
   let state = newQualityState()
-  state = nextQuality(state, 'h', stalled)
-  state = nextQuality(state, 'h', stalled)
+  state = nextQuality(state, 'h', stalled, CAMERA)
+  state = nextQuality(state, 'h', stalled, CAMERA)
 
   assert.equal(state.ceiling, 'l')
 
-  state = nextQuality(state, 'h', clean)
-  state = nextQuality(state, 'h', clean)
+  state = nextQuality(state, 'h', clean, CAMERA)
+  state = nextQuality(state, 'h', clean, CAMERA)
   assert.equal(state.ceiling, 'l', 'the ceiling rose before the samples were clean')
 
-  state = nextQuality(state, 'h', clean)
+  state = nextQuality(state, 'h', clean, CAMERA)
   assert.equal(state.ceiling, 'm')
 
-  state = nextQuality(state, 'h', clean)
-  state = nextQuality(state, 'h', clean)
-  state = nextQuality(state, 'h', clean)
+  state = nextQuality(state, 'h', clean, CAMERA)
+  state = nextQuality(state, 'h', clean, CAMERA)
+  state = nextQuality(state, 'h', clean, CAMERA)
+  assert.equal(state.ceiling, 'h')
+})
+
+test('a shared screen steps straight between its two encodings', () => {
+  let state = nextQuality(newQualityState(), 'h', stalled, SCREEN)
+  assert.equal(state.ceiling, 'l')
+
+  state = nextQuality(state, 'h', stalled, SCREEN)
+  assert.equal(state.ceiling, 'l')
+
+  for (let i = 0; i < 2; i += 1) state = nextQuality(state, 'h', clean, SCREEN)
+  assert.equal(state.ceiling, 'l', 'the ceiling rose before the samples were clean')
+
+  state = nextQuality(state, 'h', clean, SCREEN)
   assert.equal(state.ceiling, 'h')
 })
 
 test('recovery stops at what the layout can use', () => {
-  let state = nextQuality(nextQuality(newQualityState(), 'h', stalled), 'h', stalled)
+  let state = nextQuality(nextQuality(newQualityState(), 'h', stalled, CAMERA), 'h', stalled, CAMERA)
   assert.equal(state.ceiling, 'l')
-  for (let i = 0; i < 12; i += 1) state = nextQuality(state, 'm', clean)
+  for (let i = 0; i < 12; i += 1) state = nextQuality(state, 'm', clean, CAMERA)
   assert.equal(state.ceiling, 'm')
 })
 
 test('a tile that shrinks and grows again gets its layer back at once', () => {
   let state = newQualityState()
-  for (let i = 0; i < 6; i += 1) state = nextQuality(state, 'l', clean)
+  for (let i = 0; i < 6; i += 1) state = nextQuality(state, 'l', clean, CAMERA)
   assert.equal(preferredLayer('l', state.ceiling), 'l')
   assert.equal(preferredLayer('h', state.ceiling), 'h')
 })
@@ -70,46 +85,46 @@ test('the lower of two layers wins', () => {
 })
 
 test('a layer lost again right after it came back waits twice as long next time, and a held layer forgives it', () => {
-  let state = nextQuality(newQualityState(), 'h', stalled)
+  let state = nextQuality(newQualityState(), 'h', stalled, CAMERA)
   const samplesToClimb = () => {
     let samples = 0
     while (state.ceiling !== 'h') {
-      state = nextQuality(state, 'h', clean)
+      state = nextQuality(state, 'h', clean, CAMERA)
       samples += 1
     }
     return samples
   }
 
   const first = samplesToClimb()
-  state = nextQuality(state, 'h', stalled)
+  state = nextQuality(state, 'h', stalled, CAMERA)
   const second = samplesToClimb()
-  state = nextQuality(state, 'h', stalled)
+  state = nextQuality(state, 'h', stalled, CAMERA)
   const third = samplesToClimb()
   assert.deepEqual([first, second, third], [3, 6, 12])
 
-  for (let i = 0; i < 30; i += 1) state = nextQuality(state, 'h', clean)
-  state = nextQuality(state, 'h', stalled)
+  for (let i = 0; i < 30; i += 1) state = nextQuality(state, 'h', clean, CAMERA)
+  state = nextQuality(state, 'h', stalled, CAMERA)
   assert.equal(samplesToClimb(), 3)
 })
 
 test('a busy share losing a fraction of a percent of its packets is not in trouble', () => {
   const share = { droppedFrames: 0, decodedFrames: 120, lostPackets: 20, receivedPackets: 2400 }
-  assert.equal(nextQuality(newQualityState(), 'h', share).ceiling, 'h')
+  assert.equal(nextQuality(newQualityState(), 'h', share, CAMERA).ceiling, 'h')
 })
 
 test('a 60 fps stream dropping a few frames is not in trouble', () => {
   const share = { droppedFrames: 3, decodedFrames: 117, lostPackets: 0, receivedPackets: 2400 }
-  assert.equal(nextQuality(newQualityState(), 'h', share).ceiling, 'h')
+  assert.equal(nextQuality(newQualityState(), 'h', share, CAMERA).ceiling, 'h')
 })
 
 test('a large share of a tiny sample is not trouble either', () => {
   const quiet = { droppedFrames: 2, decodedFrames: 2, lostPackets: 10, receivedPackets: 10 }
-  assert.equal(nextQuality(newQualityState(), 'h', quiet).ceiling, 'h')
+  assert.equal(nextQuality(newQualityState(), 'h', quiet, CAMERA).ceiling, 'h')
 })
 
 test('a busy share losing a real share of its packets is in trouble', () => {
   const share = { droppedFrames: 0, decodedFrames: 120, lostPackets: 300, receivedPackets: 2400 }
-  assert.equal(nextQuality(newQualityState(), 'h', share).ceiling, 'm')
+  assert.equal(nextQuality(newQualityState(), 'h', share, CAMERA).ceiling, 'm')
 })
 
 test('a sample is the difference between two readings, never negative', () => {

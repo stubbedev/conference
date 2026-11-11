@@ -48,6 +48,7 @@ import {
   shareMode,
   shareReceiveCounters,
   shareSendCounters,
+  shareState,
   tileByLabel,
   uploads,
 } from './share.mjs'
@@ -556,7 +557,8 @@ async function checkScreenShare(failures, publisher, viewer) {
 
   const sent = await waitFor(publisher, screenSent, (s) => s && ['l', 'h'].every((rid) => s.layers[rid]?.frames > 0), 20000)
   console.log(`screen share sent: ${JSON.stringify(sent.value)}`)
-  check(failures, 'screen share', sent.ok, `the share is not sent as a slow and a fluid encoding: ${JSON.stringify(sent.value)}; console: ${publisherConsole.join(' | ')}`)
+  const unsent = sent.ok ? null : await evalJs(publisher, shareState)
+  check(failures, 'screen share', sent.ok, `the share is not sent as a slow and a fluid encoding: ${JSON.stringify(sent.value)}; its connection: ${JSON.stringify(unsent)}; console up to here: ${publisherConsole.join(' | ')}`)
   const open = await evalJs(publisher, uploads)
   console.log(`screen share uploads: ${JSON.stringify(open)}`)
   check(failures, 'screen share', open.filter((up) => up.share).length === 1, `the share is not published on a connection of its own: ${JSON.stringify(open)}`)

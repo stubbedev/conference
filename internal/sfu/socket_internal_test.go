@@ -9,6 +9,8 @@ import (
 
 	"github.com/pion/transport/v4"
 	"github.com/pion/webrtc/v4"
+
+	"github.com/stubbe/conference/internal/recvbuf"
 )
 
 // countingNet counts the UDP sockets opened on it.
@@ -29,7 +31,7 @@ func (n *countingNet) ListenUDP(network string, local *net.UDPAddr) (transport.U
 func newCountingNet(t *testing.T) *countingNet {
 	t.Helper()
 
-	sockets, err := newMediaNet()
+	sockets, err := newMediaNet(recvbuf.NewSizer())
 	if err != nil {
 		t.Fatal(err)
 	}

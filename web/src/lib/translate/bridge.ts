@@ -12,16 +12,17 @@
 // speaker's own voice comes in: their recording goes to the speech
 // service, which makes the translated voice from it.
 
+import { Refusals } from '@/lib/sealed'
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import { MicCapture } from '@/lib/translate/capture'
 import type { OwnVoiceSample } from '@/lib/translate/own-voice'
-import type { CaptionLine, LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
+import { afterEnd, CONNECT_TIMEOUT_MS, RECONNECT_DELAY_MS, type Ended } from '@/lib/translate/speech-link'
+import { PROVIDES_NOTHING, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
+import { packAudio, parseSpeechMessage, parseVoice } from '@/lib/translate/wire'
 
-const HEADER_BYTES = 2
-const MAX_REFUSED_CONNECTS = 3
-const RECONNECT_DELAY_MS = 2_000
+const SPEECH_SERVICE = 'the speech service'
 // How long start() waits for the token the server sends on its own before asking.
 const TOKEN_GRACE_MS = 1_500
 // A translated voice queued further behind than this is skipped (its
@@ -32,29 +33,6 @@ const MAX_VOICE_LAG_S = 10
 // A recorded voice sample goes out in frames well under the stream's message limit.
 const SAMPLE_FRAME = 8_000
 
-interface VoiceHeader {
-  lang: string
-  rate: number
-}
-
-function pack(header: object, pcm: ArrayBuffer): ArrayBuffer {
-  const json = new TextEncoder().encode(JSON.stringify(header))
-  const frame = new Uint8Array(HEADER_BYTES + json.length + pcm.byteLength)
-  new DataView(frame.buffer).setUint16(0, json.length)
-  frame.set(json, HEADER_BYTES)
-  frame.set(new Uint8Array(pcm), HEADER_BYTES + json.length)
-  return frame.buffer
-}
-
-function unpack(frame: ArrayBuffer): { header: VoiceHeader; pcm: Float32Array } {
-  const size = new DataView(frame).getUint16(0)
-  const header = JSON.parse(new TextDecoder().decode(new Uint8Array(frame, HEADER_BYTES, size))) as VoiceHeader
-  const samples = new Int16Array(frame.slice(HEADER_BYTES + size))
-  const pcm = new Float32Array(samples.length)
-  for (let i = 0; i < samples.length; i++) pcm[i] = samples[i] / 0x8000
-  return { header, pcm }
-}
-
 export class ServerTranslator implements Translator {
   private client: RoomClient | null = null
   private unsubscribe: (() => void)[] = []
@@ -62,12 +40,14 @@ export class ServerTranslator implements Translator {
   private capture: MicCapture
   private playbackContext: AudioContext | null = null
   private player: VoicePlayer | null = null
-  /** The other members' announced languages, and whether they listen to a translated voice. */
-  private others = new Map<string, { lang: string; voice: boolean }>()
+  /** The languages this member's last sentence went out in as a voice. */
+  private voiced = new Set<string>()
   /** The speaker's own voice, recorded before the call, and whether this connection has it. */
   private ownSample: OwnVoiceSample | null = null
   private sampleSent = false
-  private refusedConnects = 0
+  private failures = 0
+  private asking: ReturnType<typeof setTimeout> | null = null
+  private deadline: ReturnType<typeof setTimeout> | null = null
   private status: TranslatorStatus = {
     state: 'claiming',
     detail: '',
@@ -80,6 +60,7 @@ export class ServerTranslator implements Translator {
   private selfPrefs: LangPrefs
   private stopped = false
   private readonly events: TranslatorEvents
+  private readonly refusals = new Refusals((line, ...detail) => console.warn(`translate: ${line}`, ...detail))
 
   constructor(selfPrefs: LangPrefs, events: TranslatorEvents) {
     this.selfPrefs = selfPrefs
@@ -102,28 +83,14 @@ export class ServerTranslator implements Translator {
     // Until a segment arrives there is no track to publish.
     if (this.playbackContext.state === 'suspended') void this.playbackContext.resume()
 
-    // Members announce their language once, on joining, so the ones that
-    // arrived before this bridge started come from the client's record.
-    for (const [memberId, prefs] of client.memberLangPrefs) {
-      this.others.set(memberId, { lang: prefs.lang, voice: prefs.voice })
-    }
-
     this.unsubscribe = [
-      client.on('translate-token', ({ token }) => {
-        this.setStatus({ state: 'connecting', detail: '' })
-        this.openSpeech(token)
-      }),
-      client.on('lang', ({ from, prefs }) => {
-        this.others.set(from, { lang: prefs.lang, voice: prefs.voice })
-        this.sendTargets()
-      }),
+      client.on('translate-token', ({ token }) => this.openSpeech(token)),
+      client.on('lang', () => this.sendTargets()),
+      client.on('member-gone', () => this.sendTargets()),
       // A recording mixes in the recorder's language, voice switch or not.
       client.on('recording', () => this.sendTargets()),
-      client.on('member-left', ({ id }) => {
-        this.others.delete(id)
-        this.sendTargets()
-      }),
     ]
+    this.announce()
   }
 
   /**
@@ -132,15 +99,13 @@ export class ServerTranslator implements Translator {
    * so the audio contexts may start.
    */
   start(localMic: MediaStreamTrack | null): void {
-    const client = this.client
-    if (!client) return
+    if (!this.client) return
     void this.capture.start(localMic)
+    if (this.speech) return
     this.setStatus({ state: 'claiming', detail: '' })
     // The server sends a token when translation turns on, but a joiner's
     // may have come before its bridge existed: ask if none arrives.
-    setTimeout(() => {
-      if (!this.stopped && this.client === client && !this.speech) client.requestSpeechToken()
-    }, TOKEN_GRACE_MS)
+    this.attempt(TOKEN_GRACE_MS)
   }
 
   setLocalMic(track: MediaStreamTrack | null): void {
@@ -153,6 +118,37 @@ export class ServerTranslator implements Translator {
     if (droppedOwn) this.forgetVoice()
     this.sendTargets()
     this.sendSample()
+  }
+
+  /** The speech service already translated what it relays: nothing to do. */
+  receive(caption: RoomMessage): void {
+    if (caption.k === 'caption') this.events.onCaption(caption)
+  }
+
+  /** Stops translating this member's speech and removes its voice tracks. */
+  async stop(): Promise<void> {
+    this.stopped = true
+    const client = this.client
+    this.detach()
+    client?.setProvides(PROVIDES_NOTHING)
+    await client?.removeTranslationTracks()
+    await this.capture.close()
+    await this.playbackContext?.close()
+    this.playbackContext = null
+    this.player = null
+  }
+
+  private detach(): void {
+    for (const off of this.unsubscribe) off()
+    this.unsubscribe = []
+    this.clearAttempt()
+    this.speech?.close()
+    this.speech = null
+    this.capture.stop()
+    // The tracks belonged to the old connection; the next client publishes afresh.
+    this.player = this.playbackContext ? new VoicePlayer(this.playbackContext, this.publishTrack) : null
+    this.voiced.clear()
+    this.client = null
   }
 
   /** The recorded own voice, sent to the speech service while the speaker has chosen it. */
@@ -169,56 +165,67 @@ export class ServerTranslator implements Translator {
   private forgetVoice(): void {
     this.sampleSent = false
     this.setStatus({ ownVoice: 'off' })
+    this.announce()
     const speaker = this.client?.memberId
     if (!speaker || this.speech?.readyState !== WebSocket.OPEN) return
     this.speech.send(JSON.stringify({ type: 'forget-voice', speaker }))
   }
 
-  /** The speech service already translated what it relays: nothing to do. */
-  receive(caption: RoomMessage): void {
-    if (caption.k === 'caption') this.events.onCaption(caption)
-  }
-
-  /** Stops translating this member's speech and removes its voice tracks. */
-  async stop(): Promise<void> {
-    this.stopped = true
-    const client = this.client
-    this.detach()
-    await client?.removeTranslationTracks()
-    await this.capture.close()
-    await this.playbackContext?.close()
-    this.playbackContext = null
-    this.player = null
-  }
-
-  private detach(): void {
-    for (const off of this.unsubscribe) off()
-    this.unsubscribe = []
-    this.speech?.close()
-    this.speech = null
-    this.capture.stop()
-    // The tracks belonged to the old connection; the next client publishes afresh.
-    this.player = this.playbackContext ? new VoicePlayer(this.playbackContext, this.publishTrack) : null
-    this.client = null
+  // The service keeps a sample per connection, so each new one gets it again.
+  private sendSample(): void {
+    const sample = this.ownSample
+    const speaker = this.client?.memberId
+    if (this.sampleSent || !sample || !speaker || this.selfPrefs.voiceChoice !== 'own') return
+    if (this.speech?.readyState !== WebSocket.OPEN) return
+    this.sampleSent = true
+    for (let offset = 0; offset < sample.pcm.length; offset += SAMPLE_FRAME) {
+      const frame = sample.pcm.slice(offset, offset + SAMPLE_FRAME).buffer
+      this.speech.send(packAudio({ speaker, lang: sample.lang, voice: 'own', sample: true }, frame))
+    }
+    this.speech.send(JSON.stringify({ type: 'voice-sample', speaker, lang: sample.lang }))
   }
 
   private readonly publishTrack = (lang: string, track: MediaStreamTrack): void => {
     void this.client?.addTranslationTrack(lang, track)
   }
 
+  // An attempt at the speech connection asks for a token after
+  // askAfterMs, unless one has come by then, and is over when nothing
+  // has opened a while after that: a token that never comes and a
+  // connection that never opens must not leave the bridge waiting.
+  private attempt(askAfterMs: number): void {
+    this.clearAttempt()
+    this.asking = setTimeout(() => {
+      this.asking = null
+      if (!this.speech) this.client?.requestSpeechToken()
+    }, askAfterMs)
+    this.deadline = setTimeout(() => this.ended({ how: 'refused' }), askAfterMs + CONNECT_TIMEOUT_MS)
+  }
+
+  private clearAttempt(): void {
+    if (this.asking !== null) clearTimeout(this.asking)
+    if (this.deadline !== null) clearTimeout(this.deadline)
+    this.asking = null
+    this.deadline = null
+  }
+
   private openSpeech(token: string): void {
+    if (this.stopped) return
+    this.clearAttempt()
     this.speech?.close()
+    this.voiced.clear()
     const speech = new WebSocket(`${serverSocketURL('/ws/speech')}?token=${encodeURIComponent(token)}`)
     speech.binaryType = 'arraybuffer'
     this.speech = speech
+    this.setStatus({ state: 'connecting', detail: '' })
+    this.deadline = setTimeout(() => this.ended({ how: 'refused' }), CONNECT_TIMEOUT_MS)
 
-    let opened = false
+    let openedAt: number | null = null
     speech.onopen = () => {
-      opened = true
-      this.refusedConnects = 0
+      openedAt = performance.now()
+      this.clearAttempt()
       this.setStatus({ state: 'live', detail: '' })
       this.sendTargets()
-      // The service keeps a sample per connection, so each new one gets it again.
       this.sampleSent = false
       this.sendSample()
     }
@@ -228,29 +235,46 @@ export class ServerTranslator implements Translator {
     }
     speech.onclose = () => {
       if (this.speech !== speech || this.stopped) return
-      this.speech = null
-      if (!opened && ++this.refusedConnects >= MAX_REFUSED_CONNECTS) {
-        const reason = 'The speech service cannot be reached or refused the connection.'
-        this.setStatus({ state: 'failed', detail: reason })
-        this.events.onFailure(reason)
-        return
-      }
-      this.setStatus({
-        state: 'retrying',
-        detail: opened
-          ? 'The speech connection dropped; reconnecting.'
-          : `The speech service did not answer (try ${this.refusedConnects} of ${MAX_REFUSED_CONNECTS}).`,
-      })
-      // A fresh token for the new connection (they expire after an hour).
-      setTimeout(() => {
-        if (!this.stopped) this.client?.requestSpeechToken()
-      }, RECONNECT_DELAY_MS)
+      this.ended(openedAt === null ? { how: 'refused' } : { how: 'dropped', lastedMs: performance.now() - openedAt })
     }
+  }
+
+  // The attempt at the speech connection is over. Nothing is captioned
+  // or voiced until the next one opens, and after too many in a row
+  // that did not last there is no next one.
+  private ended(end: Ended): void {
+    this.clearAttempt()
+    this.speech?.close()
+    this.speech = null
+    this.voiced.clear()
+    this.announce()
+
+    const verdict = afterEnd(this.failures, end)
+    this.failures = verdict.failures
+    if (verdict.next === 'give-up') {
+      this.setStatus({ state: 'failed', detail: verdict.detail })
+      this.events.onFailure(verdict.detail)
+      return
+    }
+    this.setStatus({ state: 'retrying', detail: verdict.detail })
+    // A fresh token for the new connection (they expire after an hour).
+    this.attempt(RECONNECT_DELAY_MS)
   }
 
   /** The languages this speech goes out in: its own (as subtitles) and every other member's. */
   private targets(): string[] {
-    return [...new Set([this.selfPrefs.lang, ...[...this.others.values()].map((other) => other.lang)])]
+    const others = [...(this.client?.memberLangPrefs.values() ?? [])].map((prefs) => prefs.lang)
+    return [...new Set([this.selfPrefs.lang, ...others])]
+  }
+
+  private sendTargets(): void {
+    const targets = this.targets()
+    const sameLanguage = targets.length < 2
+    if (sameLanguage !== this.status.sameLanguage) this.setStatus({ sameLanguage })
+    for (const lang of this.voiced) if (!targets.includes(lang)) this.voiced.delete(lang)
+    this.announce()
+    if (this.speech?.readyState !== WebSocket.OPEN) return
+    this.speech.send(JSON.stringify({ type: 'hello', targets, voiceTargets: this.voiceTargets() }))
   }
 
   /**
@@ -259,30 +283,23 @@ export class ServerTranslator implements Translator {
    */
   private voiceTargets(): string[] {
     const recorder = this.client?.recorder ?? ''
-    const wanted = [...this.others.entries()]
-      .filter(([id, other]) => (other.voice || id === recorder) && other.lang !== this.selfPrefs.lang)
-      .map(([, other]) => other.lang)
+    const wanted = [...(this.client?.memberLangPrefs.entries() ?? [])]
+      .filter(([id, prefs]) => (prefs.voice || id === recorder) && prefs.lang !== this.selfPrefs.lang)
+      .map(([, prefs]) => prefs.lang)
     return [...new Set(wanted)]
   }
 
-  private sendTargets(): void {
-    const sameLanguage = this.targets().length < 2
-    if (sameLanguage !== this.status.sameLanguage) this.setStatus({ sameLanguage })
-    if (this.speech?.readyState !== WebSocket.OPEN) return
-    this.speech.send(JSON.stringify({ type: 'hello', targets: this.targets(), voiceTargets: this.voiceTargets() }))
-  }
-
-  private sendSample(): void {
-    const sample = this.ownSample
-    const speaker = this.client?.memberId
-    if (this.sampleSent || !sample || !speaker || this.selfPrefs.voiceChoice !== 'own') return
-    if (this.speech?.readyState !== WebSocket.OPEN) return
-    this.sampleSent = true
-    const header = { speaker, lang: sample.lang, voice: 'own', sample: true }
-    for (let offset = 0; offset < sample.pcm.length; offset += SAMPLE_FRAME) {
-      this.speech.send(pack(header, sample.pcm.slice(offset, offset + SAMPLE_FRAME).buffer))
-    }
-    this.speech.send(JSON.stringify({ type: 'voice-sample', speaker, lang: sample.lang }))
+  // While the connection is open this member's speech is captioned. A
+  // language is voiced from the sentence that comes back spoken in it to
+  // the sentence that comes back without a voice, so a listener hears
+  // this member's own voice from then until the next sentence is spoken.
+  private announce(): void {
+    this.client?.setProvides({
+      captions: this.speech?.readyState === WebSocket.OPEN,
+      translates: 'none',
+      voices: [...this.voiced].sort(),
+      ownVoice: this.selfPrefs.voiceChoice === 'own' && this.status.ownVoice === 'ready',
+    })
   }
 
   private endSpeech(): void {
@@ -300,52 +317,54 @@ export class ServerTranslator implements Translator {
   private sendAudio(pcm: ArrayBuffer): void {
     const speaker = this.client?.memberId
     if (!speaker || this.speech?.readyState !== WebSocket.OPEN) return
-    this.speech.send(pack({ speaker, lang: this.selfPrefs.lang, voice: this.selfPrefs.voiceChoice }, pcm))
+    this.speech.send(packAudio({ speaker, lang: this.selfPrefs.lang, voice: this.selfPrefs.voiceChoice }, pcm))
   }
 
   private onSpeechText(data: string): void {
-    let message: { type?: string; code?: string } & Partial<CaptionLine>
-    try {
-      message = JSON.parse(data) as typeof message
-    } catch (err) {
-      console.warn('translate: a speech-service message that is not JSON', err)
-      return
-    }
-    if (message.type === 'notice') {
-      if (message.code === 'translation-failed') {
-        this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
-      } else if (message.code === 'own-voice-ready') {
-        this.setStatus({ ownVoice: 'ready' })
-      } else if (message.code === 'own-voice-rejected') {
-        this.setStatus({ ownVoice: 'rejected' })
-      }
-      return
-    }
-    if (message.type !== 'caption') return
+    const client = this.client
+    if (!client) return
 
-    const caption: CaptionLine = {
-      k: 'caption',
-      speaker: message.speaker ?? '',
-      segId: message.segId ?? '',
-      sourceLang: message.sourceLang ?? '',
-      lang: message.lang ?? '',
-      text: message.text ?? '',
-      final: message.final ?? false,
+    const message = parseSpeechMessage(data, client.memberId)
+    if ('refused' in message) {
+      this.refusals.report('a message', SPEECH_SERVICE, message.refused)
+      return
     }
-    void this.client?.sendCaption(caption)
-    this.events.onCaption(caption)
+    switch (message.type) {
+      case 'ready':
+        return
+      case 'unvoiced':
+        if (!message.translated) this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
+        if (this.voiced.delete(message.lang)) this.announce()
+        return
+      case 'own-voice':
+        this.setStatus({ ownVoice: message.state })
+        this.announce()
+        return
+      case 'caption':
+        void client.sendCaption(message.caption)
+        this.events.onCaption(message.caption)
+        return
+    }
   }
 
   private onVoice(frame: ArrayBuffer): void {
     const player = this.player
     if (!player) return
-    const { header, pcm } = unpack(frame)
-    if (pcm.length === 0) return
-    if (player.backlog(header.lang) > MAX_VOICE_LAG_S) {
+
+    const voice = parseVoice(frame)
+    if ('refused' in voice) {
+      this.refusals.report('a voice', SPEECH_SERVICE, voice.refused)
+      return
+    }
+    if (voice.pcm.length === 0) return
+    if (player.backlog(voice.lang) > MAX_VOICE_LAG_S) {
       this.setStatus({ droppedVoices: this.status.droppedVoices + 1 })
       return
     }
 
-    player.play(header.lang, pcm, header.rate)
+    player.play(voice.lang, voice.pcm, voice.rate)
+    if (this.voiced.has(voice.lang)) return
+    this.voiced.add(voice.lang)
+    this.announce()
   }
 }

@@ -115,6 +115,32 @@ window.__pcs
   .map((pc) => ({ share: pc.getSenders().some((s) => s.track?.contentHint === 'detail'), twcc: /transport-cc/.test(pc.remoteDescription?.sdp ?? '') }))
 `
 
+// Why a share is or is not going out, for a failing test to print: the
+// state of its connection, what each encoding has encoded and sent, the
+// presenter's estimate, and what the E2EE worker has moved through each
+// transform that encrypts (TransformCounts in lib/e2ee).
+export const shareState = `
+(async () => {
+  const pc = ${sharePeerConnection}
+  if (!pc) return null
+  const encodings = {}
+  let estimate = null
+  for (const r of (await pc.getStats()).values()) {
+    if (r.type === 'outbound-rtp' && r.kind === 'video') encodings[r.rid ?? ''] = { active: r.active ?? null, encoded: r.framesEncoded || 0, packets: r.packetsSent || 0, bytes: r.bytesSent || 0, limit: r.qualityLimitationReason ?? null }
+    if (r.type === 'candidate-pair' && r.nominated && r.availableOutgoingBitrate !== undefined) estimate = r.availableOutgoingBitrate
+  }
+  return {
+    ice: pc.iceConnectionState,
+    connection: pc.connectionState,
+    signaling: pc.signalingState,
+    encodings,
+    estimate,
+    encrypting: (window.__e2ee?.transforms ?? []).filter((transform) => transform.purpose === 'send'),
+    errors: window.__errors,
+  }
+})()
+`
+
 export function tileByLabel(suffix) {
   return [...document.querySelectorAll('.group')].find((g) => g.querySelector('.hud-label')?.textContent.trim().endsWith(suffix))
 }
@@ -127,6 +153,9 @@ export const remoteScreen = `
 })()
 `
 
+// What the viewer received of the share and what became of it, read at
+// `at` on the page's clock, and every layer the page has asked the SFU
+// for on a share, with when it asked on the same clock.
 export const shareReceiveCounters = `
 (async () => {
   const tile = (${tileByLabel.toString()})('screen')
@@ -134,7 +163,7 @@ export const shareReceiveCounters = `
   for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
     for (const r of (await pc.getStats()).values()) {
       if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
-        return { decoded: r.framesDecoded || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
+        return { at: performance.now(), asks: window.__layerRequests.filter((request) => request.kind === 'screen'), received: r.framesReceived || 0, decoded: r.framesDecoded || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
       }
     }
   }
@@ -142,8 +171,9 @@ export const shareReceiveCounters = `
 })()
 `
 
-// The share's outgoing encodings by rid, found by the share's own
-// connection, which carries no other video.
+// The share's outgoing encodings by rid, read at `at` on the page's
+// clock, found by the share's own connection, which carries no other
+// video.
 export const shareSendCounters = `
 (async () => {
   const pc = ${sharePeerConnection}
@@ -152,6 +182,6 @@ export const shareSendCounters = `
   for (const r of (await pc.getStats()).values()) {
     if (r.type === 'outbound-rtp' && r.kind === 'video' && r.rid) layers[r.rid] = { ssrc: r.ssrc, encoded: r.framesEncoded || 0, keyframes: r.keyFramesEncoded || 0, plis: r.pliCount || 0, firs: r.firCount || 0, limit: r.qualityLimitationReason, bytes: r.bytesSent || 0, target: r.targetBitrate || 0, nacks: r.nackCount || 0, retransmitted: r.retransmittedBytesSent || 0 }
   }
-  return { layers }
+  return { at: performance.now(), layers }
 })()
 `

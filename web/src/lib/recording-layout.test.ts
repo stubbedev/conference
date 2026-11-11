@@ -37,8 +37,12 @@ const listening = (extra: Partial<Translations<Line>> = {}): Translations<Line> 
   on: true,
   lang: 'en',
   voice: true,
-  spoken: { alice: 'da', bob: 'en' },
-  voices: {},
+  announced: new Map([
+    ['alice', { lang: 'da', captions: true, voices: ['en'] }],
+    ['bob', { lang: 'en', captions: true, voices: [] }],
+  ]),
+  published: {},
+  local: {},
   ...extra,
 })
 
@@ -59,7 +63,7 @@ const recorderTiles = (voices: Readonly<Record<string, Line>>, translations: Tra
 function recordedCall(voices: Readonly<Record<string, Line>>): (now: number, translations: Translations<Line>) => string | null {
   let focus: SpeakerFocus = null
   return (now, translations) => {
-    const translated = Object.values(translations.voices).flatMap((byLang) => Object.values(byLang))
+    const translated = Object.values(translations.published).flatMap((byLang) => Object.values(byLang))
     for (const line of [...Object.values(voices), ...translated]) line.meter.sample(now)
     const tiles = recorderTiles(voices, translations)
     focus = nextSpeakerFocus(
@@ -179,7 +183,7 @@ test('a share’s sound and a member heard through nothing are not speaking', ()
 test('a translated member takes the spotlight while their translation plays, not while their own voice does', () => {
   const alice = new Line()
   const translation = new Line()
-  const translations = listening({ voices: { alice: { en: translation } } })
+  const translations = listening({ published: { alice: { en: translation } } })
   const spotlightAt = recordedCall({ alice, bob: new Line() })
 
   alice.level = VOICE
@@ -197,7 +201,7 @@ test('someone speaking over a translated member’s own voice takes the spotligh
 
   alice.level = VOICE
   bob.level = VOICE
-  assert.equal(spotlightAt(0, listening({ voices: { alice: { en: new Line() } } })), 'bob')
+  assert.equal(spotlightAt(0, listening({ published: { alice: { en: new Line() } } })), 'bob')
 })
 
 test('a member is recorded with their own voice until their translated one exists', () => {
@@ -208,7 +212,7 @@ test('a member is recorded with their own voice until their translated one exist
   alice.level = VOICE
   assert.equal(spotlightAt(0, listening()), 'alice')
 
-  const translated = listening({ voices: { alice: { en: translation } } })
+  const translated = listening({ published: { alice: { en: translation } } })
   const quiet = SPEAKING_HOLD_MS + SPEAKER_HOLD_MS
   assert.equal(spotlightAt(quiet, translated), null, 'her own voice still counted once her translation replaced it')
 
@@ -218,7 +222,7 @@ test('a member is recorded with their own voice until their translated one exist
 
 test('the spotlight leaves a translated member once their translation has been quiet for long enough', () => {
   const translation = new Line()
-  const translations = listening({ voices: { alice: { en: translation } } })
+  const translations = listening({ published: { alice: { en: translation } } })
   const spotlightAt = recordedCall({ alice: new Line(), bob: new Line() })
 
   translation.level = VOICE
@@ -239,7 +243,7 @@ for (const [source, exists] of VOICE_SOURCES) {
     const alice = new Line()
     const translation = new Line()
     const own = { alice, bob: new Line() }
-    const translations = listening({ voice: false, voices: exists ? { alice: { en: translation } } : {} })
+    const translations = listening({ voice: false, published: exists ? { alice: { en: translation } } : {} })
     const spotlightAt = recordedCall(own)
 
     assert.equal(recorderTiles(own, translations).find((tile) => tile.key === 'alice')?.heard, alice)
@@ -257,13 +261,13 @@ test('a member whose translated voice is gone is recorded in their own voice aga
   const alice = new Line()
   const translation = new Line()
   const own = { alice, bob: new Line() }
-  const translated = listening({ voices: withVoice({}, 'alice', 'en', translation) })
+  const translated = listening({ published: withVoice({}, 'alice', 'en', translation) })
   const spotlightAt = recordedCall(own)
 
   alice.level = VOICE
   assert.equal(spotlightAt(0, translated), null, 'her own voice counted while her translation replaced it')
 
-  const stopped = { ...translated, voices: withoutVoice(translated.voices, 'alice', 'en', translation) }
+  const stopped = { ...translated, published: withoutVoice(translated.published, 'alice', 'en', translation) }
   assert.equal(recorderTiles(own, stopped).find((tile) => tile.key === 'alice')?.heard, alice)
   assert.equal(spotlightAt(SPEAKING_HOLD_MS, stopped), 'alice')
 })

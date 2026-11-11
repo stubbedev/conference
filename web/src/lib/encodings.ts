@@ -47,6 +47,9 @@ export function codecPreferences(available: readonly RTCRtpCodec[], codec: Video
 
 export const LAYER_RIDS = ['l', 'm', 'h'] as const
 
+/** The encodings of a shared screen: the slow one and the fluid one. */
+export const SCREEN_LAYER_RIDS = [LAYER_RIDS[0], LAYER_RIDS[2]] as const
+
 const CAMERA_LAYER_SCALES = [
   { rid: LAYER_RIDS[0], scaleResolutionDownBy: 4 },
   { rid: LAYER_RIDS[1], scaleResolutionDownBy: 2 },
@@ -120,14 +123,14 @@ export function screenLayers(codec: VideoCodec): ScreenEncoding[] {
   const stream = codec === 'VP9' ? { scalabilityMode: SIMULCAST_STREAM_MODE } : {}
   return [
     {
-      rid: LAYER_RIDS[0],
+      rid: SCREEN_LAYER_RIDS[0],
       scaleResolutionDownBy: 1,
       maxBitrate: SCREEN_SHARE_LOW_MAX_BITRATE,
       maxFramerate: SCREEN_SHARE_LOW_FPS,
       ...stream,
     },
     {
-      rid: LAYER_RIDS[2],
+      rid: SCREEN_LAYER_RIDS[1],
       scaleResolutionDownBy: 1,
       maxBitrate: SCREEN_SHARE_FLUID_MAX_BITRATE,
       maxFramerate: SCREEN_SHARE_FPS,

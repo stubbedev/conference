@@ -7,7 +7,7 @@ default:
 
 # vet + test + lint + web build, lint and tests + go build + browser
 # smoke test (what ci.yml runs).
-check: vet test lint brand web web-lint web-test build e2e e2e-share
+check: vet test lint brand web web-lint web-test build e2e e2e-share e2e-share-start
 
 vet:
     go vet ./...
@@ -93,6 +93,15 @@ e2e:
 # measures Chrome alone.
 e2e-share *args:
     node web/e2e/share-burst.mjs {{args}}
+
+# A share started and stopped over and over, presented from Chrome and
+# from Firefox: every start must be sent and decoded, with the garbage
+# collection that used to leave a start sending nothing forced in Chrome
+# at every one. Needs Chrome and Firefox on PATH (or CHROME= and
+# FIREFOX=); `--skip-firefox` pairs two Chromes, `--load N` adds N busy
+# loops.
+e2e-share-start *args:
+    node web/e2e/share-start.mjs {{args}}
 
 # Regenerate the logo, favicon, touch icon and link-preview card in
 # web/public from web/brand (needs Inkscape, in the dev shell).

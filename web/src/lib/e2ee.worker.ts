@@ -24,6 +24,8 @@
 // tsconfig.worker.json), so a call that does not exist on
 // RTCEncodedVideoFrame is a build error, not a silently dropped frame.
 
+import { isTransformOptions, type E2EEStats, type TransformCounts, type TransformOptions, type WorkerMessage } from './e2ee'
+
 const BLOCK_BYTES = 16
 const SALT_BYTES = 8
 
@@ -31,25 +33,6 @@ const CLEAR_PREFIX: Record<EncodedVideoChunkType | 'audio', number> = {
   key: 10,
   delta: 3,
   audio: 1,
-}
-
-type Purpose = 'send' | 'recv'
-
-interface TransformOptions {
-  purpose?: Purpose
-}
-
-interface Stats {
-  type: 'e2ee-stats'
-  send: number
-  recv: number
-  dropSend: number
-  dropRecv: number
-  lastError: string
-}
-
-interface KeyMessage {
-  keyBytes: ArrayBuffer | Uint8Array<ArrayBuffer>
 }
 
 type EncodedFrame = RTCEncodedVideoFrame | RTCEncodedAudioFrame
@@ -61,14 +44,43 @@ interface SendState {
 
 let cryptoKeyPromise: Promise<CryptoKey> | null = null
 
-const stats: Stats = { type: 'e2ee-stats', send: 0, recv: 0, dropSend: 0, dropRecv: 0, lastError: '' }
+const stats: Omit<E2EEStats, 'transforms'> = { type: 'e2ee-stats', send: 0, recv: 0, dropSend: 0, dropRecv: 0, lastError: '' }
+
+/** One transform being piped: its transformer, its counters, and the way to end its pipe. */
+interface Piped {
+  transformer: RTCRtpScriptTransformer
+  counts: TransformCounts
+  closing: AbortController
+}
+
+// The transforms being piped right now, by id. One leaves when its pipe
+// ends, which the page brings about when it closes the connection, so a
+// long call's report stays as long as what it is sending and receiving.
+//
+// Each holds on to its transformer for as long as it is piped. Chrome
+// connects a transformer to its sender or receiver in a task of its own,
+// after the rtctransform event, and reaches it through a weak reference:
+// a transformer the script has let go of can be collected in between, and
+// then no frame ever arrives on its streams, with nothing reported.
+const piping = new Map<number, Piped>()
+
+// A transform whose connection closed before its rtctransform event
+// arrived: the two travel on different queues. It is never piped.
+const closedUnopened = new Set<number>()
 
 setInterval(() => {
-  postMessage(stats)
+  const report: E2EEStats = { ...stats, transforms: [...piping.values()].map((piped) => piped.counts) }
+  postMessage(report)
 }, 2000)
 
-function setKeyBytes(bytes: KeyMessage['keyBytes']): void {
+function setKeyBytes(bytes: Uint8Array<ArrayBuffer>): void {
   cryptoKeyPromise = crypto.subtle.importKey('raw', bytes, 'AES-CTR', false, ['encrypt', 'decrypt'])
+}
+
+function closeTransform(id: number): void {
+  const piped = piping.get(id)
+  if (piped) piped.closing.abort()
+  else closedUnopened.add(id)
 }
 
 function isVideoFrame(frame: EncodedFrame): frame is RTCEncodedVideoFrame {
@@ -139,24 +151,30 @@ async function decryptFrame(frame: EncodedFrame): Promise<ArrayBuffer> {
   return merged.buffer
 }
 
-function pipe(transformer: RTCRtpScriptTransformer, purpose: Purpose): void {
-  const encrypt = purpose === 'send'
+function pipe(transformer: RTCRtpScriptTransformer, options: TransformOptions): void {
+  const encrypt = options.purpose === 'send'
   const state: SendState = {
     salt: crypto.getRandomValues(new Uint8Array(SALT_BYTES)),
     counter: 0n,
   }
+  const counts: TransformCounts = { ...options, openedAt: Date.now(), read: 0, written: 0, dropped: 0 }
+  const closing = new AbortController()
+  piping.set(options.id, { transformer, counts, closing })
 
   const transform = new TransformStream<EncodedFrame, EncodedFrame>({
     async transform(frame, controller) {
+      counts.read += 1
       try {
         frame.data = encrypt ? await encryptFrame(frame, state) : await decryptFrame(frame)
         controller.enqueue(frame)
+        counts.written += 1
         if (encrypt) stats.send += 1
         else stats.recv += 1
       } catch (err) {
         // A frame we cannot process is dropped rather than forwarded
         // in the clear; the page reads lastError from the stats.
         stats.lastError = String(err)
+        counts.dropped += 1
         if (encrypt) stats.dropSend += 1
         else stats.dropRecv += 1
       }
@@ -164,16 +182,24 @@ function pipe(transformer: RTCRtpScriptTransformer, purpose: Purpose): void {
   })
 
   transformer.readable
-    .pipeThrough(transform)
-    .pipeTo(transformer.writable)
-    .catch((err: unknown) => console.warn(`e2ee: the pipe of ${purpose} frames ended`, err))
+    .pipeThrough(transform, { signal: closing.signal })
+    .pipeTo(transformer.writable, { signal: closing.signal })
+    .catch((err: unknown) => {
+      if (!closing.signal.aborted) console.warn(`e2ee: the pipe of ${options.purpose} frames ended`, err)
+    })
+    .finally(() => piping.delete(options.id))
 }
 
 self.onrtctransform = (event: RTCTransformEvent) => {
-  const options = event.transformer.options as TransformOptions | undefined
-  pipe(event.transformer, options?.purpose === 'send' ? 'send' : 'recv')
+  const options: unknown = event.transformer.options
+  if (!isTransformOptions(options)) throw new Error(`e2ee: a transform attached with options the worker cannot read: ${JSON.stringify(options)}`)
+  if (piping.has(options.id)) throw new Error(`e2ee: two transforms attached as number ${options.id}`)
+  if (closedUnopened.delete(options.id)) return
+  pipe(event.transformer, options)
 }
 
-self.onmessage = (event: MessageEvent<KeyMessage>) => {
-  if (event.data?.keyBytes) setKeyBytes(event.data.keyBytes)
+self.onmessage = (event: MessageEvent<WorkerMessage>) => {
+  const message = event.data
+  if (message.type === 'key') setKeyBytes(message.keyBytes)
+  else message.ids.forEach(closeTransform)
 }
