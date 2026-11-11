@@ -51,8 +51,8 @@ class Channel {
   private readonly rpc: WorkerRpc
   private readonly queue = new Serial()
 
-  constructor(worker: Worker, onEvent: (event: WorkerEvent) => void) {
-    this.rpc = new WorkerRpc(worker, onEvent)
+  constructor(worker: Worker, name: string, onEvent: (event: WorkerEvent) => void) {
+    this.rpc = new WorkerRpc(worker, name, onEvent)
   }
 
   call<T extends WorkerReply>(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
@@ -97,7 +97,7 @@ class BrowserEngines implements Engines {
 
   private readonly models: SpeechModels
   private readonly languages: readonly Language[]
-  private readonly workers = new Workers<Purpose, Channel>((purpose) => new Channel(start(purpose), (event) => this.event(purpose, event)))
+  private readonly workers = new Workers<Purpose, Channel>((purpose) => new Channel(start(purpose), PARTS[purpose], (event) => this.event(purpose, event)))
   private readonly progress = new Progress()
   private readonly noGpu = new Set<Purpose>()
   private readonly gpuRefused = new Set<Purpose>()

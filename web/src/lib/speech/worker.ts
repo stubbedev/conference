@@ -22,16 +22,23 @@ interface Pending {
 /** Calls into one worker and hands back what it replies. */
 export class WorkerRpc {
   private readonly worker: Worker
+  private readonly name: string
   private readonly pending = new Map<number, Pending>()
   private next = 0
   private closed = false
+  private spoke = false
+  private unstarted: Error | null = null
   private readonly onEvent: (event: WorkerEvent) => void
 
-  constructor(worker: Worker, onEvent: (event: WorkerEvent) => void) {
+  constructor(worker: Worker, name: string, onEvent: (event: WorkerEvent) => void) {
     this.worker = worker
+    this.name = name
     this.onEvent = onEvent
-    worker.onmessage = (event: MessageEvent<WorkerReply | WorkerEvent>) => this.receive(event.data)
-    worker.onerror = (event) => this.failAll(new Error(event.message || 'the speech worker failed'))
+    worker.onmessage = (event: MessageEvent<WorkerReply | WorkerEvent>) => {
+      this.spoke = true
+      this.receive(event.data)
+    }
+    worker.onerror = (event) => this.crashed(event)
   }
 
   post(message: Record<string, unknown>, transfer: Transferable[] = []): void {
@@ -41,6 +48,7 @@ export class WorkerRpc {
 
   call<T extends WorkerReply>(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
     if (this.closed) return Promise.reject(new Error('the speech worker is closed'))
+    if (this.unstarted) return Promise.reject(this.unstarted)
 
     const id = this.next++
     return new Promise<T>((resolve, reject) => {
@@ -74,6 +82,15 @@ export class WorkerRpc {
 
     if (reply.type === 'error') pending.reject(new Error(reply.message ?? 'the speech worker failed'))
     else pending.resolve(reply)
+  }
+
+  private crashed(event: ErrorEvent): void {
+    if (this.spoke) {
+      this.failAll(new Error(event.message || 'the speech worker failed'))
+      return
+    }
+    this.unstarted = new Error(`the ${this.name} worker could not start: ${event.message || 'its code could not be loaded'}`)
+    this.failAll(this.unstarted)
   }
 
   private failAll(error: Error): void {
