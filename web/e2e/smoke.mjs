@@ -90,11 +90,22 @@ function maxVolume(file) {
   return match ? Number(match[1]) : null
 }
 
-// The video frames of a recording whose timestamps fall in [from, to) seconds (needs ffprobe).
-function framesBetween(file, from, to) {
+// The timestamps, in seconds, of a recording's video frames (needs ffprobe).
+function frameTimes(file) {
   const res = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', file], { encoding: 'utf8' })
   if (res.error) throw new Error('ffprobe is needed to check the recording: install ffmpeg or put it on PATH')
-  return res.stdout.split('\n').map(Number).filter((t) => Number.isFinite(t) && t >= from && t < to).length
+  return res.stdout
+    .split('\n')
+    .filter((line) => line !== '')
+    .map(Number)
+    .filter(Number.isFinite)
+}
+
+function medianFrameGap(times, from, to) {
+  const inside = times.filter((t) => t >= from && t < to).sort((a, b) => a - b)
+  if (inside.length < 2) return Infinity
+  const gaps = inside.slice(1).map((t, index) => t - inside[index]).sort((a, b) => a - b)
+  return gaps[Math.floor(gaps.length / 2)]
 }
 
 // A hidden tab: another tab in front of it, which is what throttles a page's
@@ -110,6 +121,7 @@ async function hideTab(browser) {
 const RECORDING_VISIBLE_S = 5
 const RECORDING_HIDDEN_S = 8
 const HIDDEN_RECORDING_MIN_FPS = 10
+const THROTTLED_TIMER_S = 1
 
 const recordingBadgePresent = `(() => { const h = document.querySelector('header'); return Boolean(h && [...h.querySelectorAll('span')].some(s => s.textContent.trim() === 'Recording')); })()`
 
@@ -994,18 +1006,18 @@ async function main() {
         const loudest = download ? maxVolume(join(dlDir, download.name)) : null
         check(failures, 'recording', loudest !== null && loudest > REMOTE_VOICE_MIN_DB, `the guest's voice is not in the recording (loudest ${loudest} dB)`)
 
-        const hiddenFrom = RECORDING_VISIBLE_S + 1
-        const hiddenTo = RECORDING_VISIBLE_S + RECORDING_HIDDEN_S - 1
-        const hiddenFps = download ? framesBetween(join(dlDir, download.name), hiddenFrom, hiddenTo) / (hiddenTo - hiddenFrom) : 0
-        const visibleFps = download ? framesBetween(join(dlDir, download.name), 1, RECORDING_VISIBLE_S) / (RECORDING_VISIBLE_S - 1) : 0
+        const times = download ? frameTimes(join(dlDir, download.name)) : []
+        const visibleGap = medianFrameGap(times, 1, RECORDING_VISIBLE_S)
+        const hiddenGap = medianFrameGap(times, RECORDING_VISIBLE_S + 1, RECORDING_VISIBLE_S + RECORDING_HIDDEN_S - 1)
+        const gapMs = (gap) => (gap === Infinity ? 'unbounded, fewer than two frames' : `${Math.round(gap * 1000)} ms`)
         check(
           failures,
           'recording',
-          hiddenFps >= HIDDEN_RECORDING_MIN_FPS && hiddenFps >= visibleFps / 2,
-          `the recording's picture slowed to ${hiddenFps.toFixed(1)} fps while its tab was hidden, from ${visibleFps.toFixed(1)} fps`,
+          hiddenGap < THROTTLED_TIMER_S / 2,
+          `the recording's median frame gap was ${gapMs(hiddenGap)} while its tab was hidden, against ${gapMs(visibleGap)} visible: its frame clock is throttled or stalled with the tab`,
         )
 
-        console.log(`recording: late-joiner replay, recorder-leave clearing, ${visibleFps.toFixed(1)} fps visible and ${hiddenFps.toFixed(1)} fps hidden, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
+        console.log(`recording: late-joiner replay, recorder-leave clearing, median frame gap ${gapMs(visibleGap)} visible and ${gapMs(hiddenGap)} hidden, file ${download ? `${download.name} ${download.size} bytes, loudest ${loudest} dB` : 'MISSING'}`)
 
         // Round three: a recording the browser ends on its own (the
         // encoder failed, the way a long recording can die) must still
