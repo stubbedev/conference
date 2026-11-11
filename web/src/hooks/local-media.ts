@@ -23,6 +23,7 @@ import {
 } from '@/hooks/media'
 import { usePersistentState } from '@/hooks/persistent'
 import { startBlur, type BlurPipeline } from '@/lib/blur'
+import { blurFailureMessage } from '@/lib/blur-failure'
 import { DeviceQueue } from '@/lib/device-queue'
 import { describeTrackOpenError } from '@/lib/media-errors'
 import type { RoomClient } from '@/lib/sfu'
@@ -189,7 +190,7 @@ export function useLocalMedia(clientRef: RefObject<RoomClient | null>) {
       updateDevicePrefs({ blur: false })
       blurPipelineRef.current?.stop()
       blurPipelineRef.current = null
-      toast.error('Background blur is unavailable here, so your camera goes out as it is.')
+      toast.error(blurFailureMessage(err))
     },
     [updateDevicePrefs],
   )

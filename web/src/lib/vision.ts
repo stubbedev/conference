@@ -8,6 +8,7 @@
 
 import type { ImageSegmenter, ImageSource } from '@mediapipe/tasks-vision'
 
+import { loadChunk } from '@/lib/chunks'
 import type { SegmentShape } from '@/lib/mask'
 
 const MODELS: Record<SegmentShape, string> = {
@@ -33,7 +34,7 @@ export interface Segmenter {
 export { modelFor, type SegmentShape } from '@/lib/mask'
 
 async function create(shape: SegmentShape): Promise<Segmenter> {
-  const { FilesetResolver, ImageSegmenter: SegmenterClass } = await import('@mediapipe/tasks-vision')
+  const { FilesetResolver, ImageSegmenter: SegmenterClass } = await loadChunk('the background-blur runtime', () => import('@mediapipe/tasks-vision'))
 
   const fileset = await FilesetResolver.forVisionTasks(WASM_PATH)
   const open = (delegate: 'GPU' | 'CPU'): Promise<ImageSegmenter> =>
