@@ -78,6 +78,7 @@ const (
 	minViewerBitrate    = 9_600
 	minPublisherBitrate = 100_000
 	rembInterval        = time.Second
+	rembRepeatInterval  = 100 * time.Millisecond
 
 	// The SSRC the server names itself by in the feedback it sends a
 	// publisher, on a connection where it sends no media of its own.
@@ -601,7 +602,9 @@ func (r *Room) broadcastExcept(exceptID string, msg Message) {
 }
 
 // startRembTicker periodically measures every publisher connection and
-// feeds each the bandwidth it may use via REMB.
+// feeds each the bandwidth it may use via REMB, and repeats the REMB in
+// between on the connections whose estimate it is, which a network route
+// change resets until the next REMB arrives.
 func (r *Room) startRembTicker() {
 	r.mu.Lock()
 
@@ -617,16 +620,21 @@ func (r *Room) startRembTicker() {
 	r.mu.Unlock()
 
 	go func() {
-		ticker := time.NewTicker(rembInterval)
-		defer ticker.Stop()
+		measure := time.NewTicker(rembInterval)
+		defer measure.Stop()
+
+		repeat := time.NewTicker(rembRepeatInterval)
+		defer repeat.Stop()
 
 		for {
 			select {
 			case <-stop:
 				return
-			case <-ticker.C:
+			case <-measure.C:
 				r.sendRemb(time.Now())
 				r.adaptLayers()
+			case <-repeat.C:
+				r.repeatRemb()
 			}
 		}
 	}()
@@ -640,15 +648,36 @@ func (r *Room) sendRemb(now time.Time) {
 	}
 }
 
+func (r *Room) repeatRemb() {
+	for _, peer := range r.snapshot() {
+		for _, upPeer := range peer.upstreamPeers() {
+			upPeer.repeatRemb()
+		}
+	}
+}
+
 // sendRemb closes one measurement period of this connection and feeds it
 // the bandwidth it may use, so each upstream's estimate follows only the
 // tracks it carries and the link they share.
 func (up *UpPeer) sendRemb(now time.Time) {
 	sample := up.measure(now)
 
-	limit := up.viewerLimit()
 	if up.which.feedback() == feedbackReceiverEstimate {
 		up.uplink = up.uplink.next(sample)
+	}
+
+	up.feedLimit()
+}
+
+func (up *UpPeer) repeatRemb() {
+	if up.which.feedback() == feedbackReceiverEstimate {
+		up.feedLimit()
+	}
+}
+
+func (up *UpPeer) feedLimit() {
+	limit := up.viewerLimit()
+	if up.which.feedback() == feedbackReceiverEstimate {
 		limit = limit.tighter(up.uplink.limit)
 	}
 
@@ -665,21 +694,6 @@ func (up *UpPeer) sendRemb(now time.Time) {
 	up.rembCapped = limit.bound
 
 	up.writeRemb(bitrate, ssrcs)
-}
-
-// openUplink sends a connection's first REMB the moment its first video
-// packet arrives, not at the next tick: libwebrtc only starts its
-// estimate from a REMB that lands within two seconds of its first
-// receiver report, and a share whose first REMB missed that window
-// climbs 8% a second from where it started instead. Nothing has been
-// measured on the connection yet, so nothing limits it.
-func (up *UpPeer) openUplink(ssrc webrtc.SSRC) {
-	up.opened.Do(func() {
-		bitrate, send := rembFor(up.which.feedback(), unlimited, false)
-		if send {
-			up.writeRemb(bitrate, []uint32{uint32(ssrc)})
-		}
-	})
 }
 
 func (up *UpPeer) writeRemb(bitrate uint64, ssrcs []uint32) {
@@ -1241,7 +1255,6 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		sampledAt:  time.Now(),
 		uplink:     uplinkEstimate{limit: unlimited, peak: 0},
 		rembCapped: false,
-		opened:     sync.Once{},
 		flowing:    atomic.Pointer[time.Time]{},
 	}
 
@@ -1255,10 +1268,6 @@ func (m *Member) ensureUpPeer(which Upstream) *UpPeer {
 		// sent media.
 		now := time.Now()
 		upPeer.flowing.CompareAndSwap(nil, &now)
-
-		if track.Kind() == webrtc.RTPCodecTypeVideo {
-			upPeer.openUplink(track.SSRC())
-		}
 
 		m.enqueue(func() {
 			if m.upstream(which) != upPeer {
@@ -1564,10 +1573,6 @@ type UpPeer struct {
 	sampledAt  time.Time
 	uplink     uplinkEstimate
 	rembCapped bool
-
-	// opened sends the connection's first REMB once, on its first video
-	// packet; see openUplink.
-	opened sync.Once
 
 	// flowing is when the connection's first packet arrived, nil before.
 	flowing atomic.Pointer[time.Time]

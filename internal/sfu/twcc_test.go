@@ -36,7 +36,7 @@ func twccPublisherAPI(t *testing.T) *webrtc.API {
 	return webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(registry))
 }
 
-func watchTransportFeedback(sender *webrtc.RTPSender) <-chan struct{} {
+func watchRTCP[P rtcp.Packet](sender *webrtc.RTPSender) <-chan struct{} {
 	feedback := make(chan struct{}, 1)
 
 	go func() {
@@ -47,7 +47,7 @@ func watchTransportFeedback(sender *webrtc.RTPSender) <-chan struct{} {
 			}
 
 			for _, packet := range packets {
-				if _, ok := packet.(*rtcp.TransportLayerCC); ok {
+				if _, ok := packet.(P); ok {
 					select {
 					case feedback <- struct{}{}:
 					default:
@@ -93,7 +93,7 @@ func TestPublisherReceivesTransportWideFeedback(t *testing.T) {
 		t.Fatal("the server's answer to a publisher does not negotiate transport-wide sequence numbers")
 	}
 
-	feedback := watchTransportFeedback(sender)
+	feedback := watchRTCP[*rtcp.TransportLayerCC](sender)
 
 	go pumpMedia(video)
 

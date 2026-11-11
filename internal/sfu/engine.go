@@ -90,9 +90,10 @@ func newEngine(settingEngine webrtc.SettingEngine, mediaAddrs []relay.MediaAddr)
 type congestionFeedback int
 
 const (
-	// feedbackReceiverEstimate is REMB and receiver reports only.
+	// feedbackReceiverEstimate is REMB alone, without receiver reports.
 	feedbackReceiverEstimate congestionFeedback = iota
-	// feedbackTransportWide adds transport-wide congestion control feedback.
+	// feedbackTransportWide is REMB, receiver reports and transport-wide
+	// congestion control feedback.
 	feedbackTransportWide
 )
 
@@ -108,9 +109,9 @@ func newAPI(settingEngine webrtc.SettingEngine, feedback congestionFeedback) (*w
 	}
 
 	if feedback == feedbackTransportWide {
-		err = webrtc.ConfigureTWCCSender(mediaEngine, registry)
+		err = configureTransportWideFeedback(mediaEngine, registry)
 		if err != nil {
-			return nil, fmt.Errorf("sfu: transport-wide congestion control feedback: %w", err)
+			return nil, err
 		}
 	}
 
@@ -317,8 +318,7 @@ func newMediaEngine() (*webrtc.MediaEngine, error) {
 }
 
 // newInterceptors builds the RTCP pipeline: NACK responses for viewers,
-// NACK generation toward publishers, and sender/receiver reports in
-// both directions.
+// NACK generation toward publishers, and sender reports.
 func newInterceptors() (*interceptor.Registry, error) {
 	registry := &interceptor.Registry{}
 
@@ -343,14 +343,23 @@ func newInterceptors() (*interceptor.Registry, error) {
 
 	registry.Add(senderReports)
 
+	return registry, nil
+}
+
+func configureTransportWideFeedback(mediaEngine *webrtc.MediaEngine, registry *interceptor.Registry) error {
 	receiverReports, err := report.NewReceiverInterceptor()
 	if err != nil {
-		return nil, fmt.Errorf("sfu: receiver reports: %w", err)
+		return fmt.Errorf("sfu: receiver reports: %w", err)
 	}
 
 	registry.Add(receiverReports)
 
-	return registry, nil
+	err = webrtc.ConfigureTWCCSender(mediaEngine, registry)
+	if err != nil {
+		return fmt.Errorf("sfu: transport-wide congestion control feedback: %w", err)
+	}
+
+	return nil
 }
 
 // NewUpstreamPeerConnection creates the connection a member publishes up on.
