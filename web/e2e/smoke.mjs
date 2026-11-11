@@ -397,8 +397,14 @@ const sentLayers = `
 (async () => {
   const layers = {};
   for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
-    for (const r of (await pc.getStats()).values()) {
-      if (r.type === 'outbound-rtp' && r.kind === 'video' && r.rid) layers[r.rid] = { bytes: r.bytesSent || 0, width: r.frameWidth || 0 };
+    for (const sender of pc.getSenders().filter((sender) => sender.track?.kind === 'video')) {
+      const stats = {};
+      for (const r of (await sender.getStats()).values()) {
+        if (r.type === 'outbound-rtp' && r.rid) stats[r.rid] = r;
+      }
+      for (const { rid, active } of sender.getParameters().encodings.filter((encoding) => encoding.rid)) {
+        layers[rid] = { active, bytes: stats[rid]?.bytesSent || 0, width: stats[rid]?.frameWidth || 0 };
+      }
     }
   }
   return layers;
@@ -420,12 +426,25 @@ function clickLocalPin(label) {
   return true
 }
 
-const LAYER_PAUSE_MS = 9000
+const LAYER_PAUSE_TIMEOUT_MS = 30000
+const LAYER_IDLE_MS = 3000
 
-async function layerGrows(publisher, rid, ms) {
-  const before = (await evalJs(publisher, sentLayers))[rid]?.bytes ?? 0
-  await sleep(ms)
-  return ((await evalJs(publisher, sentLayers))[rid]?.bytes ?? 0) > before
+function pausedFor(rid, ms) {
+  const seen = []
+  return (layers) => {
+    const layer = layers[rid]
+    if (!layer) return false
+    const at = Date.now()
+    seen.push({ at, bytes: layer.bytes })
+    const idleSince = seen.findLast((sample) => at - sample.at >= ms)
+    return !layer.active && idleSince?.bytes === layer.bytes
+  }
+}
+
+async function checkLayerPaused(failures, publisher, rid, detail) {
+  const paused = await waitFor(publisher, sentLayers, pausedFor(rid, LAYER_IDLE_MS), LAYER_PAUSE_TIMEOUT_MS)
+  console.log(`simulcast ${rid} layer ${paused.ok ? 'paused' : 'not paused'}: ${JSON.stringify(paused.value)}`)
+  check(failures, 'simulcast', paused.ok, `${detail}: ${JSON.stringify(paused.value)}`)
 }
 
 // The publisher encodes only the layers some viewer wants (and always the
@@ -434,8 +453,7 @@ async function checkSimulcast(failures, publisher, viewer) {
   const sent = await waitFor(publisher, sentLayers, (layers) => ['l', 'h'].every((rid) => layers[rid]?.bytes > 0), 20000)
   console.log(`simulcast sent: ${JSON.stringify(sent.value)}`)
   check(failures, 'simulcast', sent.ok, `publisher is not sending the lowest and the wanted layer: ${JSON.stringify(sent.value)}`)
-  await sleep(LAYER_PAUSE_MS)
-  check(failures, 'simulcast', !(await layerGrows(publisher, 'm', 3000)), 'the middle layer is still encoded although nobody in a grid of two wants it')
+  await checkLayerPaused(failures, publisher, 'm', 'the middle layer is still encoded although nobody in a grid of two wants it')
 
   // Sizes are compared with each other, not with pixels: which resolution
   // the capture and the encoder settle on is the browser's business, that
@@ -449,8 +467,7 @@ async function checkSimulcast(failures, publisher, viewer) {
   const filmstrip = await waitFor(viewer, remoteVideoWidth, (width) => width > 0 && width * 2 <= full.value, 20000)
   console.log(`simulcast filmstrip: remote video ${filmstrip.value}px wide against ${full.value}px`)
   check(failures, 'simulcast', filmstrip.ok, `filmstrip: remote video ${filmstrip.value}px wide, not a layer below ${full.value}px`)
-  await sleep(LAYER_PAUSE_MS)
-  check(failures, 'simulcast', !(await layerGrows(publisher, 'h', 3000)), 'the top layer is still encoded although the only viewer shows a thumbnail')
+  await checkLayerPaused(failures, publisher, 'h', 'the top layer is still encoded although the only viewer shows a thumbnail')
 
   check(failures, 'simulcast', await callJs(viewer, clickLocalPin, 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
 
