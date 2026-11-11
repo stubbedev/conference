@@ -4,15 +4,17 @@ import { toast } from 'sonner'
 
 import { ControlsBar } from '@/components/ControlsBar'
 import { DiagnosticsPanel } from '@/components/DiagnosticsPanel'
+import { ErrorScreen } from '@/components/ErrorScreen'
 import { HudBackdrop } from '@/components/HudBackdrop'
 import { DeviceSettingsPopover } from '@/components/MediaSettings'
 import { MeetingReady } from '@/components/MeetingReady'
 import { MemberAnnouncer } from '@/components/MemberAnnouncer'
 import { Prejoin } from '@/components/Prejoin'
 import { RoomHeader } from '@/components/RoomHeader'
-import { CheckingScreen, ErrorScreen, GateScreen, JoiningScreen } from '@/components/RoomScreens'
+import { CheckingScreen, GateScreen, JoiningScreen } from '@/components/RoomScreens'
 import { RoomSidebar } from '@/components/RoomSidebar'
 import { Stage } from '@/components/Stage'
+import { Button } from '@/components/ui/button'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { TranslationAudio } from '@/components/TranslationAudio'
 import { TranslationSettings } from '@/components/TranslationSettings'
@@ -191,7 +193,15 @@ export default function Room() {
     )
   }
 
-  if (phase === 'error') return <ErrorScreen message={session.fatalError} onBack={() => navigate('/')} />
+  if (phase === 'error') {
+    return (
+      <ErrorScreen title="Could not open this room" message={session.fatalError}>
+        <Button variant="secondary" onClick={() => navigate('/')}>
+          Back to start
+        </Button>
+      </ErrorScreen>
+    )
+  }
 
   if (phase === 'prejoin') {
     return (
