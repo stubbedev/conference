@@ -7,6 +7,7 @@
 
 import { isE2EEStats, type E2EEStats, type TransformOptions, type WorkerMessage } from '@/lib/e2ee'
 import { errorText } from '@/lib/errors'
+import { sendsBothLayers } from '@/lib/layer-probe'
 import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
 import { parseChatText, Refusals, type Refused } from '@/lib/sealed'
@@ -314,11 +315,20 @@ async function sendsVP9Simulcast(track: MediaStreamTrack): Promise<boolean> {
         scalabilityMode: SIMULCAST_STREAM_MODE,
       },
     })
-    return info.supported
+    return info.supported && (await sendsVP9Layers())
   } catch (err) {
     console.warn('sfu: asking whether the fluid share layer can be encoded', err)
     return false
   }
+}
+
+// A browser can claim VP9 simulcast and still send one encoding, so the
+// claim is checked by encoding once per page.
+let vp9LayersProbe: Promise<boolean> | null = null
+
+function sendsVP9Layers(): Promise<boolean> {
+  vp9LayersProbe ??= sendsBothLayers('VP9')
+  return vp9LayersProbe
 }
 
 // tuneScreenSender applies the screen-share encoding. A browser that
