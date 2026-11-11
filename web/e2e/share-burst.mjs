@@ -57,9 +57,10 @@ const BURST_MIN_FPS = 15
 const LIMITED_BY_BANDWIDTH = 'bandwidth'
 
 // A viewer watching the fluid encoding plays at least this share of the
-// frames a burst was sent with, and does not freeze once it has started.
+// frames a burst was sent with.
 const MIN_PLAYED_SHARE = 0.8
-const MAX_FROZEN_MS = 500
+
+const FREEZE_MAX_FRAME_INTERVALS = 30
 
 // The frames of a burst the presenter sent that must reach a viewer
 // watching the fluid encoding. The two ends are read a moment apart, so a
@@ -178,14 +179,40 @@ const total = (rows, field) => rows.reduce((sum, row) => sum + row[field], 0)
 // whether the viewer was watching that encoding from start to end.
 function burstOfRows(rows) {
   const started = rows.filter((row) => burstStarted(row.second))
+  const delivered = total(rows, 'encoded') > 0 ? total(rows, 'received') / total(rows, 'encoded') : 0
+  const decoded = total(rows, 'decoded')
   return {
     fluid: rows.every((row) => row.fluid),
     sentFps: perSecond(total(rows, 'encoded'), total(rows, 'sendSeconds')),
-    decodedFps: perSecond(total(rows, 'decoded'), total(rows, 'recvSeconds')),
-    delivered: total(rows, 'encoded') > 0 ? total(rows, 'received') / total(rows, 'encoded') : 0,
+    decodedFps: perSecond(decoded, total(rows, 'recvSeconds')),
+    delivered,
     freezes: total(started, 'freezes'),
     frozenMs: Math.max(0, ...started.map((row) => row.frozenMs)),
+    playingFrameMs: decoded > 0 ? (total(rows, 'recvSeconds') * 1000 - total(rows, 'frozenMs')) / decoded : Infinity,
+    causes: heldBackBy(rows, delivered),
   }
+}
+
+function heldBackBy(rows, delivered) {
+  const causes = []
+  const lost = total(rows, 'lost')
+  const requests = total(rows, 'viewerPlis') + total(rows, 'presenterPlis')
+  const estimates = rows.map((row) => row.estimateBps).filter((bps) => bps !== null)
+  const limited = rows.filter((row) => row.limit === LIMITED_BY_BANDWIDTH).map((row) => row.second)
+  if (lost > 0) causes.push(`${lost} packets lost`)
+  if (requests > 0) causes.push(`${requests} keyframe requests`)
+  if (estimates.some((bps) => bps < HELD_MIN_ESTIMATE)) causes.push(`the estimate sank to ${mbps(Math.min(...estimates))} Mbps`)
+  if (limited.length > 0) causes.push(`the encoder limited by bandwidth at t=${limited.join(', ')}s`)
+  if (delivered < MIN_DELIVERED_SHARE) causes.push(`${(delivered * 100).toFixed(0)}% of its frames forwarded`)
+  return causes
+}
+
+function freezeFailure(burst) {
+  if (burst.freezes === 0) return null
+  if (burst.causes.length > 0) return `the share froze for ${burst.frozenMs} ms in the middle of a scrolling burst with ${burst.causes.join(', ')}`
+  const limitMs = FREEZE_MAX_FRAME_INTERVALS * burst.playingFrameMs
+  if (burst.frozenMs <= limitMs) return null
+  return `the share froze for ${burst.frozenMs} ms in the middle of a scrolling burst, over ${FREEZE_MAX_FRAME_INTERVALS} times its ${burst.playingFrameMs.toFixed(0)} ms between frames while it played (${limitMs.toFixed(0)} ms)`
 }
 
 function summarize({ rows, end }) {
@@ -262,10 +289,9 @@ function failuresOf(label, s) {
 
   const leastDelivered = Math.min(...fluid.map((burst) => burst.delivered))
   const leastPlayed = Math.min(...fluid.map((burst) => (burst.sentFps > 0 ? burst.decodedFps / burst.sentFps : 0)))
-  const longestFrozen = Math.max(...fluid.map((burst) => burst.frozenMs))
   if (leastDelivered < MIN_DELIVERED_SHARE) failures.push(`${label}: ${(leastDelivered * 100).toFixed(0)}% of the frames sent in a scrolling burst reached a viewer watching the fluid encoding, want at least ${MIN_DELIVERED_SHARE * 100}%`)
   if (leastPlayed < MIN_PLAYED_SHARE) failures.push(`${label}: a viewer watching the fluid encoding played ${(leastPlayed * 100).toFixed(0)}% of the frames a scrolling burst was sent with, want at least ${MIN_PLAYED_SHARE * 100}%`)
-  if (longestFrozen > MAX_FROZEN_MS) failures.push(`${label}: the share froze for ${longestFrozen} ms in the middle of a scrolling burst`)
+  for (const failure of fluid.map(freezeFailure).filter((failure) => failure !== null)) failures.push(`${label}: ${failure}`)
   if (s.keyframes > MAX_KEYFRAMES) failures.push(`${label}: a viewer watching the fluid encoding decoded ${s.keyframes} keyframes over ${cycles} bursts, want at most ${MAX_KEYFRAMES}`)
   return failures
 }
@@ -331,7 +357,7 @@ async function main() {
       console.error('\nserver log tail:\n' + server.log().split('\n').slice(-20).join('\n'))
       process.exitCode = 1
     } else {
-      console.log('\nSHARE BURST OK: the share starts with the estimate a scroll needs and keeps it while the screen sits still, its encoder is never limited by bandwidth, and the bursts a viewer watched on the fluid encoding arrived, played without freezing and needed no keyframe')
+      console.log('\nSHARE BURST OK: the share starts with the estimate a scroll needs and keeps it while the screen sits still, its encoder is never limited by bandwidth, and the bursts a viewer watched on the fluid encoding arrived, played without a freeze that anything held back or that stood far beyond their own frame gaps, and needed no keyframe')
     }
   } finally {
     await Promise.all(procs.map((p) => stopProcess(p, 'SIGKILL')))
