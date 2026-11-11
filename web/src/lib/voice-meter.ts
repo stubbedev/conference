@@ -1,6 +1,11 @@
 import { heard, holdLeft, isVoiced, type LastVoiced } from './speaking.ts'
 
-const FFT_SIZE = 1024
+/**
+ * Samples each measurement reads: all the sound since the one before
+ * (SPEAKING_SAMPLE_MS is 4,800 samples at 48 kHz), so a syllable spoken
+ * between two measurements still counts.
+ */
+export const METER_SAMPLES = 8192
 
 /**
  * VoiceMeter tells whether the audio fed into its input carries a voice,
@@ -14,8 +19,8 @@ export class VoiceMeter {
 
   constructor(ctx: BaseAudioContext) {
     this.input = ctx.createAnalyser()
-    this.input.fftSize = FFT_SIZE
-    this.frame = new Float32Array(FFT_SIZE)
+    this.input.fftSize = METER_SAMPLES
+    this.frame = new Float32Array(METER_SAMPLES)
   }
 
   sample(now: number): void {

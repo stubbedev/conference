@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { heard, holdLeft, isVoiced, SPEAKING_HOLD_MS, SPEAKING_SAMPLE_MS, type LastVoiced } from './speaking.ts'
+import { METER_SAMPLES } from './voice-meter.ts'
 
 const VOICE = 0.3
 const SILENCE = 0.01
@@ -28,6 +29,26 @@ test('a frame is voiced by its loudness, whichever way the wave swings', () => {
   assert.equal(isVoiced(Float32Array.from({ length: 1024 }, (_, i) => VOICE * Math.sin(i / 8))), true)
 })
 
+test('a syllable anywhere in what a measurement reads is heard, not averaged away', () => {
+  // One stretch of quiet speech in a measurement that is otherwise silence:
+  // averaged over the whole buffer it falls under the threshold.
+  const syllable = new Float32Array(METER_SAMPLES)
+  syllable.set(tone(0.08), 3 * 1024)
+  assert.equal(isVoiced(syllable), true)
+
+  assert.equal(isVoiced(Float32Array.from({ length: METER_SAMPLES }, (_, i) => (i % 2 === 0 ? SILENCE : -SILENCE))), false)
+  assert.equal(isVoiced(new Float32Array(METER_SAMPLES)), false)
+})
+
+test('each measurement reads at least the sound since the one before', () => {
+  const samplesBetween = (SPEAKING_SAMPLE_MS / 1000) * 48_000
+  assert.ok(METER_SAMPLES >= samplesBetween, `${METER_SAMPLES} samples read, ${samplesBetween} pass between measurements`)
+})
+
+test('the ring lights within one measurement of a voice starting', () => {
+  assert.ok(SPEAKING_SAMPLE_MS <= 100, `the first sound can wait ${SPEAKING_SAMPLE_MS} ms for the ring`)
+})
+
 test('the ring stays off until a voice is heard, then turns on at once', () => {
   assert.deepEqual(ring([SILENCE, SILENCE, VOICE]), [false, false, true])
 })
@@ -50,7 +71,7 @@ test('a single click does not latch the ring', () => {
   const shown = ring([VOICE, ...quiet(12)])
   const onFor = shown.lastIndexOf(true) * SPEAKING_SAMPLE_MS
   assert.ok(onFor < SPEAKING_HOLD_MS, `the ring stayed on for ${onFor} ms after one click`)
-  assert.ok(shown.slice(4).every((on) => !on))
+  assert.ok(shown.slice(Math.ceil(SPEAKING_HOLD_MS / SPEAKING_SAMPLE_MS)).every((on) => !on))
 })
 
 test('a translated voice is held by the same rule after it stops playing', () => {
