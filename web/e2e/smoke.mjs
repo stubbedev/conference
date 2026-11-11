@@ -38,6 +38,7 @@ import {
   waitFor,
 } from './browser.mjs'
 import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
+import { SCREEN_LAYER_RIDS } from '../src/lib/encodings.ts'
 import {
   clickButtonByTitle,
   fakeDisplay,
@@ -489,13 +490,7 @@ function clickTilePin(suffix, label) {
 
 const SHARE_FPS_WINDOW_MS = 3000
 
-async function remoteScreenFps(viewer) {
-  const before = await evalJs(viewer, remoteScreen)
-  await sleep(SHARE_FPS_WINDOW_MS)
-  const after = await evalJs(viewer, remoteScreen)
-  if (!before || !after) return { width: 0, fps: 0 }
-  return { width: after.width, fps: ((after.frames - before.frames) * 1000) / SHARE_FPS_WINDOW_MS }
-}
+const [SLOW_SHARE_RID, FLUID_SHARE_RID] = SCREEN_LAYER_RIDS
 
 const SHARE_SETTLE_MS = 20000
 
@@ -530,11 +525,12 @@ async function shareTimeline(publisher, viewer) {
 const screenReceived = `
 (async () => {
   const tile = (${tileByLabel.toString()})('screen')
-  const trackId = tile?.querySelector('video')?.srcObject?.getVideoTracks()[0]?.id
+  const video = tile?.querySelector('video')
+  const trackId = video?.srcObject?.getVideoTracks()[0]?.id
   for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
     for (const r of (await pc.getStats()).values()) {
       if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
-        return { fps: r.framesPerSecond || 0, lost: r.packetsLost || 0, plis: r.pliCount || 0, freezes: r.freezeCount || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0 }
+        return { width: video.videoWidth, rendered: video.getVideoPlaybackQuality().totalVideoFrames, received: r.framesReceived || 0, bytes: r.bytesReceived || 0, fps: r.framesPerSecond || 0, lost: r.packetsLost || 0, plis: r.pliCount || 0, freezes: r.freezeCount || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0 }
       }
     }
   }
@@ -542,16 +538,56 @@ const screenReceived = `
 })()
 `
 
-async function settledScreenFps(viewer, publisher, settled) {
+const countMismatch = (received, sent) => (received > 0 && sent > 0 ? Math.abs(Math.log(received / sent)) : received === sent ? 0 : Infinity)
+
+function closestEncoding(received, encodings) {
+  const distances = Object.entries(encodings).map(([rid, sent]) => [rid, countMismatch(received.frames, sent.frames) + countMismatch(received.bytes, sent.bytes)])
+  const [rid, distance] = distances.reduce((best, next) => (next[1] < best[1] ? next : best), [null, Infinity])
+  return distance === Infinity ? null : rid
+}
+
+async function receivedShare(publisher, viewer) {
+  const sample = () => Promise.all([evalJs(viewer, screenReceived), evalJs(publisher, shareSendCounters)])
+  const [viewedBefore, sentBefore] = await sample()
+  await sleep(SHARE_FPS_WINDOW_MS)
+  const [viewedAfter, sentAfter] = await sample()
+  const seconds = SHARE_FPS_WINDOW_MS / 1000
+  const encodings = Object.fromEntries(
+    Object.entries(sentAfter?.layers ?? {}).map(([rid, layer]) => {
+      const before = sentBefore?.layers[rid]
+      return [rid, { frames: layer.encoded - (before?.encoded ?? 0), bytes: layer.bytes - (before?.bytes ?? 0), limit: layer.limit }]
+    }),
+  )
+  if (!viewedBefore || !viewedAfter) return { width: 0, fps: 0, received: null, encoding: null, encodings }
+  const received = { frames: viewedAfter.received - viewedBefore.received, bytes: viewedAfter.bytes - viewedBefore.bytes }
+  return { width: viewedAfter.width, fps: (viewedAfter.rendered - viewedBefore.rendered) / seconds, received, encoding: closestEncoding(received, encodings), encodings, stats: viewedAfter }
+}
+
+const describeCounts = ({ frames, bytes }) => `${frames} frames, ${bytes} bytes`
+
+async function settledShare(publisher, viewer, rid) {
   const deadline = Date.now() + SHARE_SETTLE_MS
   for (;;) {
-    const measured = await remoteScreenFps(viewer)
-    const sent = await evalJs(publisher, screenSent)
-    const encoded = Object.entries(sent?.layers ?? {}).map(([rid, layer]) => `${rid} ${layer.fps} fps (${layer.limit})`)
-    const received = await evalJs(viewer, screenReceived)
-    console.log(`  share ${measured.width}px at ${measured.fps.toFixed(1)} fps, received ${JSON.stringify(received)}; publisher encodes ${encoded.join(', ')} with ${sent?.available ?? 0} bps available`)
-    if (settled(measured) || Date.now() > deadline) return measured
+    const share = await receivedShare(publisher, viewer)
+    const encoded = Object.entries(share.encodings).map(([name, encoding]) => `${name} ${describeCounts(encoding)} (${encoding.limit})`)
+    console.log(`  share ${share.width}px at ${share.fps.toFixed(1)} fps, received ${share.received ? describeCounts(share.received) : 'nothing'} in ${SHARE_FPS_WINDOW_MS / 1000} s: the ${share.encoding ?? 'unidentified'} encoding; ${JSON.stringify(share.stats)}; publisher sent ${encoded.join(', ')}`)
+    if ((share.encoding === rid && share.fps > 0) || Date.now() > deadline) return share
   }
+}
+
+function checkShareEncoding(failures, where, share, rid) {
+  console.log(`screen share ${where}: ${share.width}px at ${share.fps.toFixed(1)} fps on the ${share.encoding ?? 'unidentified'} encoding`)
+  check(failures, 'screen share', share.fps > 0, `the share ${where} does not play`)
+  check(failures, 'screen share', share.encoding === rid, `the share ${where} plays the ${share.encoding ?? 'unidentified'} encoding (received ${JSON.stringify(share.received)} against ${JSON.stringify(share.encodings)}), not ${rid}`)
+}
+
+function checkFluidRate(failures, where, share) {
+  const limit = share.encodings[FLUID_SHARE_RID]?.limit
+  if (limit !== 'none') {
+    console.log(`screen share ${where}: ${share.fps.toFixed(1)} fps not judged, the publisher's fluid encoding is limited by ${limit}`)
+    return
+  }
+  check(failures, 'screen share', share.fps >= FLUID_SHARE_MIN_FPS, `the share ${where} plays at ${share.fps.toFixed(1)} fps although the publisher encodes the fluid encoding unhindered`)
 }
 
 const FLUID_SHARE_MIN_FPS = 15
@@ -560,7 +596,6 @@ const STILL_SETTLE_MS = 4000
 const STILL_WINDOW_MS = 10_000
 const STILL_MAX_KEYFRAMES = 1
 const STILL_MAX_FREEZES = 1
-const SLOW_SHARE_MAX_FPS = 10
 
 // A share goes out as a fluid and a slow encoding, both at full size: a
 // pinned share plays the fluid one, a share shrunk into the strip under a
@@ -589,21 +624,20 @@ async function checkScreenShare(failures, publisher, viewer) {
   check(failures, 'screen share', pinned.ok, `the pinned share arrives ${pinned.value?.width}px wide, not ${SHARE_WIDTH}px`)
   console.log('screen share timeline while pinned:')
   await shareTimeline(publisher, viewer)
-  const fluid = await remoteScreenFps(viewer)
-  console.log(`screen share pinned: ${fluid.width}px at ${fluid.fps.toFixed(1)} fps`)
-  check(failures, 'screen share', fluid.fps >= FLUID_SHARE_MIN_FPS, `the pinned share plays at ${fluid.fps.toFixed(1)} fps, not the fluid encoding`)
+  const fluid = await settledShare(publisher, viewer, FLUID_SHARE_RID)
+  checkShareEncoding(failures, 'pinned', fluid, FLUID_SHARE_RID)
+  checkFluidRate(failures, 'pinned', fluid)
 
   check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Pin to main view'), 'no "Pin to main view" button on the viewer\'s own tile')
-  const slow = await settledScreenFps(viewer, publisher, (measured) => measured.fps > 0 && measured.fps <= SLOW_SHARE_MAX_FPS)
-  console.log(`screen share in the strip: ${slow.width}px at ${slow.fps.toFixed(1)} fps`)
+  const slow = await settledShare(publisher, viewer, SLOW_SHARE_RID)
+  checkShareEncoding(failures, 'in the strip', slow, SLOW_SHARE_RID)
   check(failures, 'screen share', slow.width === SHARE_WIDTH, `the share in the strip arrives ${slow.width}px wide, not at full size`)
-  check(failures, 'screen share', slow.fps > 0 && slow.fps <= SLOW_SHARE_MAX_FPS, `the share in the strip plays at ${slow.fps.toFixed(1)} fps, not the slow encoding`)
 
   check(failures, 'screen share', await callJs(viewer, clickTilePin, '(you)', 'Unpin'), 'no "Unpin" button on the viewer\'s own tile')
   check(failures, 'screen share', await callJs(viewer, clickTilePin, 'screen', 'Pin to main view'), 'no "Pin to main view" button on the share')
-  const back = await settledScreenFps(viewer, publisher, (measured) => measured.fps >= FLUID_SHARE_MIN_FPS)
-  console.log(`screen share pinned again: ${back.width}px at ${back.fps.toFixed(1)} fps`)
-  check(failures, 'screen share', back.fps >= FLUID_SHARE_MIN_FPS, `the share pinned again plays at ${back.fps.toFixed(1)} fps, not the fluid encoding`)
+  const back = await settledShare(publisher, viewer, FLUID_SHARE_RID)
+  checkShareEncoding(failures, 'pinned again', back, FLUID_SHARE_RID)
+  checkFluidRate(failures, 'pinned again', back)
 
   await evalJs(publisher, shareMode('still'))
   await sleep(STILL_SETTLE_MS)
