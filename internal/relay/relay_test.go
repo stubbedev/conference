@@ -329,7 +329,9 @@ func TestPickedPortIsAdvertised(t *testing.T) {
 	listener := listen(t)
 	port := listener.Port()
 
-	server, err := listener.Serve([]relay.MediaAddr{{Announced: netip.MustParseAddrPort("127.0.0.1:5000"), Local: netip.MustParseAddrPort("127.0.0.1:5000")}}, func(string) bool { return true })
+	media := netip.MustParseAddrPort("127.0.0.1:5000")
+
+	server, err := listener.Serve([]relay.MediaAddr{{Announced: media, Local: media}}, func(string) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}

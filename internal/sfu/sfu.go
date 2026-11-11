@@ -142,7 +142,7 @@ type JoinRequest struct {
 // fields relevant to Type are meaningful, and a frame to a member is
 // written in its type's shape (see MarshalJSON).
 type Message struct {
-	Type string `json:"type"`
+	Type MessageType `json:"type"`
 
 	// join
 	Room    string `json:"room"`
@@ -311,7 +311,7 @@ func (h *Hub) CloseRoom(slug string) bool {
 	}
 
 	for _, member := range room.snapshot() {
-		member.send(Message{Type: "error", Code: "room-closed", Text: "This room was closed by the operator."})
+		member.send(Message{Type: msgError, Code: "room-closed", Text: "This room was closed by the operator."})
 
 		member.Leave()
 	}
@@ -459,7 +459,7 @@ func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 	self := member.Info()
 
 	member.send(Message{
-		Type: "welcome", Self: &self, Members: others, Recorder: r.recorder, TranslatingBy: r.translatingBy,
+		Type: msgWelcome, Self: &self, Members: others, Recorder: r.recorder, TranslatingBy: r.translatingBy,
 		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
 	})
 
@@ -485,7 +485,7 @@ func (r *Room) join(req JoinRequest, send func(Message)) (*Member, error) {
 	}
 
 	r.broadcastExcept(member.ID, Message{
-		Type: "member-joined", ID: member.ID, Short: member.Short, Name: member.Name, Replaces: replaces,
+		Type: msgMemberJoined, ID: member.ID, Short: member.Short, Name: member.Name, Replaces: replaces,
 	})
 
 	// While live translation is on, a joiner translates its own speech too.
@@ -545,10 +545,10 @@ func (r *Room) removeMember(member *Member) {
 	}
 
 	if recorderLeft {
-		r.broadcast(Message{Type: "recording", From: member.ID, On: false})
+		r.broadcast(Message{Type: msgRecording, From: member.ID, On: false})
 	}
 
-	r.broadcast(Message{Type: "member-left", ID: member.ID})
+	r.broadcast(Message{Type: msgMemberLeft, ID: member.ID})
 }
 
 // claimRecording makes id the room's single announced recorder and
@@ -732,7 +732,7 @@ func (r *Room) adaptLayers() {
 			r.requestLayerKeyframes(source, track, track.retarget(now, true))
 
 			if wanted, changed := track.updateDemand(now); changed {
-				source.send(Message{Type: "layers", PC: track.key.up.PCID(), Mid: track.key.mid, Active: wanted[:]})
+				source.send(Message{Type: msgLayers, PC: track.key.up.PCID(), Mid: track.key.mid, Active: wanted[:]})
 			}
 		}
 	}
@@ -967,39 +967,44 @@ func (m *Member) enqueue(task func()) {
 
 func (m *Member) fail(code string, err error) {
 	log.Printf("room %s member %s: %s: %v", m.room.slug, m.ID, code, err)
-	m.send(Message{Type: "error", Code: code, Text: err.Error()})
+	m.send(Message{Type: msgError, Code: code, Text: err.Error()})
 }
 
 func (m *Member) apply(msg Message) { //nolint:cyclop // one flat case per signaling message type.
 	switch msg.Type {
-	case "offer":
+	case msgOffer:
 		m.handleUpOffer(msg)
-	case "close":
+	case msgClose:
 		m.handleUpClose(msg)
-	case "answer":
+	case msgAnswer:
 		m.handleDownAnswer(msg)
-	case "ice":
+	case msgIce:
 		m.handleICE(msg)
-	case "pli":
+	case msgPli:
 		m.handlePLI(msg)
-	case "state":
+	case msgState:
 		m.handleState(msg)
-	case "chat":
+	case msgChat:
 		m.handleChat(msg)
-	case "record":
+	case msgRecord:
 		m.handleRecord(msg)
-	case "moderate":
+	case msgModerate:
 		m.handleModerate(msg)
-	case "layer":
+	case msgLayer:
 		m.handleLayer(msg)
-	case "lang":
+	case msgLang:
 		m.handleLang(msg)
-	case "caption":
+	case msgCaption:
 		m.handleCaption(msg)
-	case "translate":
+	case msgTranslate:
 		m.handleTranslate(msg)
-	case "translate-token-request":
+	case msgTranslateTokenRequest:
 		m.handleTokenRequest()
+	case msgJoin:
+		m.fail("bad-type", fmt.Errorf("%w: %s after the member joined", ErrBadRequest, msg.Type))
+	case msgWelcome, msgMemberJoined, msgMemberLeft, msgMemberState, msgError, msgRecording, msgTranslating,
+		msgLayers, msgForced, msgKicked, msgTranslateToken:
+		m.fail("bad-type", fmt.Errorf("%w: %s is a message the server sends", ErrBadRequest, msg.Type))
 	}
 }
 
@@ -1066,7 +1071,7 @@ func (m *Member) handleState(msg Message) {
 	}
 
 	m.room.broadcastExcept(m.ID, Message{
-		Type: "member-state", ID: m.ID,
+		Type: msgMemberState, ID: m.ID,
 		Mic: next.Mic, Cam: next.Cam, Sharing: next.Sharing,
 	})
 }
@@ -1079,7 +1084,7 @@ func (m *Member) handleChat(msg Message) {
 	}
 
 	m.room.broadcastExcept(m.ID, Message{
-		Type: "chat", From: m.ID, IV: msg.IV, CT: msg.CT, TS: time.Now().UnixMilli(),
+		Type: msgChat, From: m.ID, IV: msg.IV, CT: msg.CT, TS: time.Now().UnixMilli(),
 	})
 }
 
@@ -1105,7 +1110,7 @@ func (m *Member) handleRecord(msg Message) {
 		return
 	}
 
-	m.room.broadcast(Message{Type: "recording", From: m.ID, On: msg.On})
+	m.room.broadcast(Message{Type: msgRecording, From: m.ID, On: msg.On})
 }
 
 // handleModerate applies a privileged member's action against another
@@ -1127,9 +1132,9 @@ func (m *Member) handleModerate(msg Message) {
 
 	switch msg.Action {
 	case ActionMute, ActionCam, ActionScreen:
-		target.send(Message{Type: "forced", Action: msg.Action})
+		target.send(Message{Type: msgForced, Action: msg.Action})
 	case ActionKick:
-		target.send(Message{Type: "kicked"})
+		target.send(Message{Type: msgKicked})
 		target.Leave()
 	case ActionLang:
 		if !sealed(msg, maxLangCiphertext) {
@@ -1138,7 +1143,7 @@ func (m *Member) handleModerate(msg Message) {
 			return
 		}
 
-		target.send(Message{Type: "forced", Action: ActionLang, From: m.ID, IV: msg.IV, CT: msg.CT})
+		target.send(Message{Type: msgForced, Action: ActionLang, From: m.ID, IV: msg.IV, CT: msg.CT})
 	default:
 		m.fail("bad-action", ErrBadRequest)
 	}
@@ -1305,7 +1310,7 @@ func (m *Member) answerUp(upPeer *UpPeer, msg Message) {
 		return
 	}
 
-	m.send(Message{Type: "answer", PC: upPeer.which.PCID(), SDP: upPeer.pc.LocalDescription().SDP})
+	m.send(Message{Type: msgAnswer, PC: upPeer.which.PCID(), SDP: upPeer.pc.LocalDescription().SDP})
 
 	// Also rescan after the answer: renegotiated-away tracks (a
 	// translated voice stopped) must be torn down and fanned out.
@@ -1324,7 +1329,7 @@ func (m *Member) iceSender(pcID string) func(*webrtc.ICECandidate) {
 
 		init := c.ToJSON()
 
-		m.send(Message{Type: "ice", PC: pcID, Candidate: &init})
+		m.send(Message{Type: msgIce, PC: pcID, Candidate: &init})
 	}
 }
 
@@ -2603,7 +2608,7 @@ func (dp *DownPeer) negotiate(viewer *Member) {
 
 	log.Printf("sfu: offer %s viewer=%.6s source=%.6s [%s]", viewer.room.slug, viewer.ID, dp.sourceID, sdpFingerprint(sdp))
 
-	viewer.send(Message{Type: "offer", PC: dp.pcID(), SDP: sdp, Tracks: tracks})
+	viewer.send(Message{Type: msgOffer, PC: dp.pcID(), SDP: sdp, Tracks: tracks})
 }
 
 func (dp *DownPeer) applyAnswer(sdp string, viewer *Member) {

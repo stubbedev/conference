@@ -43,21 +43,37 @@ func TestReadyLineNamesKernelPickedPorts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	line, found := strings.CutPrefix(out.String(), readyPrefix)
+	ready := parseReadyLine(t, out.String())
+
+	checkAnnouncedHTTP(t, ready, bound.http.Addr())
+	checkAnnouncedICE(t, ready)
+	checkAnnouncedTURN(t, ready, bound.turn.Credentials().ICEServers("127.0.0.1", "alice")[0].URLs)
+}
+
+func parseReadyLine(t *testing.T, announced string) readiness {
+	t.Helper()
+
+	line, found := strings.CutPrefix(announced, readyPrefix)
 	if !found || strings.Count(line, "\n") != 1 || !strings.HasSuffix(line, "\n") {
-		t.Fatalf("announced %q, want one line starting with %q", out.String(), readyPrefix)
+		t.Fatalf("announced %q, want one line starting with %q", announced, readyPrefix)
 	}
 
 	var ready readiness
 
-	err = json.Unmarshal([]byte(line), &ready)
+	err := json.Unmarshal([]byte(line), &ready)
 	if err != nil {
 		t.Fatalf("ready line %q: %v", line, err)
 	}
 
+	return ready
+}
+
+func checkAnnouncedHTTP(t *testing.T, ready readiness, bound net.Addr) {
+	t.Helper()
+
 	httpAddr := netip.MustParseAddrPort(ready.HTTP)
-	if httpAddr.Port() == 0 || ready.HTTP != bound.http.Addr().String() {
-		t.Fatalf("announced http %q, bound %s", ready.HTTP, bound.http.Addr())
+	if httpAddr.Port() == 0 || ready.HTTP != bound.String() {
+		t.Fatalf("announced http %q, bound %s", ready.HTTP, bound)
 	}
 
 	var dialer net.Dialer
@@ -68,6 +84,10 @@ func TestReadyLineNamesKernelPickedPorts(t *testing.T) {
 	}
 
 	_ = conn.Close()
+}
+
+func checkAnnouncedICE(t *testing.T, ready readiness) {
+	t.Helper()
 
 	if len(ready.ICEUDP) == 0 {
 		t.Fatal("announced no ICE address")
@@ -78,13 +98,17 @@ func TestReadyLineNamesKernelPickedPorts(t *testing.T) {
 			t.Fatalf("announced ICE address %q without its port", raw)
 		}
 	}
+}
+
+func checkAnnouncedTURN(t *testing.T, ready readiness, urls []string) {
+	t.Helper()
 
 	if ready.TURN == 0 {
 		t.Fatal("announced TURN port 0")
 	}
 
 	turnHost := ":" + strconv.Itoa(ready.TURN) + "?"
-	for _, url := range bound.turn.Credentials().ICEServers("127.0.0.1", "alice")[0].URLs {
+	for _, url := range urls {
 		if !strings.Contains(url, turnHost) {
 			t.Fatalf("TURN URL %q does not carry the announced port %d", url, ready.TURN)
 		}

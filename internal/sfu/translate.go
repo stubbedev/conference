@@ -58,7 +58,7 @@ func (m *Member) handleLang(msg Message) {
 		return
 	}
 
-	m.room.broadcastExcept(m.ID, Message{Type: "lang", From: m.ID, IV: msg.IV, CT: msg.CT})
+	m.room.broadcastExcept(m.ID, Message{Type: msgLang, From: m.ID, IV: msg.IV, CT: msg.CT})
 }
 
 // handleCaption relays a sealed subtitle while live translation is on.
@@ -77,7 +77,7 @@ func (m *Member) handleCaption(msg Message) {
 		return
 	}
 
-	m.room.broadcastExcept(m.ID, Message{Type: "caption", From: m.ID, IV: msg.IV, CT: msg.CT})
+	m.room.broadcastExcept(m.ID, Message{Type: msgCaption, From: m.ID, IV: msg.IV, CT: msg.CT})
 }
 
 // handleTranslate switches the room's live translation on or off. It is
@@ -96,7 +96,7 @@ func (m *Member) handleTranslate(msg Message) {
 		return
 	}
 
-	m.room.broadcast(Message{Type: "translating", From: m.ID, On: msg.On})
+	m.room.broadcast(Message{Type: msgTranslating, From: m.ID, On: msg.On})
 
 	if msg.On {
 		for _, member := range m.room.snapshot() {
@@ -126,7 +126,7 @@ func (m *Member) sendSpeechToken() {
 		return
 	}
 
-	m.send(Message{Type: "translate-token", Token: minted})
+	m.send(Message{Type: msgTranslateToken, Token: minted})
 }
 
 // setTranslating turns the mode on (remembering who started it) or off,
