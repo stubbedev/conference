@@ -218,14 +218,14 @@ German sentence without it comes out garbled.
   to `/tasks/run` and reads the converted WAV from `audio` (base64) in the
   reply. Set the model's speed in the engine, e.g. audio.cpp's
   `"default_request_options": {"num_inference_steps": "3"}` for
-  `chatterbox` with `"task": "vc"`. audio.cpp 0.9.4 needs two small
-  changes for this: `voice_ref` taken inline as above (it only takes a
-  file path there), and a cache of prepared voices
+  `chatterbox` with `"task": "vc"`. This needs audio.cpp from its `main`
+  at `de6fbe3` or later (after 0.9.4): it takes `voice_ref` inline as
+  above, and keeps a cache of prepared voices
   (`vc_reference_cache_slots` in the model's `session_options`, default
   1; set it to about the number of speakers using their own voice at the
   same time; 0 turns it off). A cached voice is prepared once instead of
-  for every sentence, which saved 0.3–0.4 s per sentence on an M1 Max and
-  brought a conversion to about 0.7 s. Like the cloning cache, it lives
+  for every sentence, which saved 0.2–0.3 s per sentence on an M1 Max and
+  brought a conversion to about 0.7–1.2 s. Like the cloning cache, it lives
   only in memory and goes with `--idle-unload-ms`. If a conversion fails,
   the listener hears the stock voice already made for it. As soon as a
   recording is accepted, the service has the conversion engine load its
