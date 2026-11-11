@@ -420,9 +420,39 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 	}
 
 	translating := time.Since(started)
+
+	// A long translation is voiced in pieces, all asked for at once and
+	// sent in order, so the listener hears its start while the rest is
+	// still being made.
+	pieces := speechPieces(translated)
+	voiced := make([]chan *voiceFrame, len(pieces))
+
+	var voicing sync.WaitGroup
+
+	for i, piece := range pieces {
+		voiced[i] = make(chan *voiceFrame, 1)
+
+		voicing.Go(func() { voiced[i] <- s.voice(ctx, current, job, target, piece, i, translating) })
+	}
+
+	for _, frame := range voiced {
+		if sent := <-frame; sent != nil {
+			s.emit(ctx, *sent)
+		}
+	}
+
+	voicing.Wait()
+}
+
+// voice speaks one piece of a translation, in the speaker's own voice
+// when they have one, falling back to the stock voice; nil when no voice
+// could speak it.
+func (s *session) voice(
+	ctx context.Context, current *speaker, job final, target language, text string, piece int, translating time.Duration,
+) *voiceFrame {
 	voicing := time.Now()
 
-	spoken, err := s.engines.speak(ctx, translated, target, job.voice, job.own)
+	spoken, err := s.engines.speak(ctx, text, target, job.voice, job.own)
 	cloned := job.own != nil
 
 	if err != nil && cloned {
@@ -433,25 +463,25 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 		if unconverted, ok := errors.AsType[*unconvertedError](err); ok {
 			spoken, err = unconverted.stock, nil
 		} else {
-			spoken, err = s.engines.speak(ctx, translated, target, job.own.stock, nil)
+			spoken, err = s.engines.speak(ctx, text, target, job.own.stock, nil)
 		}
 	}
 
 	if err != nil {
 		logFailure(ctx, "voice", err)
 
-		return
+		return nil
 	}
 
-	log.Printf("voice lang=%s translate_ms=%d voice_ms=%d convert_ms=%d own=%t",
-		target.Code, translating.Milliseconds(), time.Since(voicing).Milliseconds(), spoken.converting.Milliseconds(), cloned)
+	log.Printf("voice lang=%s piece=%d translate_ms=%d voice_ms=%d convert_ms=%d own=%t",
+		target.Code, piece, translating.Milliseconds(), time.Since(voicing).Milliseconds(), spoken.converting.Milliseconds(), cloned)
 
-	s.emit(ctx, voiceFrame{
+	return &voiceFrame{
 		header: wire.VoiceHeader{
 			Speaker: current.id, SegID: current.segID(job.seg), Lang: target.Code, Rate: spoken.rate, Cloned: cloned,
 		},
 		pcm: spoken.pcm,
-	})
+	}
 }
 
 func (s *session) caption(ctx context.Context, current *speaker, seg int64, source, lang language, text string, isFinal bool) {

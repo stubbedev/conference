@@ -522,6 +522,15 @@ A stream translates into the languages its `hello` names, and into
 nothing before it. If the browser goes away, the stream ends at once,
 and any sentence still being translated for it is dropped.
 
+A translation of 80 characters or more is voiced in pieces, split where
+a speaker would pause (punctuation followed by a space, at least 30
+characters a piece): all pieces are asked for at once and sent in order,
+so listeners hear the start of a long sentence while the rest is still
+being made. With OpenAI's voice and a local conversion on an M1 Max the
+first sound came 0.3–1.3 s sooner for a two-sentence translation. A
+piece that is slow to come leaves a pause in the middle rather than
+before the sentence.
+
 With `SPEECH_RUNTIME=browser` there are no tokens and no streams: the
 server never sees a member's speech to translate.
 
