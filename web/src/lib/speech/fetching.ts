@@ -1,10 +1,7 @@
+import { backoffDelay, sleep, type Backoff } from '../backoff.ts'
 import { errorMessage } from '../errors.ts'
 
-export const FETCH_ATTEMPTS = 5
-
-const FIRST_DELAY_MS = 1000
-
-const MAX_DELAY_MS = 16_000
+export const FETCH_BACKOFF: Backoff = { attempts: 5, firstDelayMs: 1000, maxDelayMs: 16_000 }
 
 const OK = 200
 
@@ -44,15 +41,10 @@ export function errorVerdict(err: unknown): Verdict {
   return err instanceof Error && NETWORK_ERRORS.has(err.name) ? 'transient' : 'permanent'
 }
 
-export function retryDelay(failures: number): number | null {
-  if (failures < 1 || failures >= FETCH_ATTEMPTS) return null
-  return Math.min(FIRST_DELAY_MS * 2 ** (failures - 1), MAX_DELAY_MS)
-}
-
 export function browserFetchDeps(onRetry: (retrying: Retrying) => void): FetchDeps {
   return {
     fetch: (url, init) => fetch(url, init),
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    sleep,
     onRetry,
   }
 }
@@ -237,11 +229,11 @@ class Download {
     if (errorVerdict(err) === 'permanent') throw new Error(`fetching ${this.url} failed${at}: ${errorMessage(err)}`, { cause: err })
 
     this.failures += 1
-    const delayMs = retryDelay(this.failures)
+    const delayMs = backoffDelay(FETCH_BACKOFF, this.failures)
     if (delayMs === null) {
       throw new Error(`fetching ${this.url} failed${at}, ${this.failures} times in a row: ${errorMessage(err)}`, { cause: err })
     }
-    this.deps.onRetry({ url: this.url, attempt: this.failures + 1, attempts: FETCH_ATTEMPTS, delayMs, reason: errorMessage(err) })
+    this.deps.onRetry({ url: this.url, attempt: this.failures + 1, attempts: FETCH_BACKOFF.attempts, delayMs, reason: errorMessage(err) })
     await this.deps.sleep(delayMs)
   }
 }

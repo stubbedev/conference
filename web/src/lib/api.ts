@@ -1,3 +1,5 @@
+import { sleep, withBackoff, type Backoff } from './backoff.ts'
+import { errorMessage } from './errors.ts'
 import type { SpeechModels } from './speech/models.ts'
 import type { Language } from './translate/languages.ts'
 
@@ -70,6 +72,17 @@ export interface CreateRoomInput {
 /** The server wants a room's password or refused the one it got: another can be tried. */
 export class PasswordRefused extends Error {}
 
+export class Unreachable extends Error {
+  constructor(path: string, cause: unknown) {
+    super(`Could not reach the server for ${path}: ${errorMessage(cause)}`, { cause })
+    this.name = 'Unreachable'
+  }
+}
+
+const LOOKUP_BACKOFF: Backoff = { attempts: 3, firstDelayMs: 300, maxDelayMs: 1000 }
+
+const unreachable = (err: unknown): boolean => err instanceof Unreachable
+
 const PASSWORD_REFUSALS: ReadonlySet<unknown> = new Set(['password-required', 'bad-password'])
 
 // Why the server refused: the message in its JSON, or the status when the
@@ -82,7 +95,9 @@ async function refusal(res: Response): Promise<Error> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init)
+  const res = await fetch(path, init).catch((err: unknown) => {
+    throw new Unreachable(path, err)
+  })
   if (!res.ok) throw await refusal(res)
   try {
     return (await res.json()) as T
@@ -108,7 +123,8 @@ export const api = {
       }),
     }),
 
-  roomInfo: (slug: string) => request<RoomInfo>(`/api/rooms/${encodeURIComponent(slug)}`),
+  roomInfo: (slug: string) =>
+    withBackoff(() => request<RoomInfo>(`/api/rooms/${encodeURIComponent(slug)}`), LOOKUP_BACKOFF, unreachable, sleep),
 
   auth: (slug: string, payload: { token?: string; proof?: string }) =>
     request<AuthResult>(`/api/rooms/${encodeURIComponent(slug)}/auth`, {

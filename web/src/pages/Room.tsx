@@ -1,3 +1,4 @@
+import { RotateCw } from 'lucide-react'
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -193,9 +194,14 @@ export default function Room() {
     )
   }
 
-  if (phase === 'error') {
+  if (session.failure) {
     return (
-      <ErrorScreen title="Could not open this room" message={session.fatalError}>
+      <ErrorScreen title="Could not open this room" message={session.failure.message}>
+        {session.failure.kind === 'unreachable' && (
+          <Button onClick={session.retry}>
+            <RotateCw /> Try again
+          </Button>
+        )}
         <Button variant="secondary" onClick={() => navigate('/')}>
           Back to start
         </Button>
