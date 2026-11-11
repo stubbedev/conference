@@ -60,7 +60,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go h.writePump(ctx, conn, out, done, teardown)
+	go h.writePump(ctx, conn, member.ID, out, done, teardown)
 
 	h.readPump(ctx, conn, member, teardown)
 }
@@ -215,7 +215,14 @@ func (h *Handler) readPump(ctx context.Context, conn *websocket.Conn, member *sf
 	}
 }
 
-func (h *Handler) writePump(ctx context.Context, conn *websocket.Conn, out chan sfu.Message, done chan struct{}, teardown func()) {
+func (h *Handler) writePump(
+	ctx context.Context,
+	conn *websocket.Conn,
+	memberID string,
+	out chan sfu.Message,
+	done chan struct{},
+	teardown func(),
+) {
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 
@@ -226,7 +233,13 @@ func (h *Handler) writePump(ctx context.Context, conn *websocket.Conn, out chan 
 		case msg := <-out:
 			data, err := json.Marshal(msg)
 			if err != nil {
-				continue
+				log.Printf("ws: member %s: encode a %s message: %v", memberID, msg.Type, err)
+
+				_ = conn.Close(websocket.StatusInternalError, "the server could not encode a "+string(msg.Type)+" message")
+
+				teardown()
+
+				return
 			}
 
 			writeCtx, cancel := context.WithTimeout(ctx, frameTimeout)
@@ -272,6 +285,8 @@ func (h *Handler) readFrame(ctx context.Context, conn *websocket.Conn, msg *sfu.
 func writeError(ctx context.Context, conn *websocket.Conn, code, text string) {
 	data, err := json.Marshal(sfu.Message{Type: "error", Code: code, Text: text})
 	if err != nil {
+		log.Printf("ws: encode the %s error: %v", code, err)
+
 		return
 	}
 
