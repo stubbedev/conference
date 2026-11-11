@@ -81,7 +81,7 @@ async function load(wanted: Export, kind: MtKind): Promise<Model> {
 }
 
 async function start(name: string, kind: MtKind, rung: Rung): Promise<Model> {
-  expectLoading(exportKey({ model: name, dtype: rung.dtype }))
+  expectLoading(name, exportKey({ model: name, dtype: rung.dtype }))
   const options = { device: rung.device, dtype: rung.dtype as DataType, progress_callback: reportLoading }
   const model: Model =
     kind === 'seq2seq'

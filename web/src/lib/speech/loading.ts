@@ -14,8 +14,8 @@ interface ProgressInfo {
 
 const deps = browserFetchDeps((retrying) => notify('retrying', { ...retrying }))
 
-export function expectLoading(key: string): void {
-  notify('expect', { key })
+export function expectLoading(model: string, key: string): void {
+  notify('expect', { model, key })
 }
 
 export function reportLoading(info: ProgressInfo): void {

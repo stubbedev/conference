@@ -22,7 +22,7 @@ serve(async (request) => {
       piper ??= new Piper(String(request.base), Boolean(request.gpu))
       const voice = voices[String(request.lang)]
       if (voice) {
-        expectLoading(voiceKey(voice))
+        expectLoading(voiceKey(voice), voiceKey(voice))
         await piper.prepare(voice)
       }
       return

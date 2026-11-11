@@ -70,7 +70,7 @@ function run(transcriber: Transcriber, audio: Float32Array, lang: string): Promi
 }
 
 async function start(rung: AsrRung, lang: string): Promise<Loaded> {
-  expectLoading(exportKey(rung))
+  expectLoading(rung.model, exportKey(rung))
   const transcriber = (await loadingModel(() =>
     pipeline('automatic-speech-recognition', rung.model, {
       device: rung.device,
