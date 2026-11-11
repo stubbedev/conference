@@ -18,8 +18,16 @@ import (
 const KindTranslationPrefix = "translation-"
 
 const (
-	maxLangCiphertext    = 1 << 10
-	maxCaptionCiphertext = 4 << 10
+	maxLangCiphertext = 1 << 10
+
+	captionTextMax       = 1000
+	captionLabelMax      = 128
+	captionLabels        = 5
+	stringifiedUnitMax   = 6
+	gcmTagSize           = 16
+	emptyCaption         = `{"k":"translation","by":"","speaker":"","segId":"","sourceLang":"","lang":"","text":"","final":false}`
+	maxCaptionPlaintext  = len(emptyCaption) + stringifiedUnitMax*(captionTextMax+captionLabels*captionLabelMax)
+	maxCaptionCiphertext = (4*(maxCaptionPlaintext+gcmTagSize) + 2) / 3
 )
 
 // ErrTranslationUnavailable rejects translation when it cannot run, on

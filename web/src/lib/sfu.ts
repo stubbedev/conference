@@ -10,6 +10,18 @@ import { errorText } from '@/lib/errors'
 import { unreceived } from '@/lib/received'
 import { decryptChat, encryptChat } from '@/lib/roomkeys'
 import { parseChatText, Refusals, type Refused } from '@/lib/sealed'
+import {
+  DOWN_PREFIX,
+  isUpstreamId,
+  MEDIA_UP,
+  parseServerMessage,
+  SCREEN_UP,
+  UPSTREAM_IDS,
+  type DownstreamId,
+  type MemberInfo,
+  type ServerMessage,
+  type UpstreamId,
+} from '@/lib/signalling'
 import { settled } from '@/lib/settled'
 import { Election } from '@/lib/speech/election'
 import { Serial } from '@/lib/speech/serial'
@@ -68,14 +80,7 @@ import {
   type RoomMessage,
 } from '@/lib/translate/types'
 
-export interface MemberInfo {
-  id: string
-  short: number
-  name: string
-  mic: boolean
-  cam: boolean
-  sharing: boolean
-}
+export type { MemberInfo } from '@/lib/signalling'
 
 export interface ChatMessage {
   id: string
@@ -96,8 +101,18 @@ export type ModerateAction = 'mute' | 'cam' | 'screen' | 'kick'
 /** Simulcast layer of a camera, as the SFU names the encodings. */
 export type { Layer } from '@/lib/quality'
 
+const CAPTION_WHAT = 'a caption or translation'
+
+const SIGNALLING_WHAT = 'a signalling message'
+
+const ANY_ROOM: Room = { inCall: () => true, translated: () => true }
+
 /** How often a viewer's own statistics are checked for trouble. */
 const QUALITY_SAMPLE_MS = 2000
+
+function downstreamId(sourceId: string): DownstreamId {
+  return `${DOWN_PREFIX}${sourceId}`
+}
 
 function streamKey(sourceId: string, kind: TileKind): string {
   return `${sourceId}:${kind}`
@@ -108,15 +123,6 @@ function streamKey(sourceId: string, kind: TileKind): string {
 // congestion control and holds its bandwidth estimate up with REMB, so it
 // stays high while the screen is still instead of settling on what idling
 // sends.
-const MEDIA_UP = 'up'
-const SCREEN_UP = 'up-screen'
-type UpstreamId = typeof MEDIA_UP | typeof SCREEN_UP
-const UPSTREAM_IDS: readonly UpstreamId[] = [MEDIA_UP, SCREEN_UP]
-
-function isUpstreamId(pc: string | undefined): pc is UpstreamId {
-  return UPSTREAM_IDS.some((id) => id === pc)
-}
-
 /** One publishing connection and its chain of serialized offers. */
 interface Upstream {
   pc: RTCPeerConnection
@@ -216,15 +222,12 @@ export class JoinError extends Error {
   }
 }
 
-interface WireMessage {
+interface ClientMessage {
   type: string
   room?: string
   session?: string
   name?: string
-  id?: string
-  short?: number
-  self?: MemberInfo
-  members?: MemberInfo[]
+  resume?: string
   pc?: string
   sdp?: string
   tracks?: { mid: string; kind: TrackKind }[]
@@ -233,36 +236,25 @@ interface WireMessage {
   mic?: boolean
   cam?: boolean
   sharing?: boolean
-  from?: string
   iv?: string
   ct?: string
-  ts?: number
-  code?: string
-  text?: string
   target?: string
   action?: string
   on?: boolean
-  recorder?: string
-  iceServers?: RTCIceServer[]
-  resume?: string
-  replaces?: string
   kind?: TileKind
   layer?: LayerName
-  mid?: string
-  active?: unknown
-  translatingBy?: string
-  token?: string
 }
 
-/** A message as it arrives: what it says of tracks is still to be read. */
-type ReceivedMessage = Omit<WireMessage, 'tracks'> & { tracks?: unknown }
+type RoomMessageFromServer = Exclude<ServerMessage, { type: 'welcome' | 'error' }>
+
+type SealedFromServer = Extract<ServerMessage, { iv: string }>
 
 // What the room's members and their sealed messages are read from. The
 // server relays each member's messages in the order that member sent
 // them, and opening one takes a turn of the event loop, so these are
 // handled one at a time: a member's announcement is known before the
 // line that member sent after it.
-const ORDERED_TYPES: ReadonlySet<string> = new Set(['member-joined', 'member-left', 'chat', 'lang', 'caption', 'forced'])
+const ORDERED_TYPES: ReadonlySet<ServerMessage['type']> = new Set(['member-joined', 'member-left', 'chat', 'lang', 'caption', 'forced'])
 
 interface Events {
   welcome: { self: MemberInfo; members: MemberInfo[]; recorder: string; translatingBy: string }
@@ -434,39 +426,30 @@ export class RoomClient {
           resume: this.opts.resume || undefined,
         })
       }
-      ws.onmessage = (ev) => {
-        let msg: ReceivedMessage
-        try {
-          msg = JSON.parse(ev.data as string) as ReceivedMessage
-        } catch (err) {
-          console.warn('sfu: a signalling message that is not JSON', err)
+      ws.onmessage = (ev: MessageEvent<unknown>) => {
+        const msg = parseServerMessage(ev.data)
+        if ('refused' in msg) {
+          this.refusals.report(SIGNALLING_WHAT, 'the server', msg.refused)
+          clearTimeout(timeout)
+          reject(new JoinError('protocol', `The server sent a message this client cannot read: ${msg.refused}.`))
           return
         }
         if (msg.type === 'welcome') {
           clearTimeout(timeout)
-          if (!msg.iceServers?.length) {
-            reject(new JoinError('protocol', 'The server sent no ICE servers.'))
-            return
-          }
           this.iceServers = msg.iceServers
-          this.resumeToken = msg.resume ?? ''
-          if (msg.self) this.selfId = msg.self.id
+          this.resumeToken = msg.resume
+          this.selfId = msg.self.id
           this.elect()
-          for (const member of msg.members ?? []) this.members.set(member.id, member)
-          this.emit('welcome', {
-            self: msg.self as MemberInfo,
-            members: msg.members ?? [],
-            recorder: msg.recorder ?? '',
-            translatingBy: msg.translatingBy ?? '',
-          })
+          for (const member of msg.members) this.members.set(member.id, member)
+          this.emit('welcome', { self: msg.self, members: msg.members, recorder: msg.recorder, translatingBy: msg.translatingBy })
           resolve()
           void this.sendLang()
           return
         }
         if (msg.type === 'error') {
           clearTimeout(timeout)
-          reject(new JoinError(msg.code ?? '', msg.text ?? 'The room rejected the join.'))
-          this.emit('error', { code: msg.code ?? '', text: msg.text ?? '' })
+          reject(new JoinError(msg.code, msg.text))
+          this.emit('error', { code: msg.code, text: msg.text })
           return
         }
         void this.receive(msg)
@@ -754,8 +737,10 @@ export class RoomClient {
   }
 
   sendCaption(caption: RoomMessage): Promise<void> {
-    if (caption.k === 'caption') this.election.hear(caption.speaker, caption.segId)
-    return this.sendSealed({ type: 'caption' }, JSON.stringify(caption))
+    const line = this.read(CAPTION_WHAT, 'this member', parseRoomMessage(caption, this.selfId, ANY_ROOM))
+    if (!line) return Promise.resolve()
+    if (line.k === 'caption') this.election.hear(line.speaker, line.segId)
+    return this.sendSealed({ type: 'caption' }, JSON.stringify(line))
   }
 
   /** Publishes a translated-voice track, labelled translation-<lang> for the room. */
@@ -828,14 +813,14 @@ export class RoomClient {
     this.leave()
   }
 
-  private send(msg: WireMessage): void {
+  private send(msg: ClientMessage): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     this.ws.send(JSON.stringify(msg))
   }
 
   // Sealing takes a turn of the event loop too, so what is sealed for
   // the room leaves one at a time, in the order it was handed over.
-  private sendSealed(message: WireMessage, text: string): Promise<void> {
+  private sendSealed(message: ClientMessage, text: string): Promise<void> {
     return this.sealing.run(async () => {
       const sealed = await encryptChat(this.opts.chatKey, text)
       this.send({ ...message, iv: sealed.iv, ct: sealed.ct })
@@ -968,67 +953,45 @@ export class RoomClient {
     return CAMERA_KIND
   }
 
-  private receive(msg: ReceivedMessage): Promise<void> {
+  private receive(msg: RoomMessageFromServer): Promise<void> {
     return ORDERED_TYPES.has(msg.type) ? this.opening.run(() => this.handle(msg)) : this.handle(msg)
   }
 
-  private async handle(msg: ReceivedMessage): Promise<void> {
+  private async handle(msg: RoomMessageFromServer): Promise<void> {
     switch (msg.type) {
       case 'answer': {
-        const pc = isUpstreamId(msg.pc) ? this.ups.get(msg.pc)?.pc : undefined
-        if (pc && msg.pc && msg.sdp) {
-          await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
-          this.flushIce(msg.pc, pc)
-        }
+        const pc = this.ups.get(msg.pc)?.pc
+        if (!pc) return
+        await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
+        this.flushIce(msg.pc, pc)
         return
       }
       case 'offer':
-        if (msg.pc?.startsWith('down-') && msg.sdp) {
-          await this.handleDownOffer(msg.pc.slice('down-'.length), msg)
-        }
+        await this.handleDownOffer(msg.pc.slice(DOWN_PREFIX.length), msg.sdp, msg.tracks)
         return
       case 'ice':
-        this.handleIce(msg)
+        this.handleIce(msg.pc, msg.candidate)
         return
       case 'member-joined': {
-        if (msg.id) {
-          const member: MemberInfo = {
-            id: msg.id,
-            short: msg.short ?? 0,
-            name: msg.name ?? 'Guest',
-            mic: false,
-            cam: false,
-            sharing: false,
-          }
-          const replaces = msg.replaces ?? ''
-          if (replaces) this.dropMember(replaces)
-          this.members.set(member.id, member)
-          this.emit('member-joined', { member, replaces })
-          void this.sendLang()
-        }
+        const member: MemberInfo = { id: msg.id, short: msg.short, name: msg.name, mic: false, cam: false, sharing: false }
+        if (msg.replaces) this.dropMember(msg.replaces)
+        this.members.set(member.id, member)
+        this.emit('member-joined', { member, replaces: msg.replaces })
+        void this.sendLang()
         return
       }
       case 'member-left':
         // A member replaced by its own rejoin was already dropped when
         // the replacement arrived; its late departure is not news.
-        if (msg.id && this.dropMember(msg.id)) this.emit('member-left', { id: msg.id })
+        if (this.dropMember(msg.id)) this.emit('member-left', { id: msg.id })
         return
-      case 'member-state':
-        if (msg.id) {
-          const member = this.members.get(msg.id)
-          if (member) {
-            member.mic = msg.mic ?? member.mic
-            member.cam = msg.cam ?? member.cam
-            member.sharing = msg.sharing ?? member.sharing
-          }
-          this.emit('member-state', {
-            id: msg.id,
-            mic: msg.mic ?? false,
-            cam: msg.cam ?? false,
-            sharing: msg.sharing ?? false,
-          })
-        }
+      case 'member-state': {
+        const { id, mic, cam, sharing } = msg
+        const member = this.members.get(id)
+        if (member) Object.assign(member, { mic, cam, sharing })
+        this.emit('member-state', { id, mic, cam, sharing })
         return
+      }
       case 'chat': {
         const what = 'a chat message'
         const opened = await this.openSealed(msg, what)
@@ -1036,15 +999,11 @@ export class RoomClient {
 
         const chat = this.read(what, opened.from, parseChatText(opened.text))
         if (!chat) return
-        if (msg.ts === undefined) {
-          this.refusals.report(what, opened.from, 'the server gave it no time')
-          return
-        }
         this.emit('chat', { id: `${opened.from}:${msg.ts}`, name: this.memberName(opened.from), text: chat.text, ts: msg.ts, mine: false })
         return
       }
       case 'recording':
-        if (msg.from) this.emit('recording', { from: msg.from, on: msg.on ?? false })
+        this.emit('recording', { from: msg.from, on: msg.on })
         return
       case 'lang': {
         const what = 'a language announcement'
@@ -1060,49 +1019,41 @@ export class RoomClient {
         return
       }
       case 'caption': {
-        const what = 'a caption or translation'
-        const opened = await this.openSealedJSON(msg, what)
+        const opened = await this.openSealedJSON(msg, CAPTION_WHAT)
         if (!opened) return
 
         const { from } = opened
-        const caption = this.read(what, from, parseRoomMessage(opened.value, from, this.room))
+        const caption = this.read(CAPTION_WHAT, from, parseRoomMessage(opened.value, from, this.room))
         if (!caption) return
         if (caption.k === 'caption') this.election.hear(caption.speaker, caption.segId)
         this.emit('caption', { from, caption })
         return
       }
       case 'translating':
-        if (msg.from) this.emit('translating', { from: msg.from, on: msg.on ?? false })
+        this.emit('translating', { from: msg.from, on: msg.on })
         return
       case 'translate-token':
-        if (msg.token) this.emit('translate-token', { token: msg.token })
+        this.emit('translate-token', { token: msg.token })
         return
       case 'forced': {
-        const action = msg.action
-        if (action === 'mute' || action === 'cam' || action === 'screen') {
-          this.emit('forced', { action })
-        } else if (action === 'lang') {
-          const what = 'a language set by a host'
-          const opened = await this.openSealedJSON(msg, what)
-          if (!opened) return
-
-          const { from } = opened
-          const set = this.read(what, from, parseLanguageSet(opened.value))
-          if (set) this.emit('lang-set', { from, lang: set.lang })
+        if (msg.action !== 'lang') {
+          this.emit('forced', { action: msg.action })
+          return
         }
+        const what = 'a language set by a host'
+        const opened = await this.openSealedJSON(msg, what)
+        if (!opened) return
+
+        const { from } = opened
+        const set = this.read(what, from, parseLanguageSet(opened.value))
+        if (set) this.emit('lang-set', { from, lang: set.lang })
         return
       }
       case 'kicked':
         this.emit('kicked', {})
         return
-      case 'layers': {
-        const active = msg.active
-        if (!isUpstreamId(msg.pc) || typeof msg.mid !== 'string' || !Array.isArray(active)) return
-        if (active.length !== LAYER_RIDS.length || !active.every((value) => typeof value === 'boolean')) return
-        this.demandLayers(msg.pc, msg.mid, active as boolean[])
-        return
-      }
-      default:
+      case 'layers':
+        this.demandLayers(msg.pc, msg.mid, msg.active)
         return
     }
   }
@@ -1124,7 +1075,7 @@ export class RoomClient {
   }
 
   private openDown(sourceId: string): Downstream {
-    const down: Downstream = { pc: this.newPC(`down-${sourceId}`), kinds: new Map(), tracks: new Map() }
+    const down: Downstream = { pc: this.newPC(downstreamId(sourceId)), kinds: new Map(), tracks: new Map() }
     this.downs.set(sourceId, down)
     this.startQualityWatch()
     down.pc.ontrack = (ev) => {
@@ -1168,16 +1119,16 @@ export class RoomClient {
     }
   }
 
-  private async handleDownOffer(sourceId: string, msg: ReceivedMessage): Promise<void> {
+  private async handleDownOffer(sourceId: string, sdp: string, tracks: readonly { mid: string; kind: string }[]): Promise<void> {
     const down = this.downs.get(sourceId) ?? this.openDown(sourceId)
     const { pc } = down
 
-    const { kinds, refused } = announcedKinds(msg.tracks)
+    const { kinds, refused } = announcedKinds(tracks)
     down.kinds = kinds
     for (const entry of refused) console.warn(`sfu: ${sourceId} announced a track this client cannot place:`, entry)
 
-    await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp ?? '' })
-    this.flushIce(`down-${sourceId}`, pc)
+    await pc.setRemoteDescription({ type: 'offer', sdp })
+    this.flushIce(downstreamId(sourceId), pc)
 
     for (const receiver of pc.getReceivers()) this.installTransform(receiver)
 
@@ -1187,26 +1138,23 @@ export class RoomClient {
     // on: a track taken away neither ends nor leaves a stream of its own.
     this.removeTracks(down, unreceived(down.tracks, pc.getTransceivers()))
 
-    this.send({ type: 'answer', pc: `down-${sourceId}`, sdp: pc.localDescription?.sdp ?? '' })
+    this.send({ type: 'answer', pc: downstreamId(sourceId), sdp: pc.localDescription?.sdp ?? '' })
     this.send({ type: 'pli', member: sourceId })
   }
 
-  private handleIce(msg: ReceivedMessage): void {
-    if (!msg.candidate || !msg.pc) return
-
-    const id = msg.pc
-    const pc = isUpstreamId(id) ? this.ups.get(id)?.pc : this.downs.get(id.slice('down-'.length))?.pc
+  private handleIce(id: UpstreamId | DownstreamId, candidate: RTCIceCandidateInit): void {
+    const pc = isUpstreamId(id) ? this.ups.get(id)?.pc : this.downs.get(id.slice(DOWN_PREFIX.length))?.pc
     // A publishing connection exists before the server learns of it, so a
     // candidate for one that is gone trails its close and has nowhere to go.
     if (isUpstreamId(id) && !pc) return
     if (!pc || !pc.remoteDescription) {
-      const queue = this.pendingIce.get(msg.pc) ?? []
-      queue.push(msg.candidate)
-      this.pendingIce.set(msg.pc, queue)
+      const queue = this.pendingIce.get(id) ?? []
+      queue.push(candidate)
+      this.pendingIce.set(id, queue)
       return
     }
 
-    pc.addIceCandidate(msg.candidate).catch((err) => console.warn('ice', err))
+    pc.addIceCandidate(candidate).catch((err) => console.warn('ice', err))
   }
 
   private flushIce(pcId: string, pc: RTCPeerConnection): void {
@@ -1231,14 +1179,10 @@ export class RoomClient {
    * Nothing, with the reason logged, when msg names no member of the
    * call or cannot be opened with the room's key.
    */
-  private async openSealed(msg: ReceivedMessage, what: string): Promise<{ from: string; text: string } | undefined> {
+  private async openSealed(msg: SealedFromServer, what: string): Promise<{ from: string; text: string } | undefined> {
     const { from, iv, ct } = msg
-    if (!from || !this.members.has(from)) {
-      this.refusals.report(what, from || 'nobody', 'its sender is not in the call')
-      return undefined
-    }
-    if (!iv || !ct) {
-      this.refusals.report(what, from, 'it carries nothing sealed')
+    if (!this.members.has(from)) {
+      this.refusals.report(what, from, 'its sender is not in the call')
       return undefined
     }
     try {
@@ -1249,7 +1193,7 @@ export class RoomClient {
     }
   }
 
-  private async openSealedJSON(msg: ReceivedMessage, what: string): Promise<{ from: string; value: unknown } | undefined> {
+  private async openSealedJSON(msg: SealedFromServer, what: string): Promise<{ from: string; value: unknown } | undefined> {
     const opened = await this.openSealed(msg, what)
     if (!opened) return undefined
     try {

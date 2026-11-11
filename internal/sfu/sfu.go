@@ -119,14 +119,6 @@ type MemberInfo struct {
 	Sharing bool   `json:"sharing"`
 }
 
-// RoomInfo describes the room in the welcome message.
-type RoomInfo struct {
-	Slug  string `json:"slug"`
-	Name  string `json:"name"`
-	Live  int    `json:"live"`
-	Limit int    `json:"limit"`
-}
-
 // JoinRequest carries the persisted room attributes the hub needs to
 // spawn a live room.
 type JoinRequest struct {
@@ -146,79 +138,79 @@ type JoinRequest struct {
 	Resume string
 }
 
-// Message is the single JSON shape exchanged over the signaling
-// WebSocket. Only the fields relevant to Type are meaningful.
+// Message is a frame exchanged over the signaling WebSocket. Only the
+// fields relevant to Type are meaningful, and a frame to a member is
+// written in its type's shape (see MarshalJSON).
 type Message struct {
 	Type string `json:"type"`
 
 	// join
-	Room    string `json:"room,omitempty"`
-	Session string `json:"session,omitempty"`
-	Name    string `json:"name,omitempty"`
+	Room    string `json:"room"`
+	Session string `json:"session"`
+	Name    string `json:"name"`
 
 	// join (the token to resume with) and welcome (the token to resume
 	// this membership later)
-	Resume string `json:"resume,omitempty"`
+	Resume string `json:"resume"`
 
 	// member-joined: the stale member this one replaces
-	Replaces string `json:"replaces,omitempty"`
+	Replaces string `json:"replaces"`
 
 	// member events
-	ID    string `json:"id,omitempty"`
-	Short uint32 `json:"short,omitempty"`
+	ID    string `json:"id"`
+	Short uint32 `json:"short"`
 
 	// welcome
-	Self     *MemberInfo  `json:"self,omitempty"`
-	RoomInfo *RoomInfo    `json:"roomInfo,omitempty"`
-	Members  []MemberInfo `json:"members,omitempty"`
+	Self    *MemberInfo  `json:"self"`
+	Members []MemberInfo `json:"members"`
 
-	ICEServers []relay.ICEServer `json:"iceServers,omitempty"`
+	ICEServers []relay.ICEServer `json:"iceServers"`
 
 	// media (PC names the peer connection: an upstream such as "up" or
 	// "up-screen", or "down-<source>"; close names an upstream to drop)
-	PC        string                   `json:"pc,omitempty"`
-	SDP       string                   `json:"sdp,omitempty"`
-	Tracks    []TrackInfo              `json:"tracks,omitempty"`
-	Candidate *webrtc.ICECandidateInit `json:"candidate,omitempty"`
+	PC        string                   `json:"pc"`
+	SDP       string                   `json:"sdp"`
+	Tracks    []TrackInfo              `json:"tracks"`
+	Candidate *webrtc.ICECandidateInit `json:"candidate"`
 
 	// pli / state / chat
-	Member  string `json:"member,omitempty"`
-	Mic     bool   `json:"mic,omitempty"`
-	Cam     bool   `json:"cam,omitempty"`
-	Sharing bool   `json:"sharing,omitempty"`
-	From    string `json:"from,omitempty"`
-	IV      string `json:"iv,omitempty"`
-	CT      string `json:"ct,omitempty"`
-	TS      int64  `json:"ts,omitempty"`
+	Member  string `json:"member"`
+	Mic     bool   `json:"mic"`
+	Cam     bool   `json:"cam"`
+	Sharing bool   `json:"sharing"`
+	From    string `json:"from"`
+	IV      string `json:"iv"`
+	CT      string `json:"ct"`
+	TS      int64  `json:"ts"`
 
 	// recording announce and state (Recorder in welcome replays the
 	// flag to late joiners)
-	On       bool   `json:"on,omitempty"`
-	Recorder string `json:"recorder,omitempty"`
+	On       bool   `json:"on"`
+	Recorder string `json:"recorder"`
 
 	// live translation: TranslatingBy in welcome replays the room mode (the
 	// member who switched it on; empty when off); translate-token carries
 	// this member's token for the speech stream
-	TranslatingBy string `json:"translatingBy,omitempty"`
-	Token         string `json:"token,omitempty"`
+	TranslatingBy string `json:"translatingBy"`
+	Token         string `json:"token"`
 
 	// layer (Member names the source, Kind its camera or screen, Layer
 	// is a simulcast rid)
-	Kind  Kind   `json:"kind,omitempty"`
-	Layer string `json:"layer,omitempty"`
+	Kind  Kind   `json:"kind"`
+	Layer string `json:"layer"`
 
 	// layers: which encodings of the publisher's track (Mid on the
 	// upstream named by PC) any viewer wants, indexed low to high
-	Mid    string `json:"mid,omitempty"`
-	Active []bool `json:"active,omitempty"`
+	Mid    string `json:"mid"`
+	Active []bool `json:"active"`
 
 	// moderate
-	Target string `json:"target,omitempty"`
-	Action string `json:"action,omitempty"`
+	Target string `json:"target"`
+	Action string `json:"action"`
 
 	// error
-	Code string `json:"code,omitempty"`
-	Text string `json:"text,omitempty"`
+	Code string `json:"code"`
+	Text string `json:"text"`
 }
 
 // Hub holds all live rooms.
@@ -468,7 +460,6 @@ func (r *Room) admit(req JoinRequest, send func(Message)) (admission, error) {
 
 	member.send(Message{
 		Type: "welcome", Self: &self, Members: others, Recorder: r.recorder, TranslatingBy: r.translatingBy,
-		RoomInfo:   &RoomInfo{Slug: r.slug, Name: r.name, Live: len(r.members), Limit: r.limit},
 		ICEServers: r.cfg.Relay.ICEServers(req.Host, member.ID), Resume: member.resume,
 	})
 
@@ -2590,7 +2581,7 @@ func (dp *DownPeer) negotiate(viewer *Member) {
 		return
 	}
 
-	var tracks []TrackInfo
+	tracks := []TrackInfo{}
 
 	for _, transceiver := range dp.pc.GetTransceivers() {
 		sender := transceiver.Sender()

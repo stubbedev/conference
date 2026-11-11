@@ -248,7 +248,7 @@ func TestCaptionsFromAnyMember(t *testing.T) {
 
 	for _, bad := range []sfu.Message{
 		{Type: msgCaption, IV: "iv", CT: ""},
-		{Type: msgCaption, IV: "iv", CT: strings.Repeat("x", 4<<10+1)},
+		{Type: msgCaption, IV: "iv", CT: strings.Repeat("x", sfu.MaxCaptionCiphertext+1)},
 	} {
 		guest.member.Handle(bad)
 
