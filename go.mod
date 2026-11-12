@@ -2,7 +2,7 @@ module github.com/stubbe/conference
 
 go 1.27.1
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/coder/websocket v1.8.15
