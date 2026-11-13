@@ -1,8 +1,15 @@
 // The maths behind speaking detection, kept apart from the audio graph so
 // it can be reasoned about on its own.
 
-/** How often every probe is measured, in milliseconds. */
-export const SPEAKING_SAMPLE_MS = 250
+/**
+ * How often every probe is measured, in milliseconds: often enough that
+ * the ring lights on a voice's first sound rather than up to a quarter of
+ * a second after it.
+ */
+export const SPEAKING_SAMPLE_MS = 100
+
+/** Samples per stretch of sound judged on its own, about 21 ms at 48 kHz. */
+const BLOCK = 1024
 
 /** RMS below which a frame counts as silence, from 0 to 1. */
 const SILENT_RMS = 0.04
@@ -14,12 +21,20 @@ const SILENT_RMS = 0.04
  */
 export const SPEAKING_HOLD_MS = 700
 
-/** isVoiced is whether a frame of samples, each from -1 to 1, carries sound. */
+/**
+ * isVoiced is whether a frame of samples, each from -1 to 1, carries
+ * sound anywhere: in any stretch of BLOCK samples, so a syllable between
+ * quiet ones is heard rather than averaged away.
+ */
 export function isVoiced(frame: Float32Array): boolean {
-  let sum = 0
-  for (const sample of frame) sum += sample * sample
+  for (let start = 0; start < frame.length; start += BLOCK) {
+    const end = Math.min(start + BLOCK, frame.length)
+    let sum = 0
+    for (let i = start; i < end; i++) sum += frame[i] * frame[i]
+    if (Math.sqrt(sum / (end - start)) > SILENT_RMS) return true
+  }
 
-  return Math.sqrt(sum / frame.length) > SILENT_RMS
+  return false
 }
 
 /** When a voice was last heard, in milliseconds, or null if it never was. */
