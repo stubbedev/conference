@@ -126,7 +126,7 @@ async function discard(root: FileSystemDirectoryHandle, name: string): Promise<v
   try {
     await root.removeEntry(name)
   } catch (err) {
-    if (errorName(err) !== 'NotFoundError') console.warn(`recorder: deleting ${name} from this browser's storage, where it stays`, err)
+    if (errorName(err) !== 'NotFoundError') console.warn("recorder: deleting %s from this browser's storage, where it stays", name, err)
   }
 }
 

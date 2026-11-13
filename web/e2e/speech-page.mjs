@@ -35,7 +35,10 @@ function mounted(path, mounts) {
 // forward passes a model request on to the meeting server, which serves
 // the models from its cache as it does in production.
 function forward(req, res, modelServer) {
-  const target = new URL(req.url ?? '/', modelServer)
+  const { pathname, search } = new URL(req.url ?? '/', 'http://localhost')
+  const target = new URL(modelServer)
+  target.pathname = pathname
+  target.search = search
   const upstream = request(target, { method: req.method, headers: { ...req.headers, host: target.host } }, (answer) => {
     res.writeHead(answer.statusCode ?? 502, { ...answer.headers, ...ISOLATION_HEADERS })
     answer.pipe(res)

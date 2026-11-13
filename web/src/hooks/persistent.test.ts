@@ -15,7 +15,9 @@ function Name() {
 }
 
 function mountedName(): string {
-  return renderToString(createElement(Name)).replace(/<[^>]+>/g, '')
+  const rendered = /^<output>([^<]*)<\/output>$/.exec(renderToString(createElement(Name)))
+  assert.ok(rendered, 'the name renders as the text of one output element')
+  return rendered[1]
 }
 
 test('a stored name comes back on every mount, and only a missing one is drawn afresh', (t) => {
