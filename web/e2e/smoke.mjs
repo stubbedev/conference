@@ -36,6 +36,7 @@ import {
   sleep,
   stopProcess,
   waitFor,
+  waitForCall,
 } from './browser.mjs'
 import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
 import { LAYER_RIDS, SCREEN_LAYER_RIDS } from '../src/lib/encodings.ts'
@@ -248,7 +249,7 @@ async function checkJoinWithoutMedia(failures, dir, base) {
     await blocked.cdp.send('Runtime.enable', {}, session)
     await blocked.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: hook() }, session)
     await blocked.cdp.send('Page.navigate', { url: room.url }, session)
-    const joined = await waitFor(blocked, clickJoin('Join without camera and microphone'), Boolean, 20000)
+    const joined = await waitForCall(blocked, clickJoin, ['Join without camera and microphone'], Boolean, 20000)
     check(failures, label, joined.ok, 'no way to join with the camera and microphone blocked')
     if (!joined.ok) return
 
@@ -720,6 +721,11 @@ function callBarLayout() {
   }
 }
 
+function menuItemCentre(name) {
+  const r = [...document.querySelectorAll('[role="menuitem"]')].find((el) => accessibleName(el) === name)?.getBoundingClientRect()
+  return r && { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+}
+
 const tooltips = `[...document.querySelectorAll('[data-slot="tooltip-content"]')].map((t) => ({ state: t.dataset.state, text: t.textContent }))`
 const TOOLTIP_WAIT_MS = 2000
 
@@ -778,12 +784,7 @@ async function checkTooltips(failures, browser) {
     await glide(browser, layout.idle, more)
     await shown(`hovering "More options" before picking "${item}"`)
     await press(browser, more)
-    const target = await waitFor(
-      browser,
-      `(() => { const r = [...document.querySelectorAll('[role="menuitem"]')].find((el) => (${accessibleName})(el) === ${JSON.stringify(item)})?.getBoundingClientRect(); return r && { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`,
-      Boolean,
-      TOOLTIP_WAIT_MS,
-    )
+    const target = await waitForCall(browser, menuItemCentre, [item], Boolean, TOOLTIP_WAIT_MS)
     check(failures, label, target.ok, `no "${item}" item in the "More options" menu`)
     if (!target.ok) return
     await glide(browser, more, target.value)

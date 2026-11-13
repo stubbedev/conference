@@ -48,6 +48,7 @@ var (
 // used longest ago that no browser is reading.
 type modelCache struct {
 	dir   string
+	root  *os.Root
 	files manifest
 	hub   hub
 	limit int64
@@ -85,8 +86,14 @@ func newModelCache(dir string, files manifest, limit int64, source hub) (*modelC
 		return nil, fmt.Errorf("the model directory %s must be writable: %w", dir, err)
 	}
 
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("open the model directory %s: %w", dir, err)
+	}
+
 	cache := &modelCache{
 		dir:     dir,
+		root:    root,
 		files:   files,
 		hub:     source,
 		limit:   limit,
@@ -171,7 +178,7 @@ func (c *modelCache) adopt() error {
 	for _, name := range slices.Sorted(maps.Keys(c.files)) {
 		target := c.path(name)
 
-		info, err := os.Lstat(target)
+		info, err := c.root.Lstat(filepath.FromSlash(name))
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -187,7 +194,7 @@ func (c *modelCache) adopt() error {
 		if info.Size() != c.files[name].size {
 			log.Printf("speech models: deleting %s, %d bytes where the manifest gives %d", target, info.Size(), c.files[name].size)
 
-			err = os.Remove(target)
+			err = c.root.Remove(filepath.FromSlash(name))
 			if err != nil {
 				return fmt.Errorf("delete the outdated %s: %w", target, err)
 			}
@@ -236,7 +243,7 @@ func (c *modelCache) evict(room int64) error {
 			return fmt.Errorf("%w: %d of %d bytes used, %d more wanted", errCacheFull, c.used, c.limit, room)
 		}
 
-		err := os.Remove(c.path(victim))
+		err := c.root.Remove(filepath.FromSlash(victim))
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("evict %s: %w", c.path(victim), err)
 		}
@@ -282,7 +289,7 @@ func (c *modelCache) hit(name string) (*os.File, func(), error) {
 		entry.readers--
 	}
 
-	opened, err := os.Open(c.path(name))
+	opened, err := c.root.Open(filepath.FromSlash(name))
 	if err != nil {
 		release()
 		c.forget(name, entry)
@@ -366,7 +373,7 @@ func (c *modelCache) join(ctx context.Context, name string, file hubFile) (*down
 	defer c.mu.Unlock()
 
 	if joined, ok := c.fetches[name]; ok {
-		reader, err := os.Open(joined.partial)
+		reader, err := c.root.Open(joined.partial)
 		if err != nil {
 			return nil, nil, fmt.Errorf("read the download of %s: %w", name, err)
 		}
@@ -384,15 +391,17 @@ func (c *modelCache) join(ctx context.Context, name string, file hubFile) (*down
 		return nil, nil, fmt.Errorf("start the download of %s: %w", name, err)
 	}
 
-	reader, err := os.Open(writer.Name())
+	partial := filepath.Join(partialDir, filepath.Base(writer.Name()))
+
+	reader, err := c.root.Open(partial)
 	if err != nil {
 		_ = writer.Close()
-		_ = os.Remove(writer.Name())
+		_ = c.root.Remove(partial)
 
 		return nil, nil, fmt.Errorf("read the download of %s: %w", name, err)
 	}
 
-	started := newDownload(writer.Name(), file.size)
+	started := newDownload(partial, file.size)
 	c.fetches[name] = started
 	c.used += file.size
 
@@ -408,22 +417,24 @@ func (c *modelCache) fetch(ctx context.Context, name string, file hubFile, into 
 	//nolint:gosec // name is a path the manifest lists.
 	log.Printf("speech models: fetching %s from %s, %d bytes", name, c.hub.url(file), file.size)
 
+	target := filepath.FromSlash(name)
+
 	err := c.download(ctx, file, into, writer)
 	if err == nil {
-		err = os.MkdirAll(filepath.Dir(c.path(name)), dirMode)
+		err = c.root.MkdirAll(filepath.Dir(target), dirMode)
 	}
 
 	c.mu.Lock()
 
 	if err == nil {
-		err = os.Rename(into.partial, c.path(name))
+		err = c.root.Rename(into.partial, target)
 	}
 
 	delete(c.fetches, name)
 
 	if err != nil {
 		c.used -= file.size
-		_ = os.Remove(into.partial)
+		_ = c.root.Remove(into.partial)
 	} else {
 		c.clock++
 		c.cached[name] = &cachedFile{size: file.size, used: c.clock, readers: 0}

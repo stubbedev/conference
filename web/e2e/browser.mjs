@@ -504,18 +504,24 @@ export const probe = `
 })()
 `
 
-const joinButton = (label) => `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled)`
+export function clickJoin(label) {
+  const button = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === label && !b.disabled)
+  button?.click()
+  return button !== undefined
+}
 
-const previewLive = `[...document.querySelectorAll('video')].some((v) => v.srcObject && v.srcObject.getVideoTracks().some((t) => t.readyState === 'live'))`
-
-export const clickJoin = (label) => `(() => { const b = ${joinButton(label)}; if (b) { b.click(); return true } return false })()`
+function joinState() {
+  return {
+    welcomes: window.__welcomes ?? 0,
+    joinScreen: [...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Join call' && !b.disabled),
+    previewLive: [...document.querySelectorAll('video')].some((v) => v.srcObject && v.srcObject.getVideoTracks().some((t) => t.readyState === 'live')),
+  }
+}
 
 const JOINED_TIMEOUT_MS = 20_000
 
-const joinState = `({ welcomes: window.__welcomes ?? 0, joinScreen: Boolean(${joinButton('Join call')}) })`
-
 async function waitJoined(browser) {
-  const joined = await waitFor(browser, joinState, (state) => state.welcomes > 0 && !state.joinScreen, JOINED_TIMEOUT_MS)
+  const joined = await waitForCall(browser, joinState, [], (state) => state.welcomes > 0 && !state.joinScreen, JOINED_TIMEOUT_MS)
   if (joined.ok) return
   const stage = joined.value?.welcomes > 0 ? 'the server welcomed the member but the join screen stayed' : "the server's welcome never arrived"
   throw new Error(`joining did not finish within ${JOINED_TIMEOUT_MS} ms after "Join call" was clicked: ${stage}`)
@@ -528,12 +534,15 @@ export async function joinRoom(browser, url, relayTransport = null, beforeJoin =
   await browser.addInitScript(hook(relayTransport))
   await browser.navigate(url)
   if (beforeJoin) {
-    const ready = `Boolean(${joinButton('Join call')}) && ${previewLive}`
-    for (let t = 0; t < 80 && !(await evalJs(browser, ready)); t++) await sleep(250)
+    for (let t = 0; t < 80; t++) {
+      const state = await callJs(browser, joinState)
+      if (state.joinScreen && state.previewLive) break
+      await sleep(250)
+    }
     await beforeJoin(browser)
   }
   for (let t = 0; t < 80; t++) {
-    if ((await evalJs(browser, `${previewLive} && ${clickJoin('Join call')}`)) === true) {
+    if ((await callJs(browser, joinState)).previewLive && (await callJs(browser, clickJoin, 'Join call'))) {
       await waitJoined(browser)
       return
     }
@@ -566,14 +575,22 @@ export function callJs(browser, fn, ...args) {
   return browser.callFunction(fn, ...args)
 }
 
-export async function waitFor(browser, expression, predicate, timeoutMs) {
+async function poll(read, predicate, timeoutMs) {
   let value
   for (let t = 0; t < timeoutMs; t += 250) {
-    value = await evalJs(browser, expression)
+    value = await read()
     if (predicate(value)) return { ok: true, value }
     await sleep(250)
   }
   return { ok: false, value }
+}
+
+export function waitFor(browser, expression, predicate, timeoutMs) {
+  return poll(() => evalJs(browser, expression), predicate, timeoutMs)
+}
+
+export function waitForCall(browser, fn, args, predicate, timeoutMs) {
+  return poll(() => callJs(browser, fn, ...args), predicate, timeoutMs)
 }
 
 export async function sample(browser) {
