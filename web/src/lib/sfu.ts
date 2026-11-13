@@ -728,7 +728,6 @@ export class RoomClient {
     void this.sendLang()
   }
 
-
   // announceTranslating switches the room's live translation on or off
   // (hosts only). While it is on, the server hands every member a
   // translate-token event for the speech service.
