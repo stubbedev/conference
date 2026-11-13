@@ -501,6 +501,35 @@ func TestModelCacheAdoptsTheFilesAlreadyOnDisk(t *testing.T) {
 	cache.expectFetches(t, "for a stale file", 1)
 }
 
+func TestModelCacheStaysInsideTheModelDirectory(t *testing.T) {
+	t.Parallel()
+
+	const secret = `{"secret":1}`
+
+	contents := map[string]string{modelConfig: secret}
+	dir := t.TempDir()
+	outside := t.TempDir()
+	owner, _, _ := strings.Cut(cacheRepo, "/")
+	planted := strings.TrimPrefix(cacheRepo, owner+"/") + "/" + modelConfig
+
+	writeFile(t, filepath.Join(outside, filepath.FromSlash(planted)), secret)
+
+	err := os.Symlink(outside, filepath.Join(dir, owner))
+	if err != nil {
+		t.Fatalf("link the repository out of the model directory: %v", err)
+	}
+
+	_, err = newTestCache(t, dir, hosted(contents), cacheRoom, serveContents(contents))
+	if err == nil {
+		t.Fatal("the cache took a model directory whose files lie outside it")
+	}
+
+	kept, err := fs.ReadFile(os.DirFS(outside), planted)
+	if err != nil || string(kept) != secret {
+		t.Fatalf("the file outside the model directory is %q (%v), want it untouched", kept, err)
+	}
+}
+
 func TestModelCacheRefusesALimitBelowTheLargestFile(t *testing.T) {
 	t.Parallel()
 
