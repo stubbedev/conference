@@ -16,13 +16,24 @@ const headerLength = 2
 
 // Message types and the notice codes a client acts on.
 const (
-	TypeHello             = "hello"
-	TypeEnd               = "end"
+	TypeHello = "hello"
+	TypeEnd   = "end"
+	// TypeVoiceSample ends a voice sample the speaker recorded, sent
+	// ahead in audio frames marked Sample.
+	TypeVoiceSample = "voice-sample"
+	// TypeForgetVoice drops the speaker's recorded voice at once: they
+	// deleted it or chose a stock voice.
+	TypeForgetVoice       = "forget-voice"
 	TypeReady             = "ready"
 	TypeCaption           = "caption"
 	TypeNotice            = "notice"
 	NoticeTranslateFailed = "translation-failed"
-	NoticeVoiceFailed     = "voice-failed"
+	// NoticeOwnVoiceReady: the speaker's recorded voice is in use.
+	NoticeOwnVoiceReady = "own-voice-ready"
+	// NoticeOwnVoiceRejected: a recorded voice sample was too short or
+	// held no speech; the stock voice speaks.
+	NoticeOwnVoiceRejected = "own-voice-rejected"
+	NoticeVoiceFailed      = "voice-failed"
 )
 
 var (
@@ -35,6 +46,9 @@ type AudioHeader struct {
 	Speaker string `json:"speaker"`
 	Lang    string `json:"lang"`
 	Voice   string `json:"voice"`
+	// Sample marks audio of a voice sample the speaker recorded, not live
+	// speech.
+	Sample bool `json:"sample,omitempty"`
 }
 
 // VoiceHeader heads the service's frame of translated voice.
@@ -43,14 +57,22 @@ type VoiceHeader struct {
 	SegID   string `json:"segId"`
 	Lang    string `json:"lang"`
 	Rate    int    `json:"rate"`
+	// Cloned is true when the voice is the speaker's own, cloned one.
+	Cloned bool `json:"cloned,omitempty"`
 }
 
 // Command is a client's text message: hello with its target languages,
-// or end when a speaker's stream stops.
+// end when a speaker's stream stops, or voice-sample after a recorded
+// voice sample. VoiceTargets, when present, are
+// the targets someone wants to hear a translated voice in; without it
+// every target gets one.
 type Command struct {
-	Type    string   `json:"type"`
-	Targets []string `json:"targets,omitempty"`
-	Speaker string   `json:"speaker,omitempty"`
+	Type         string   `json:"type"`
+	Targets      []string `json:"targets,omitempty"`
+	VoiceTargets []string `json:"voiceTargets,omitempty"`
+	Speaker      string   `json:"speaker,omitempty"`
+	// Lang is the language a voice sample is spoken in.
+	Lang string `json:"lang,omitempty"`
 }
 
 // Caption is a subtitle in one language; Final is false while the
@@ -65,13 +87,15 @@ type Caption struct {
 	Final      bool   `json:"final"`
 }
 
-// Notice tells the client that a sentence went out without a voice in
-// Lang, because it could not be translated or could not be spoken. The
-// stream goes on.
+// Notice tells the client about its stream without ending it: that a
+// sentence went out without a voice in Lang, because it could not be
+// translated or could not be spoken, or whether its recorded voice is in
+// use. The stream goes on.
 type Notice struct {
-	Type string `json:"type"`
-	Code string `json:"code"`
-	Lang string `json:"lang"`
+	Type    string  `json:"type"`
+	Code    string  `json:"code"`
+	Lang    string  `json:"lang"`
+	Seconds float64 `json:"seconds,omitempty"`
 }
 
 // Pack builds a binary frame from a header and PCM16 samples.

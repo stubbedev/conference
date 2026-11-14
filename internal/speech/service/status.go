@@ -24,6 +24,9 @@ type Status struct {
 	Models    *Models         `json:"models,omitempty"`
 	Languages []wire.Language `json:"languages"`
 	External  bool            `json:"external"`
+	// OwnVoice says whether a speaker can be heard in their own voice,
+	// cloned or converted; the app only offers it then.
+	OwnVoice bool `json:"ownVoice"`
 }
 
 // Status reports whether live translation can run with these settings.
@@ -43,6 +46,7 @@ func (s Settings) Status() Status {
 		Models:    nil,
 		Languages: langs,
 		External:  s.external(),
+		OwnVoice:  s.ownVoice(),
 	}
 
 	if s.runtime == runInBrowser {

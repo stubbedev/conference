@@ -32,6 +32,8 @@ export interface TranslationConfig {
   languages: Language[]
   /** Speech or text goes to a service outside the server's network. */
   external: boolean
+  /** A speaker can be heard in their own voice, cloned during the call; only then is it offered. */
+  ownVoice?: boolean
 }
 
 export interface RoomInfo {

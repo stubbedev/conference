@@ -29,8 +29,8 @@ func (s stubEngines) translate(_ context.Context, text string, _, target languag
 	return s.translateFn(text, target)
 }
 
-func (stubEngines) speak(context.Context, string, language, voiceChoice) (speech, error) {
-	return speech{pcm: []byte{0, 0}, rate: vad.Rate}, nil
+func (stubEngines) speak(context.Context, string, language, voiceChoice, *reference) (speech, error) {
+	return speech{pcm: []byte{0, 0}, rate: vad.Rate, converting: 0}, nil
 }
 
 // voicelessEngines transcribe and translate like their stubEngines and
@@ -39,8 +39,8 @@ type voicelessEngines struct {
 	stubEngines
 }
 
-func (voicelessEngines) speak(context.Context, string, language, voiceChoice) (speech, error) {
-	return speech{pcm: nil, rate: 0}, errEngineDown
+func (voicelessEngines) speak(context.Context, string, language, voiceChoice, *reference) (speech, error) {
+	return speech{pcm: nil, rate: 0, converting: 0}, errEngineDown
 }
 
 func noticed(code, lang string) func(any) bool {
@@ -130,7 +130,7 @@ func speakUntilSpeaking(ctx context.Context, t *testing.T, opened *session, lang
 		t.Fatalf("fixture: %v", err)
 	}
 
-	header := wire.AudioHeader{Speaker: anna, Lang: lang, Voice: ""}
+	header := wire.AudioHeader{Speaker: anna, Lang: lang, Voice: "", Sample: false}
 
 	for offset := 0; offset < len(samples); offset += chunk {
 		err = opened.audio(ctx, header, samples[offset:min(offset+chunk, len(samples))])
@@ -165,7 +165,7 @@ func TestLanguageSwitchEndsTheSentenceInTheOldLanguage(t *testing.T) {
 
 	speakUntilSpeaking(ctx, t, opened, "de")
 
-	err := opened.audio(ctx, wire.AudioHeader{Speaker: anna, Lang: "en", Voice: ""}, make([]int16, chunk))
+	err := opened.audio(ctx, wire.AudioHeader{Speaker: anna, Lang: "en", Voice: "", Sample: false}, make([]int16, chunk))
 	if err != nil {
 		t.Fatalf("audio: %v", err)
 	}
@@ -328,7 +328,7 @@ func speakUntilInterim(ctx context.Context, t *testing.T, opened *session, start
 		t.Fatalf("fixture: %v", err)
 	}
 
-	header := wire.AudioHeader{Speaker: anna, Lang: "de", Voice: ""}
+	header := wire.AudioHeader{Speaker: anna, Lang: "de", Voice: "", Sample: false}
 
 	for offset := 0; offset < len(samples); offset += chunk {
 		err = opened.audio(ctx, header, samples[offset:min(offset+chunk, len(samples))])

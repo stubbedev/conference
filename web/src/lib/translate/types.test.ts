@@ -101,7 +101,16 @@ test('a speaker may put their own words into another language without being the 
   assert.deepEqual(parseRoomMessage(own, 'anna', { ...call, translated: () => false }), own)
 })
 
-const announced: LangAnnouncement = { lang: 'de', voice: true, subtitles: false, voiceChoice: 'male', captions: true, translates: 'plain', voices: ['en', 'da'] }
+const announced: LangAnnouncement = {
+  lang: 'de',
+  voice: true,
+  subtitles: false,
+  voiceChoice: 'male',
+  captions: true,
+  translates: 'plain',
+  voices: ['en', 'da'],
+  ownVoice: false,
+}
 
 /** Why a parser refuses value; fails when it reads it instead. */
 function refused(parsed: object): string {
@@ -128,14 +137,34 @@ test('an announcement with a missing or mistyped field is refused, never complet
 })
 
 test('a member who provides nothing announces just that', () => {
-  assert.deepEqual(parseAnnouncement({ ...announced, ...PROVIDES_NOTHING }), { ...announced, captions: false, translates: 'none', voices: [] })
+  assert.deepEqual(parseAnnouncement({ ...announced, ...PROVIDES_NOTHING }), {
+    ...announced,
+    captions: false,
+    translates: 'none',
+    voices: [],
+    ownVoice: false,
+  })
+})
+
+test('a member on a build without own voice announces none', () => {
+  const { ownVoice: _none, ...older } = { ...announced, ...PROVIDES_NOTHING }
+  assert.deepEqual(parseAnnouncement(older), { ...announced, ...PROVIDES_NOTHING })
+  assert.deepEqual(parseAnnouncement({ ...announced, ...PROVIDES_NOTHING, ownVoice: true }), {
+    ...announced,
+    ...PROVIDES_NOTHING,
+    ownVoice: true,
+  })
+  for (const ownVoice of ['true', 1, null]) {
+    assert.match(refused(parseAnnouncement({ ...announced, ...PROVIDES_NOTHING, ownVoice })), /its ownVoice is not a boolean/)
+  }
 })
 
 test('what a member provides is the same until one of its facts changes', () => {
-  const provides = { captions: true, translates: 'plain', voices: ['da', 'en'] } as const
+  const provides = { captions: true, translates: 'plain', voices: ['da', 'en'], ownVoice: false } as const
   assert.ok(sameProvides(provides, { ...provides, voices: ['da', 'en'] }))
   assert.ok(!sameProvides(provides, { ...provides, captions: false }))
   assert.ok(!sameProvides(provides, { ...provides, translates: 'none' }))
+  assert.ok(!sameProvides(provides, { ...provides, ownVoice: true }))
   assert.ok(!sameProvides(provides, { ...provides, voices: ['da'] }))
   assert.ok(!sameProvides(provides, { ...provides, voices: ['da', 'fr'] }))
 })

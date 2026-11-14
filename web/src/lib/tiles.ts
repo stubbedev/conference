@@ -42,7 +42,8 @@ export function withoutVoice<Stream>(voices: Voices<Stream>, member: string, lan
 }
 
 /** What a member says of their own speech: its language, and what is made of it right now. */
-export type Speaker = Pick<LangAnnouncement, 'lang' | 'captions' | 'voices'>
+/** What a tile needs of a member's announcement; ownVoice is absent until they announce one. */
+export type Speaker = Pick<LangAnnouncement, 'lang' | 'captions' | 'voices'> & Partial<Pick<LangAnnouncement, 'ownVoice'>>
 
 /** What live translation gives one listener to hear. */
 export interface Translations<Stream> {

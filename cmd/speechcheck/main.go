@@ -188,7 +188,7 @@ func connect(ctx context.Context, address string) (*websocket.Conn, error) {
 
 	conn.SetReadLimit(-1)
 
-	err = send(ctx, conn, wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de"}, Speaker: ""})
+	err = send(ctx, conn, wire.Command{Type: wire.TypeHello, Targets: []string{"en", "de"}, VoiceTargets: nil, Speaker: "", Lang: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -292,14 +292,14 @@ func speak(ctx context.Context, conn *websocket.Conn, who speakerSpec) error {
 		return err
 	}
 
-	return send(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, Speaker: who.id})
+	return send(ctx, conn, wire.Command{Type: wire.TypeEnd, Targets: nil, VoiceTargets: nil, Speaker: who.id, Lang: ""})
 }
 
 func stream(ctx context.Context, conn *websocket.Conn, who speakerSpec, pcm []byte) error {
 	ticker := time.NewTicker(chunkInterval)
 	defer ticker.Stop()
 
-	header := wire.AudioHeader{Speaker: who.id, Lang: who.lang, Voice: who.voice}
+	header := wire.AudioHeader{Speaker: who.id, Lang: who.lang, Voice: who.voice, Sample: false}
 
 	for offset := 0; offset < len(pcm); offset += pcmWidth * chunkSamples {
 		frame, err := wire.Pack(header, pcm[offset:min(offset+pcmWidth*chunkSamples, len(pcm))])

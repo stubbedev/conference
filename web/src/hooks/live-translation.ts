@@ -14,6 +14,7 @@ import { withoutVoice, withVoice, type Translations, type Voices } from '@/lib/t
 import { translationLang } from '@/lib/track-kind'
 import { ServerTranslator } from '@/lib/translate/bridge'
 import { DEFAULT_LANGUAGE, languageName } from '@/lib/translate/languages'
+import type { OwnVoiceSample } from '@/lib/translate/own-voice'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { isVoiceChoice, type LangAnnouncement, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
 
@@ -92,6 +93,7 @@ export function useLiveTranslation(
   localStream: MediaStream | null,
   localStreamRef: RefObject<MediaStream | null>,
   membersRef: RefObject<MemberInfo[]>,
+  ownVoiceSample: OwnVoiceSample | null,
 ) {
   const [translation, setTranslation] = useState<TranslationConfig>(TRANSLATION_CHECKING)
   const [translationBy, setTranslationBy] = useState<string | null>(null)
@@ -105,6 +107,7 @@ export function useLiveTranslation(
   const [langChosenBefore] = useState(storedLangChoice)
   const langChosenRef = useRef(langChosenBefore)
   const [langPrefs, setLangPrefs] = usePersistentState(LANG_PREFS_KEY, { parse: parseLangPrefs })
+  const ownVoiceSampleRef = useLatest(ownVoiceSample)
   const translationRef = useLatest(translation)
   const langPrefsRef = useLatest(langPrefs)
 
@@ -138,6 +141,16 @@ export function useLiveTranslation(
     if (codes.includes(langPrefs.lang)) return
     setLangPrefs({ ...langPrefs, lang: codes.includes(DEFAULT_LANGUAGE) ? DEFAULT_LANGUAGE : codes[0] })
   }, [translation, langPrefs, setLangPrefs])
+
+  // A remembered own voice falls back to the default where the server makes none.
+  useEffect(() => {
+    if (translation === TRANSLATION_CHECKING || translation.ownVoice || langPrefs.voiceChoice !== 'own') return
+    setLangPrefs({ ...langPrefs, voiceChoice: 'female' })
+  }, [translation, langPrefs, setLangPrefs])
+
+  useEffect(() => {
+    translatorRef.current?.setOwnVoiceSample?.(ownVoiceSample)
+  }, [ownVoiceSample])
 
   const handleRoomCaption = useCallback(
     (line: RoomMessage) => {
@@ -200,9 +213,10 @@ export function useLiveTranslation(
 
       translatorRef.current = translator
       translator.attach(client)
+      translator.setOwnVoiceSample?.(ownVoiceSampleRef.current)
       translator.start(localMicTrack(localStreamRef.current))
     },
-    [translation, langPrefsRef, localStreamRef, handleRoomCaption, stopTranslation],
+    [translation, langPrefsRef, localStreamRef, ownVoiceSampleRef, handleRoomCaption, stopTranslation],
   )
 
   const toggleTranslation = useCallback(() => {

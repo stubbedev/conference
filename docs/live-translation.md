@@ -65,6 +65,8 @@ its default.
 | `TRANSLATE_URL`, `TRANSLATE_API_KEY`, `TRANSLATE_MODEL` | `http://localhost:11434` (Ollama) or OpenAI, `OPENAI_API_KEY` (OpenAI-compatible only), none | The translation engine |
 | `VOICE_URL`, `VOICE_API_KEY`, `VOICE_MODEL` | OpenAI, `OPENAI_API_KEY`, none | The voice: an OpenAI-compatible `/audio/speech` that returns WAV |
 | `VOICE_NAME` | none | The voice for languages without their own `voices` |
+| `VOICE_CLONING` | `false` | `true` if the voice engine clones voices from a recording; speakers can then choose their own voice (below) |
+| `VOICE_CONVERT_URL`, `VOICE_CONVERT_API_KEY`, `VOICE_CONVERT_MODEL` | none | A voice conversion engine (audio.cpp's `/tasks/run`) that turns the stock voice into the speaker's own; the other way to offer own voice (below). Not together with `VOICE_CLONING` |
 | `OPENAI_API_KEY` | none | The key for every OpenAI-compatible engine without its own |
 | `INTERNAL_DOMAINS` | none | Domains on your network, e.g. `corp.example.com`, so their engines don't count as external |
 | `GLOSSARY` | none | Term translations the translator must use, e.g. `Kontainer = Kontainer` |
@@ -105,6 +107,161 @@ transcription models accept only `json`, the default.
 **Sentences** end after 400 ms of silence (160 ms once someone has spoken
 for 3 s, so fast talkers are cut at their pauses) and at 12 s at the
 latest.
+
+## Own voice
+
+On the server runtime, with `VOICE_CLONING=true` or a conversion engine
+(`VOICE_CONVERT_*`), a speaker can choose **My own voice** instead of the
+female or male one; without either, and in the browser runtime, the app
+doesn't offer the option. A listener hearing someone through a translated
+voice sees "AI voice" on their tile, and "AI voice (cloned)" once that
+speaker's own voice is in use (the speaker's browser announces it to the
+room, sealed like the language settings), so nobody mistakes it for the
+person speaking that language.
+
+**Recorded by the speaker.** With My own voice chosen, the join screen
+(and the settings during the call) offers **Record my voice**: the
+speaker reads a short, meeting-like text in their speaking language (15 s,
+with a question and a livelier sentence for intonation). Every language
+the service ships has one, shown before recording so it can be read
+through first; a language added in a languages file gets a prompt to talk
+freely instead. On computers the recording skips the call's echo
+cancellation, noise suppression and gain control, which flatten a voice;
+on phones, where a second capture of the microphone can silence the call's,
+it uses the call's microphone as it is. When live translation starts, their browser sends the recording
+to the speech service, which transcribes it and uses it from their first
+sentence. Without a recording, or with one under 6 s or without speech,
+they are heard in the female voice and asked to record. The voice is
+never cloned from what they say in the call, only from a recording they
+made on purpose; it is the speaker's own action that turns it on.
+
+**The speaker allows the server.** Making the voice happens on this
+meeting's server, so the recording leaves the end-to-end encryption the
+call itself has. Recording therefore stays off until the speaker switches
+on **Make my voice on this meeting's server**, which says exactly that.
+The choice is the speaker's, per device; the host can't make it for
+them, and listeners are never asked to record. Switching it off later
+stops the recording being sent (and makes the service forget it), and
+the speaker is heard in the female voice again.
+
+**Where the voice is, and when it's gone.** It comes only from the
+speaker's own microphone.
+
+- *Their browser:* in memory while the page is open; cleared when they
+  leave the call or delete it. Only if they switch on **Remember my voice
+  on this device** is it also kept in this browser's IndexedDB, for later
+  calls, until they delete it or switch that off. Every page load deletes
+  any stored copy while that switch is off.
+- *The speech service:* in memory for that member's stream only. It is
+  dropped when the stream ends, and at once when the speaker deletes it
+  or picks a stock voice (the browser sends `forget-voice`). Never logged
+  or written to disk.
+- *The voice or conversion engine:* gets it inline with each request and
+  stores nothing on disk. A cloning engine does keep prepared voices in
+  memory, so that it doesn't prepare a voice again for every sentence
+  (measured on an M1 Max: 2.2 s per sentence with the cache, 6.5 s
+  without). Chatterbox rebuilds its model for each language and empties
+  this cache when it does, so in a room whose listeners use more than one
+  language every switch prepares the voice again: 3–5 s per sentence,
+  with spikes of 13–19 s, measured on an RTX 3060 Ti, whatever the number
+  of slots. VoxCPM2 and conversion keep their prepared voices across
+  languages. Recommended:
+  - `conditionals_cache_slots` (Chatterbox) or `prompt_cache_slots`
+    (VoxCPM2) in the model's `session_options`, set to about the number
+    of speakers using their own voice at the same time (default 1: two
+    would keep evicting each other);
+  - `--idle-unload-ms 600000`, so after 10 minutes without a request the
+    models, and the prepared voices with them, leave memory;
+  - `log_request_body` off, so request bodies aren't logged.
+
+  Set the slots to 0 if no voice may outlive its request at all, at about
+  three times the time per sentence.
+
+**Two ways to make it.** Operators pick one:
+
+- *Cloning* (`VOICE_CLONING=true`): the voice engine speaks the
+  translation in the speaker's voice directly. The voice engine must
+  accept audio.cpp's request fields:
+
+```json
+{
+  "model": "…", "input": "Guten Morgen …", "response_format": "wav",
+  "voice_ref": { "type": "base64", "data": "<WAV, 16 kHz mono>" },
+  "reference_text": "what the recording says",
+  "language": "de"
+}
+```
+
+[audio.cpp](https://github.com/0xShug0/audio.cpp)'s `audiocpp_server`
+(C++, Apache-2.0) serves voice-cloning models such as VoxCPM2 (Apache-2.0)
+and Chatterbox Multilingual (MIT), both covering, among others, Danish,
+German, English and Swedish. Cloning is heavier than a stock voice: it
+needs a GPU to keep up with a live call. On an RTX 3060 Ti, VoxCPM2 took
+0.4–0.5 s for a short sentence and 1.6–1.7 s for a long one, Chatterbox
+1.0–1.3 s and 2.1–3.0 s, and Chatterbox more whenever the language
+changes (above), so for rooms with several languages VoxCPM2 or
+conversion fit a live call better.
+
+- Chatterbox needs `language`, also for a stock voice: a German sentence
+  without it comes back garbled or with wrong words. With
+  `VOICE_CLONING` set, the service sends it with every voice request.
+- Chatterbox has no built-in voices: the stock voice names (each
+  language's `voices` in the language list, or `VOICE_NAME`) must be
+  voices in audio.cpp's `voice_dir`, a `<name>.wav` each plus a
+  `prompt_text` file with one `<name>|<what it says>` line per voice.
+- Chatterbox prepares a voice with an encoder on the CPU that forks
+  OpenMP threads for every frame: run `audiocpp_server` with
+  `OMP_NUM_THREADS=4`. On a busy host, preparing a voice took 25–80 s
+  without it and 0.9 s with it.
+- VoxCPM2 refuses a recording over 15 s with its default
+  `audiovae_encoder_sample_capacity`; the service keeps at most 14 s of
+  each recording, so the default is enough.
+
+- *Conversion* (`VOICE_CONVERT_URL`, `VOICE_CONVERT_MODEL`): the stock
+  voice speaks the translation as usual, and a voice conversion model
+  then makes it sound like the speaker. The stock voice can be any
+  engine, the conversion doesn't depend on the language, and it is much
+  lighter: on an M1 Max, Chatterbox's conversion with 3 flow steps took
+  about 0.9 s per sentence, against about 6 s for cloning the same
+  sentence, and listeners couldn't tell the two apart; on an RTX 3060 Ti
+  it took 0.34–0.40 s for a short sentence and 0.58–0.63 s for a long
+  one. The converted voice is brought to the loudness of the stock voice
+  it was made from, since the recording skips the call's gain control.
+  The service sends:
+
+```json
+{
+  "model": "…",
+  "request": {
+    "audio_base64": "<the stock voice, WAV>",
+    "voice_ref": { "type": "base64", "data": "<the recording, WAV 16 kHz mono>" }
+  }
+}
+```
+
+  to `/tasks/run` and reads the converted WAV from `audio` (base64) in the
+  reply. Set the model's speed in the engine, e.g. audio.cpp's
+  `"default_request_options": {"num_inference_steps": "3"}` for
+  `chatterbox` with `"task": "vc"`. This needs audio.cpp from its `main`
+  at `de6fbe3` or later (after 0.9.4): it takes `voice_ref` inline as
+  above, and keeps a cache of prepared voices
+  (`vc_reference_cache_slots` in the model's `session_options`, default
+  1; set it to about the number of speakers using their own voice at the
+  same time; 0 turns it off). A cached voice is prepared once instead of
+  for every sentence, which saved 0.2–0.3 s per sentence on an M1 Max and
+  brought a conversion to about 0.7–1.2 s. Like the cloning cache, it lives
+  only in memory and goes with `--idle-unload-ms`. If a conversion fails,
+  the listener hears the stock voice already made for it. As soon as a
+  recording is accepted, the service has the conversion engine load its
+  model and prepare that voice (with half a second of silence), so the
+  speaker's first sentence doesn't wait for either.
+
+**Voices only where someone listens.** Each speaker's browser tells the
+service which languages someone wants a translated voice in; others get
+subtitles only, so no voice is synthesized for nobody. A voice queued more
+than 10 s behind is skipped (its subtitle still shows), so a voice engine
+that can't keep up doesn't build an ever growing delay. A recorder counts
+as listening in their language, since the recording mixes the voices in.
 
 ## In the browser
 
@@ -429,6 +586,15 @@ and any sentence still being translated for it is dropped. A browser
 whose stream is turned away, or drops within half a minute of opening,
 three times in a row gives up and tells its member; every attempt has
 ten seconds to be given its token and ten to open.
+
+A translation of 80 characters or more is voiced in pieces, split where
+a speaker would pause (punctuation followed by a space, at least 30
+characters a piece): all pieces are asked for at once and sent in order,
+so listeners hear the start of a long sentence while the rest is still
+being made. With OpenAI's voice and a local conversion on an M1 Max the
+first sound came 0.3–1.3 s sooner for a two-sentence translation. A
+piece that is slow to come leaves a pause in the middle rather than
+before the sentence.
 
 With `SPEECH_RUNTIME=browser` there are no tokens and no streams: the
 server never sees a member's speech to translate.

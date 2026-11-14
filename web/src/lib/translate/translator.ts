@@ -3,6 +3,7 @@
 // this member's own browser.
 
 import type { RoomClient } from '@/lib/sfu'
+import type { OwnVoiceSample } from '@/lib/translate/own-voice'
 import type { LangPrefs, RoomMessage, TranslatorStatus } from '@/lib/translate/types'
 
 export interface TranslatorEvents {
@@ -35,4 +36,6 @@ export interface Translator {
   receive(caption: RoomMessage): void
   /** Stops translating this member's speech. */
   stop(): Promise<void>
+  /** The speaker's recorded own voice, for a runtime that makes voices from it; null to forget it. */
+  setOwnVoiceSample?(sample: OwnVoiceSample | null): void
 }

@@ -33,6 +33,12 @@ export class VoicePlayer {
     node.start(start)
   }
 
+  /** How many seconds of speech key still has queued ahead of it. */
+  backlog(key: string): number {
+    const output = this.outputs.get(key)
+    return output ? Math.max(0, output.nextStart - this.context.currentTime) : 0
+  }
+
   /** Drops what key played, as a departed speaker's stream should be. */
   forget(key: string): void {
     this.outputs.delete(key)

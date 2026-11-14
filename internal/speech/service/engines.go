@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -23,7 +24,9 @@ const (
 	engineTimeout     = 15 * time.Second
 	maxResponseBytes  = 32 << 20
 	fakeToneSeconds   = 0.4
+	warmUpSamples     = vad.Rate / 2
 	fakeToneHz        = 440
+	fakeOwnToneHz     = 660
 	fakeToneLevel     = 0.2
 	noSpeechThreshold = 0.6
 	logprobThreshold  = -1.0
@@ -32,12 +35,42 @@ const (
 type speech struct {
 	pcm  []byte
 	rate int
+	// converting is how long a conversion engine took to make it the
+	// speaker's own voice; zero otherwise.
+	converting time.Duration
 }
 
 type speechEngines interface {
 	transcribe(ctx context.Context, audio []int16, lang language) (string, error)
 	translate(ctx context.Context, text string, source, target language, earlier []string) (string, error)
-	speak(ctx context.Context, text string, lang language, choice voiceChoice) (speech, error)
+	speak(ctx context.Context, text string, lang language, choice voiceChoice, own *reference) (speech, error)
+}
+
+// reference is a speaker's own voice, for a cloning voice engine or a
+// conversion engine: the WAV they recorded and its transcript.
+type reference struct {
+	wav  []byte
+	text string
+	// stock is the stock voice nearer the speaker's pitch: a conversion
+	// starts from it, and a failed own voice falls back to it.
+	stock voiceChoice
+}
+
+// stockFor is the stock voice to speak in instead of choice: the one
+// nearer the speaker's pitch when there is a recording.
+func (r *reference) stockFor(choice voiceChoice) voiceChoice {
+	if r == nil {
+		return choice
+	}
+
+	return r.stock
+}
+
+// voiceRef is how the voice engine takes a reference recording inline
+// (audio.cpp's voice_ref), so nothing is stored there between requests.
+type voiceRef struct {
+	Type string `json:"type"`
+	Data string `json:"data"`
 }
 
 func newHTTPEngines(settings Settings) *httpEngines {
@@ -48,7 +81,35 @@ var (
 	errStatus      = errors.New("unexpected status")
 	errNoChoice    = errors.New("no choices in the reply")
 	errNoVoiceName = errors.New("no voice name")
+	errNoAudio     = errors.New("no audio in the reply")
 )
+
+// unconvertedError is a failed voice conversion that still has the
+// stock voice it started from, so a listener needn't wait for it again.
+type unconvertedError struct {
+	stock speech
+	err   error
+}
+
+func (e *unconvertedError) Error() string { return e.err.Error() }
+
+func (e *unconvertedError) Unwrap() error { return e.err }
+
+// convertRequest is audio.cpp's /tasks/run for a voice conversion model:
+// the stock voice and the speaker's recording, both inline.
+type convertRequest struct {
+	Model   string      `json:"model"`
+	Request convertTask `json:"request"`
+}
+
+type convertTask struct {
+	Audio    string   `json:"audio_base64"` //nolint:tagliatelle // the conversion engine's wire format.
+	VoiceRef voiceRef `json:"voice_ref"`    //nolint:tagliatelle // the conversion engine's wire format.
+}
+
+type convertReply struct {
+	Audio string `json:"audio"`
+}
 
 type chatMessage struct {
 	Role    string `json:"role"`
@@ -83,10 +144,13 @@ type ollamaReply struct {
 }
 
 type speechRequest struct {
-	Model          string `json:"model"`
-	Voice          string `json:"voice"`
-	Input          string `json:"input"`
-	ResponseFormat string `json:"response_format"` //nolint:tagliatelle // OpenAI's wire format.
+	Model          string    `json:"model"`
+	Voice          string    `json:"voice,omitempty"`
+	Input          string    `json:"input"`
+	ResponseFormat string    `json:"response_format"`          //nolint:tagliatelle // OpenAI's wire format.
+	VoiceRef       *voiceRef `json:"voice_ref,omitempty"`      //nolint:tagliatelle // the voice engine's wire format.
+	ReferenceText  string    `json:"reference_text,omitempty"` //nolint:tagliatelle // the voice engine's wire format.
+	Language       string    `json:"language,omitempty"`
 }
 
 type transcriptionSegment struct {
@@ -216,21 +280,13 @@ func (e *httpEngines) translate(ctx context.Context, text string, source, target
 	return strings.TrimSpace(reply.Message.Content), nil
 }
 
-func (e *httpEngines) speak(ctx context.Context, text string, lang language, choice voiceChoice) (speech, error) {
-	name := lang.Voices[choice]
-	if name == "" {
-		name = lang.Voices[defaultVoice]
+func (e *httpEngines) speak(ctx context.Context, text string, lang language, choice voiceChoice, own *reference) (speech, error) {
+	request, err := e.voiceRequest(text, lang, choice, own)
+	if err != nil {
+		return speech{}, err
 	}
 
-	if name == "" {
-		name = e.settings.voiceName
-	}
-
-	if name == "" {
-		return speech{}, fmt.Errorf("%s: %w for %s", voice, errNoVoiceName, lang.Code)
-	}
-
-	payload, err := json.Marshal(speechRequest{Model: e.settings.voice.model, Voice: name, Input: text, ResponseFormat: "wav"})
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return speech{}, fmt.Errorf("%s: encode the request: %w", voice, err)
 	}
@@ -247,12 +303,155 @@ func (e *httpEngines) speak(ctx context.Context, text string, lang language, cho
 		return speech{}, fmt.Errorf("%s: read the voice: %w", voice, err)
 	}
 
-	pcm, err := binary.Append(make([]byte, 0, len(samples)*pcmWidth), binary.LittleEndian, samples)
-	if err != nil {
-		return speech{}, fmt.Errorf("%s: encode the voice: %w", voice, err)
+	spoken, err := pcmSpeech(voice, samples, rate)
+	if err != nil || own == nil || e.settings.conversion == nil {
+		return spoken, err
 	}
 
-	return speech{pcm: pcm, rate: int(rate)}, nil
+	return e.converted(ctx, samples, rate, spoken, own)
+}
+
+// converted is the stock voice in the speaker's own voice, or, if that
+// fails, an unconvertedError that carries the stock voice.
+func (e *httpEngines) converted(ctx context.Context, samples []int16, rate uint32, spoken speech, own *reference) (speech, error) {
+	// A streaming voice engine's WAV has no real sizes in its header, which
+	// a conversion engine may refuse, so it gets a WAV written afresh.
+	stock, err := wav.Encode(samples, rate)
+	if err != nil {
+		return speech{}, &unconvertedError{stock: spoken, err: fmt.Errorf("%s: encode the voice: %w", conversion, err)}
+	}
+
+	started := time.Now()
+
+	own16, ownRate, err := e.convert(ctx, stock, own)
+	if err != nil {
+		return speech{}, &unconvertedError{stock: spoken, err: err}
+	}
+
+	converted, err := pcmSpeech(conversion, matchLoudness(own16, samples), ownRate)
+	if err != nil {
+		return speech{}, &unconvertedError{stock: spoken, err: err}
+	}
+
+	converted.converting = time.Since(started)
+
+	return converted, nil
+}
+
+// voiceWarmer is a voice engine that can get a speaker's own voice ready
+// before their first sentence.
+type voiceWarmer interface {
+	warmVoice(ctx context.Context, own *reference) error
+}
+
+// warmVoice has the conversion engine load its model and prepare the
+// speaker's voice with a short silence, so the first sentence in their
+// voice doesn't wait for either.
+func (e *httpEngines) warmVoice(ctx context.Context, own *reference) error {
+	if e.settings.conversion == nil {
+		return nil
+	}
+
+	silence, err := wav.Encode(make([]int16, warmUpSamples), vad.Rate)
+	if err != nil {
+		return fmt.Errorf("%s: encode the warm-up: %w", conversion, err)
+	}
+
+	_, _, err = e.convert(ctx, silence, own)
+
+	return err
+}
+
+// convert turns a stock voice WAV into the speaker's own voice: its
+// samples and their rate.
+func (e *httpEngines) convert(ctx context.Context, stock []byte, own *reference) ([]int16, uint32, error) {
+	request := convertRequest{
+		Model: e.settings.conversion.model,
+		Request: convertTask{
+			Audio:    base64.StdEncoding.EncodeToString(stock),
+			VoiceRef: voiceRef{Type: "base64", Data: base64.StdEncoding.EncodeToString(own.wav)},
+		},
+	}
+
+	var reply convertReply
+
+	err := e.callJSON(ctx, conversion, *e.settings.conversion, "/tasks/run", request, &reply)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if reply.Audio == "" {
+		return nil, 0, fmt.Errorf("%s: %w", conversion, errNoAudio)
+	}
+
+	converted, err := base64.StdEncoding.DecodeString(reply.Audio)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: read the audio: %w", conversion, err)
+	}
+
+	samples, rate, err := wav.Decode(converted)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: read the voice: %w", conversion, err)
+	}
+
+	return samples, rate, nil
+}
+
+func pcmSpeech(use purpose, samples []int16, rate uint32) (speech, error) {
+	pcm, err := binary.Append(make([]byte, 0, len(samples)*pcmWidth), binary.LittleEndian, samples)
+	if err != nil {
+		return speech{}, fmt.Errorf("%s: encode the voice: %w", use, err)
+	}
+
+	return speech{pcm: pcm, rate: int(rate), converting: 0}, nil
+}
+
+// voiceRequest asks the voice engine for text in the speaker's own voice
+// when it clones one, else in the stock voice their choice comes to.
+func (e *httpEngines) voiceRequest(text string, lang language, choice voiceChoice, own *reference) (speechRequest, error) {
+	request := speechRequest{
+		Model: e.settings.voice.model, Voice: "", Input: text, ResponseFormat: "wav",
+		VoiceRef: nil, ReferenceText: "", Language: "",
+	}
+
+	// A cloning engine (audio.cpp's Chatterbox) is told the language for a
+	// stock voice too: without it, German comes back garbled.
+	if e.settings.voiceCloning {
+		request.Language = lang.Code
+	}
+
+	if own != nil && e.settings.voiceCloning {
+		request.VoiceRef = &voiceRef{Type: "base64", Data: base64.StdEncoding.EncodeToString(own.wav)}
+		request.ReferenceText = own.text
+
+		return request, nil
+	}
+
+	name, err := e.stockVoice(lang, own.stockFor(choice))
+	if err != nil {
+		return speechRequest{}, err
+	}
+
+	request.Voice = name
+
+	return request, nil
+}
+
+func (e *httpEngines) stockVoice(lang language, choice voiceChoice) (string, error) {
+	name := lang.Voices[choice.stock()]
+	if name == "" {
+		name = lang.Voices[defaultVoice]
+	}
+
+	if name == "" {
+		name = e.settings.voiceName
+	}
+
+	if name == "" {
+		return "", fmt.Errorf("%s: %w for %s", voice, errNoVoiceName, lang.Code)
+	}
+
+	return name, nil
 }
 
 func (e *httpEngines) callJSON(ctx context.Context, use purpose, target engine, path string, request, reply any) error {
@@ -321,10 +520,17 @@ func (f *fakeEngines) translate(_ context.Context, text string, _, target langua
 	return fmt.Sprintf("[%s] %s", target.Code, text), nil
 }
 
-func (f *fakeEngines) speak(context.Context, string, language, voiceChoice) (speech, error) {
+// speak is a tone: a higher one in a speaker's own voice, so a test can
+// tell the two apart.
+func (f *fakeEngines) speak(_ context.Context, _ string, _ language, _ voiceChoice, own *reference) (speech, error) {
+	frequency := float64(fakeToneHz)
+	if own != nil {
+		frequency = float64(fakeOwnToneHz)
+	}
+
 	tone := make([]int16, int(fakeToneSeconds*vad.Rate))
 	for i := range tone {
-		tone[i] = int16(fakeToneLevel * math.MaxInt16 * math.Sin(2*math.Pi*fakeToneHz*float64(i)/vad.Rate))
+		tone[i] = int16(fakeToneLevel * math.MaxInt16 * math.Sin(2*math.Pi*frequency*float64(i)/vad.Rate))
 	}
 
 	pcm, err := binary.Append(nil, binary.LittleEndian, tone)
@@ -332,5 +538,5 @@ func (f *fakeEngines) speak(context.Context, string, language, voiceChoice) (spe
 		return speech{}, fmt.Errorf("fake voice: %w", err)
 	}
 
-	return speech{pcm: pcm, rate: vad.Rate}, nil
+	return speech{pcm: pcm, rate: vad.Rate, converting: 0}, nil
 }

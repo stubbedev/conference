@@ -15,6 +15,8 @@ export interface AudioHeader {
   speaker: string
   lang: string
   voice: VoiceChoice
+  /** Part of the speaker's recorded own voice, not of the call. */
+  sample?: true
 }
 
 export function packAudio(header: AudioHeader, pcm: ArrayBuffer): ArrayBuffer {
@@ -72,6 +74,8 @@ export type SpeechMessage =
   | { type: 'caption'; caption: CaptionLine }
   /** A sentence went out without a voice in lang; translated tells whether its caption there is a translation. */
   | { type: 'unvoiced'; lang: string; translated: boolean }
+  /** The speaker's recorded voice is in use, or was turned down as too short or silent. */
+  | { type: 'own-voice'; state: 'ready' | 'rejected' }
 
 /**
  * parseSpeechMessage reads a text frame of the speech service that
@@ -94,6 +98,8 @@ export function parseSpeechMessage(data: string, speaker: string): SpeechMessage
     }
     case 'notice': {
       const { code, lang } = fields
+      if (code === 'own-voice-ready') return { type: 'own-voice', state: 'ready' }
+      if (code === 'own-voice-rejected') return { type: 'own-voice', state: 'rejected' }
       if (code !== 'translation-failed' && code !== 'voice-failed') return { refused: 'it is a notice with a code this build does not know' }
       if (!isLabel(lang)) return noLabel('lang')
       return { type: 'unvoiced', lang, ...UNVOICED[code] }

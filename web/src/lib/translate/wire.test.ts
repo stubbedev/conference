@@ -71,6 +71,11 @@ test('a sentence without a voice is read with its language and whether it was tr
   }
 })
 
+test('the speaker’s own voice being ready or turned down is read, with or without a language', () => {
+  assert.deepEqual(parseSpeechMessage('{"type":"notice","code":"own-voice-ready","lang":"","seconds":15}', 'anna'), { type: 'own-voice', state: 'ready' })
+  assert.deepEqual(parseSpeechMessage('{"type":"notice","code":"own-voice-rejected","lang":"","seconds":3}', 'anna'), { type: 'own-voice', state: 'rejected' })
+})
+
 test('the service being ready is read, and nothing unknown is', () => {
   assert.deepEqual(parseSpeechMessage('{"type":"ready"}', 'anna'), { type: 'ready' })
   assert.match(refused(parseSpeechMessage('{"type":"notice","code":"on-fire","lang":"en"}', 'anna')), /code this build does not know/)

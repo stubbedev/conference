@@ -9,11 +9,13 @@
 //
 // The SFU only ever relays the sealed captions and encrypted tracks.
 // Each speaker's voice stays its own track, which is also where a
-// speaker's own (cloned) voice would come in.
+// speaker's own voice comes in: their recording goes to the speech
+// service, which makes the translated voice from it.
 
 import { Refusals } from '@/lib/sealed'
 import { serverSocketURL, type RoomClient } from '@/lib/sfu'
 import { MicCapture } from '@/lib/translate/capture'
+import type { OwnVoiceSample } from '@/lib/translate/own-voice'
 import { afterEnd, CONNECT_TIMEOUT_MS, RECONNECT_DELAY_MS, type Ended } from '@/lib/translate/speech-link'
 import { PROVIDES_NOTHING, type LangPrefs, type RoomMessage, type TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
@@ -23,6 +25,13 @@ import { packAudio, parseSpeechMessage, parseVoice } from '@/lib/translate/wire'
 const SPEECH_SERVICE = 'the speech service'
 // How long start() waits for the token the server sends on its own before asking.
 const TOKEN_GRACE_MS = 1_500
+// A translated voice queued further behind than this is skipped (its
+// subtitle still shows), so a voice engine that can't keep up doesn't
+// build an ever growing delay. Far beyond what a talkative speaker
+// queues with a normal voice engine.
+const MAX_VOICE_LAG_S = 10
+// A recorded voice sample goes out in frames well under the stream's message limit.
+const SAMPLE_FRAME = 8_000
 
 export class ServerTranslator implements Translator {
   private client: RoomClient | null = null
@@ -33,10 +42,21 @@ export class ServerTranslator implements Translator {
   private player: VoicePlayer | null = null
   /** The languages this member's last sentence went out in as a voice. */
   private voiced = new Set<string>()
+  /** The speaker's own voice, recorded before the call, and whether this connection has it. */
+  private ownSample: OwnVoiceSample | null = null
+  private sampleSent = false
   private failures = 0
   private asking: ReturnType<typeof setTimeout> | null = null
   private deadline: ReturnType<typeof setTimeout> | null = null
-  private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
+  private status: TranslatorStatus = {
+    state: 'claiming',
+    detail: '',
+    sameLanguage: false,
+    failedTranslations: 0,
+    loading: null,
+    ownVoice: 'off',
+    droppedVoices: 0,
+  }
   private selfPrefs: LangPrefs
   private stopped = false
   private readonly events: TranslatorEvents
@@ -67,6 +87,8 @@ export class ServerTranslator implements Translator {
       client.on('translate-token', ({ token }) => this.openSpeech(token)),
       client.on('lang', () => this.sendTargets()),
       client.on('member-gone', () => this.sendTargets()),
+      // A recording mixes in the recorder's language, voice switch or not.
+      client.on('recording', () => this.sendTargets()),
     ]
     this.announce()
   }
@@ -91,8 +113,11 @@ export class ServerTranslator implements Translator {
   }
 
   setSelfPrefs(prefs: LangPrefs): void {
+    const droppedOwn = this.selfPrefs.voiceChoice === 'own' && prefs.voiceChoice !== 'own'
     this.selfPrefs = prefs
+    if (droppedOwn) this.forgetVoice()
     this.sendTargets()
+    this.sendSample()
   }
 
   /** The speech service already translated what it relays: nothing to do. */
@@ -124,6 +149,40 @@ export class ServerTranslator implements Translator {
     this.player = this.playbackContext ? new VoicePlayer(this.playbackContext, this.publishTrack) : null
     this.voiced.clear()
     this.client = null
+  }
+
+  /** The recorded own voice, sent to the speech service while the speaker has chosen it. */
+  setOwnVoiceSample(sample: OwnVoiceSample | null): void {
+    if (sample === this.ownSample) return
+    const deleted = this.ownSample !== null && sample === null
+    this.ownSample = sample
+    this.sampleSent = false
+    if (deleted) this.forgetVoice()
+    this.sendSample()
+  }
+
+  // The speech service drops the speaker's recorded voice at once.
+  private forgetVoice(): void {
+    this.sampleSent = false
+    this.setStatus({ ownVoice: 'off' })
+    this.announce()
+    const speaker = this.client?.memberId
+    if (!speaker || this.speech?.readyState !== WebSocket.OPEN) return
+    this.speech.send(JSON.stringify({ type: 'forget-voice', speaker }))
+  }
+
+  // The service keeps a sample per connection, so each new one gets it again.
+  private sendSample(): void {
+    const sample = this.ownSample
+    const speaker = this.client?.memberId
+    if (this.sampleSent || !sample || !speaker || this.selfPrefs.voiceChoice !== 'own') return
+    if (this.speech?.readyState !== WebSocket.OPEN) return
+    this.sampleSent = true
+    for (let offset = 0; offset < sample.pcm.length; offset += SAMPLE_FRAME) {
+      const frame = sample.pcm.slice(offset, offset + SAMPLE_FRAME).buffer
+      this.speech.send(packAudio({ speaker, lang: sample.lang, voice: 'own', sample: true }, frame))
+    }
+    this.speech.send(JSON.stringify({ type: 'voice-sample', speaker, lang: sample.lang }))
   }
 
   private readonly publishTrack = (lang: string, track: MediaStreamTrack): void => {
@@ -167,6 +226,8 @@ export class ServerTranslator implements Translator {
       this.clearAttempt()
       this.setStatus({ state: 'live', detail: '' })
       this.sendTargets()
+      this.sampleSent = false
+      this.sendSample()
     }
     speech.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
       if (typeof event.data === 'string') this.onSpeechText(event.data)
@@ -213,7 +274,19 @@ export class ServerTranslator implements Translator {
     for (const lang of this.voiced) if (!targets.includes(lang)) this.voiced.delete(lang)
     this.announce()
     if (this.speech?.readyState !== WebSocket.OPEN) return
-    this.speech.send(JSON.stringify({ type: 'hello', targets }))
+    this.speech.send(JSON.stringify({ type: 'hello', targets, voiceTargets: this.voiceTargets() }))
+  }
+
+  /**
+   * The other languages a translated voice is wanted in: by everyone who
+   * listens to one, and by the recorder, whose recording mixes it in.
+   */
+  private voiceTargets(): string[] {
+    const recorder = this.client?.recorder ?? ''
+    const wanted = [...(this.client?.memberLangPrefs.entries() ?? [])]
+      .filter(([id, prefs]) => (prefs.voice || id === recorder) && prefs.lang !== this.selfPrefs.lang)
+      .map(([, prefs]) => prefs.lang)
+    return [...new Set(wanted)]
   }
 
   // While the connection is open this member's speech is captioned. A
@@ -225,6 +298,7 @@ export class ServerTranslator implements Translator {
       captions: this.speech?.readyState === WebSocket.OPEN,
       translates: 'none',
       voices: [...this.voiced].sort(),
+      ownVoice: this.selfPrefs.voiceChoice === 'own' && this.status.ownVoice === 'ready',
     })
   }
 
@@ -262,6 +336,10 @@ export class ServerTranslator implements Translator {
         if (!message.translated) this.setStatus({ failedTranslations: this.status.failedTranslations + 1 })
         if (this.voiced.delete(message.lang)) this.announce()
         return
+      case 'own-voice':
+        this.setStatus({ ownVoice: message.state })
+        this.announce()
+        return
       case 'caption':
         void client.sendCaption(message.caption)
         this.events.onCaption(message.caption)
@@ -279,6 +357,10 @@ export class ServerTranslator implements Translator {
       return
     }
     if (voice.pcm.length === 0) return
+    if (player.backlog(voice.lang) > MAX_VOICE_LAG_S) {
+      this.setStatus({ droppedVoices: this.status.droppedVoices + 1 })
+      return
+    }
 
     player.play(voice.lang, voice.pcm, voice.rate)
     if (this.voiced.has(voice.lang)) return

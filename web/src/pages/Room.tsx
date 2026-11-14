@@ -10,6 +10,7 @@ import { HudBackdrop } from '@/components/HudBackdrop'
 import { DeviceSettingsPopover } from '@/components/MediaSettings'
 import { MeetingReady } from '@/components/MeetingReady'
 import { MemberAnnouncer } from '@/components/MemberAnnouncer'
+import type { OwnVoiceControls } from '@/components/OwnVoiceRecorder'
 import { Prejoin } from '@/components/Prejoin'
 import { RoomHeader } from '@/components/RoomHeader'
 import { CheckingScreen, GateScreen, JoiningScreen } from '@/components/RoomScreens'
@@ -23,6 +24,7 @@ import { useDiagnostics } from '@/hooks/diagnostics'
 import { useFullscreen } from '@/hooks/fullscreen'
 import { useLiveTranslation } from '@/hooks/live-translation'
 import { useLocalMedia } from '@/hooks/local-media'
+import { useOwnVoice } from '@/hooks/own-voice'
 import { useMediaRecovery } from '@/hooks/media-recovery'
 import { usePersistentState } from '@/hooks/persistent'
 import { useRecording } from '@/hooks/recording'
@@ -69,7 +71,8 @@ export default function Room() {
   const people = useRoomMembers(clientRef, displayName, controls)
   const { members, selfMember, memberList } = people
   const panel = useSidePanel(clientRef)
-  const translation = useLiveTranslation(clientRef, media.localStream, localStreamRef, people.membersRef)
+  const ownVoice = useOwnVoice()
+  const translation = useLiveTranslation(clientRef, media.localStream, localStreamRef, people.membersRef, ownVoice.forServer)
   const { config: translationConfig, langPrefs, changeLangPrefs, translations } = translation
   const translationAvailable = translationConfig.available
   const layout = useStageLayout(media.localStream, screenStream, people.tiles)
@@ -149,6 +152,29 @@ export default function Room() {
 
   const joinCall = () => void join(() => connectClient(''))
 
+  const ownVoiceControls = useMemo<OwnVoiceControls>(
+    () => ({
+      sample: ownVoice.sample,
+      remember: ownVoice.remember,
+      micTrack: media.localStream?.getAudioTracks()[0] ?? null,
+      micDeviceId: devicePrefs.mic,
+      onSample: ownVoice.changeSample,
+      onRemember: ownVoice.changeRemember,
+      serverConsent: ownVoice.serverConsent,
+      onServerConsent: ownVoice.setServerConsent,
+    }),
+    [
+      ownVoice.sample,
+      ownVoice.remember,
+      ownVoice.changeSample,
+      ownVoice.changeRemember,
+      ownVoice.serverConsent,
+      ownVoice.setServerConsent,
+      media.localStream,
+      devicePrefs.mic,
+    ],
+  )
+
   const settingsPopover = useMemo(
     () => (
       <DeviceSettingsPopover
@@ -161,7 +187,12 @@ export default function Room() {
         onMicGainChange={media.handleMicGainChange}
         translation={
           translationAvailable ? (
-            <TranslationSettings config={translationConfig} prefs={langPrefs} onChange={changeLangPrefs} />
+            <TranslationSettings
+              config={translationConfig}
+              prefs={langPrefs}
+              onChange={changeLangPrefs}
+              ownVoice={ownVoiceControls}
+            />
           ) : undefined
         }
       />
@@ -171,6 +202,7 @@ export default function Room() {
       translationConfig,
       langPrefs,
       changeLangPrefs,
+      ownVoiceControls,
       media.devices,
       devicePrefs,
       media.hasMic,
@@ -237,7 +269,13 @@ export default function Room() {
           onJoin={joinCall}
           translation={
             translationAvailable ? (
-              <TranslationSettings config={translationConfig} prefs={langPrefs} onChange={changeLangPrefs} prominent />
+              <TranslationSettings
+                config={translationConfig}
+                prefs={langPrefs}
+                onChange={changeLangPrefs}
+                ownVoice={ownVoiceControls}
+                prominent
+              />
             ) : undefined
           }
         />
@@ -261,6 +299,11 @@ export default function Room() {
         translationFailure={translation.translationFailure}
         onDismissFailure={translation.dismissFailure}
         lang={langPrefs.lang}
+        ownVoice={
+          langPrefs.voiceChoice === 'own' && translationConfig.ownVoice
+            ? { recorded: ownVoice.sample !== null, serverConsent: ownVoice.serverConsent }
+            : undefined
+        }
       />
 
       <div className="relative flex min-h-0 flex-1">
