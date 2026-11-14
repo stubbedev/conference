@@ -84,8 +84,8 @@ test('the lower of two layers wins', () => {
   assert.equal(lowerLayer('l', 'h'), 'l')
 })
 
-test('a layer lost again right after it came back waits twice as long next time, and a held layer forgives it', () => {
-  let state = nextQuality(newQualityState(), 'h', stalled, CAMERA)
+test('a layer the link loses again right after it came back waits twice as long next time, and a held layer forgives it', () => {
+  let state = nextQuality(newQualityState(), 'h', lossy, CAMERA)
   const samplesToClimb = () => {
     let samples = 0
     while (state.ceiling !== 'h') {
@@ -96,15 +96,39 @@ test('a layer lost again right after it came back waits twice as long next time,
   }
 
   const first = samplesToClimb()
-  state = nextQuality(state, 'h', stalled, CAMERA)
+  state = nextQuality(state, 'h', lossy, CAMERA)
   const second = samplesToClimb()
-  state = nextQuality(state, 'h', stalled, CAMERA)
+  state = nextQuality(state, 'h', lossy, CAMERA)
   const third = samplesToClimb()
   assert.deepEqual([first, second, third], [3, 6, 12])
 
   for (let i = 0; i < 30; i += 1) state = nextQuality(state, 'h', clean, CAMERA)
-  state = nextQuality(state, 'h', stalled, CAMERA)
+  state = nextQuality(state, 'h', lossy, CAMERA)
   assert.equal(samplesToClimb(), 3)
+})
+
+test('a share whose scroll bursts drop a few frames on a clean link climbs back at the same pace every time', () => {
+  const fluidBurst = { droppedFrames: 6, decodedFrames: 45, lostPackets: 0, receivedPackets: 900 }
+  const trickle = { droppedFrames: 0, decodedFrames: 2, lostPackets: 0, receivedPackets: 40 }
+  const cycle = ['burst', 'still', 'still'] as const
+  let state = newQualityState()
+  const stays: number[] = []
+  let slow = 0
+  for (let sample = 0; sample < 60; sample += 1) {
+    const scrolling = cycle[sample % cycle.length] === 'burst'
+    state = nextQuality(state, 'h', scrolling && state.ceiling === 'h' ? fluidBurst : trickle, SCREEN)
+    if (state.ceiling === 'l') {
+      slow += 1
+    } else if (slow > 0) {
+      stays.push(slow)
+      slow = 0
+    }
+  }
+  assert.ok(stays.length >= 5, `the share stepped down ${stays.length} times`)
+  assert.ok(
+    stays.every((stay) => stay === 3),
+    `samples on the slow encoding per step down: ${stays.join(' ')}`,
+  )
 })
 
 test('a busy share losing a fraction of a percent of its packets is not in trouble', () => {

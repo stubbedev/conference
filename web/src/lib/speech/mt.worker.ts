@@ -1,10 +1,11 @@
-import { pipeline } from '@huggingface/transformers'
+import { BaseStreamer, pipeline } from '@huggingface/transformers'
 import type { DataType } from '@huggingface/transformers'
 
 import { configureTransformers, loadingModel } from './hf'
 import { attempting, expectLoading, gpuCapabilities, reportLoading, reportRefused, reportWarning } from './loading'
 import { exportKey, loadsUpFront, mtRoute, mtRungs, sharedRun, type Export, type MtChoice, type MtKind, type MtRoute, type Sizes } from './models'
 import { errorMessage } from '../errors'
+import { answerBudget, garbled, type Garbled } from './garbled'
 import { firstThatRuns, type Capabilities, type Rung } from './runtime'
 import { serve } from './serve'
 import type { TranslationLevel } from '../translate/types'
@@ -14,8 +15,13 @@ const MAX_NEW_TOKENS = 384
 const THINKING = /<think>[\s\S]*?<\/think>/g
 const WARM_UP = { text: 'Hello.', source: 'en', target: 'de' }
 
+interface Limit {
+  max_new_tokens: number
+  streamer?: BaseStreamer
+}
+
 interface Seq2Seq {
-  (text: string, options?: { src_lang: string; tgt_lang: string }): Promise<{ translation_text: string }[]>
+  (text: string, options: Limit & { src_lang?: string; tgt_lang?: string }): Promise<{ translation_text: string }[]>
   model: { config: { model_type: string } }
   dispose(): Promise<void>
 }
@@ -30,8 +36,7 @@ interface TranslationRequest {
   content: [{ type: 'text'; source_lang_code: string; target_lang_code: string; text: string }]
 }
 
-interface GenerationOptions {
-  max_new_tokens: number
+interface GenerationOptions extends Limit {
   do_sample: false
   tokenizer_encode_kwargs?: { enable_thinking: false }
 }
@@ -97,12 +102,38 @@ async function start(name: string, kind: MtKind, rung: Rung): Promise<Model> {
         : { kind, run: (await loadingModel(() => pipeline('text-generation', name, options))) as unknown as Generator<TranslationRequest> }
 
   try {
-    await translateWith(model, WARM_UP.text, WARM_UP.source, WARM_UP.target, '')
+    await warmUp(model)
   } catch (err) {
     await model.run.dispose()
     throw err
   }
   return model
+}
+
+class GeneratedTokens extends BaseStreamer {
+  count = 0
+  private prompt = true
+
+  override put(): void {
+    if (this.prompt) this.prompt = false
+    else this.count++
+  }
+
+  override end(): void {}
+}
+
+const GARBLED: Record<Garbled, string> = {
+  empty: 'is empty',
+  'token-limit': 'runs into its token limit',
+  repetition: 'repeats itself',
+}
+
+async function warmUp(model: Model): Promise<void> {
+  const tokens = new GeneratedTokens()
+  const budget = answerBudget(WARM_UP.text)
+  const answer = await translateWith(model, WARM_UP.text, WARM_UP.source, WARM_UP.target, '', { max_new_tokens: budget, streamer: tokens })
+  const fault = garbled(answer, tokens.count, budget)
+  if (fault) throw new Error(`its translation of "${WARM_UP.text}" ${GARBLED[fault]}: ${JSON.stringify(answer.slice(0, 80))} after ${tokens.count} tokens`)
 }
 
 async function prepare(mt: MtChoice): Promise<TranslationLevel> {
@@ -157,7 +188,7 @@ async function stepsFor(source: string, target: string): Promise<Step[]> {
 
 async function translateAlong(steps: readonly Step[], text: string, system: string): Promise<string> {
   let translated = text
-  for (const step of steps) translated = await translateWith(step.model, translated, step.source, step.target, system)
+  for (const step of steps) translated = await translateWith(step.model, translated, step.source, step.target, system, { max_new_tokens: MAX_NEW_TOKENS })
   return translated
 }
 
@@ -167,10 +198,10 @@ function answerOf(output: { generated_text: { role: string; content: unknown }[]
   return reply.content.replace(THINKING, '').trim()
 }
 
-async function translateWith(model: Model, text: string, source: string, target: string, system: string): Promise<string> {
+async function translateWith(model: Model, text: string, source: string, target: string, system: string, limit: Limit): Promise<string> {
   if (model.kind === 'translator') {
     const [output] = await model.run([{ role: 'user', content: [{ type: 'text', source_lang_code: source, target_lang_code: target, text }] }], {
-      max_new_tokens: MAX_NEW_TOKENS,
+      ...limit,
       do_sample: false,
     })
     return answerOf(output, target)
@@ -182,7 +213,7 @@ async function translateWith(model: Model, text: string, source: string, target:
       { role: 'user', content: text },
     ]
     const [output] = await model.run(messages, {
-      max_new_tokens: MAX_NEW_TOKENS,
+      ...limit,
       do_sample: false,
       tokenizer_encode_kwargs: { enable_thinking: false },
     })
@@ -191,7 +222,7 @@ async function translateWith(model: Model, text: string, source: string, target:
 
   const type = model.run.model.config.model_type
   if (type !== 'm2m_100' && type !== 'marian') throw new Error(`a ${type} model is not one this app translates with`)
-  const options = type === 'm2m_100' ? { src_lang: source, tgt_lang: target } : undefined
+  const options = type === 'm2m_100' ? { ...limit, src_lang: source, tgt_lang: target } : limit
 
   const [translated] = await model.run(text, options)
   if (!translated) throw new Error(`the translation model translated nothing into ${target}`)

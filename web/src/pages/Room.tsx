@@ -31,7 +31,7 @@ import { useRecording } from '@/hooks/recording'
 import { useRoomConnection } from '@/hooks/room-connection'
 import { useRoomMembers } from '@/hooks/room-members'
 import { useRoomSession } from '@/hooks/room-session'
-import { useScreenShare } from '@/hooks/screen-share'
+import { shareState, useScreenShare } from '@/hooks/screen-share'
 import { useShortcuts } from '@/hooks/shortcuts'
 import { useSidePanel } from '@/hooks/side-panel'
 import { usePreferredLayers, useStageLayout } from '@/hooks/stage-layout'
@@ -57,7 +57,7 @@ export default function Room() {
 
   const media = useLocalMedia(clientRef)
   const { controls, controlsRef, devicePrefs, localStreamRef, turnOff, toggleMic, toggleCam } = media
-  const { screenStream, screenStreamRef, toggleShare, toggleScreen } = useScreenShare(
+  const { screenStream, screenStreamRef, starting: shareStarting, toggleShare, toggleScreen } = useScreenShare(
     clientRef,
     controlsRef,
     media.updateControls,
@@ -348,7 +348,7 @@ export default function Room() {
         cam={controls.cam}
         micAvailable={media.micAvailable}
         camAvailable={media.camAvailable}
-        sharing={controls.sharing}
+        share={shareState(controls.sharing, shareStarting)}
         blur={devicePrefs.blur}
         canBlur={canBlur}
         onBlur={media.onToggleBlur}

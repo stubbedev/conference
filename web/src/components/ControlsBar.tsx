@@ -3,6 +3,7 @@ import {
   Circle,
   Contrast,
   Languages,
+  Loader2,
   Maximize2,
   MessageSquare,
   Minimize2,
@@ -19,6 +20,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Hint } from '@/components/Hint'
 import { MeetingClock } from '@/components/MeetingClock'
 import { blurToggleLabel } from '@/hooks/media'
+import type { ShareState } from '@/hooks/screen-share'
 import { shortcutKey } from '@/hooks/shortcuts'
 import { unreadBadge } from '@/hooks/side-panel'
 import { cn } from '@/lib/utils'
@@ -29,7 +31,7 @@ interface ControlsBarProps {
   cam: boolean
   micAvailable: boolean
   camAvailable: boolean
-  sharing: boolean
+  share: ShareState
   blur: boolean
   canBlur: boolean
   onBlur: () => void
@@ -60,13 +62,25 @@ const AUTO_HIDE_MS = 3000
 const ROUND = 'size-11 rounded-full [&_svg:not([class*="size-"])]:size-5'
 const SIDE = 'size-10 rounded-full [&_svg:not([class*="size-"])]:size-5'
 
+const SHARE_LABELS: Record<ShareState, string> = {
+  off: 'Share your screen',
+  starting: 'Starting your screen share…',
+  on: 'Stop sharing',
+}
+
+const SHARE_ICONS: Record<ShareState, ReactNode> = {
+  off: <MonitorUp />,
+  starting: <Loader2 className="animate-spin" />,
+  on: <MonitorX />,
+}
+
 export const ControlsBar = memo(function ControlsBar({
   roomName,
   mic,
   cam,
   micAvailable,
   camAvailable,
-  sharing,
+  share,
   blur,
   canBlur,
   onBlur,
@@ -92,7 +106,8 @@ export const ControlsBar = memo(function ControlsBar({
   children,
 }: ControlsBarProps) {
   const translateLabel = translating ? 'Stop live translation' : 'Start live translation'
-  const shareLabel = sharing ? 'Stop sharing' : 'Share your screen'
+  const shareLabel = SHARE_LABELS[share]
+  const shareIcon = SHARE_ICONS[share]
   const recordLabel = recording ? 'Stop recording' : 'Record the call'
   const blurLabel = blurToggleLabel(blur)
   const chatKey = shortcutKey('toggleChat')
@@ -173,12 +188,14 @@ export const ControlsBar = memo(function ControlsBar({
         {canShare && (
           <Hint label={shareLabel}>
             <Button
-              variant={sharing ? 'default' : 'secondary'}
+              variant={share === 'on' ? 'default' : 'secondary'}
               size="icon"
               className={cn(ROUND, 'hidden sm:inline-flex')}
               onClick={onShare}
+              disabled={share === 'starting'}
+              aria-busy={share === 'starting'}
             >
-              {sharing ? <MonitorX /> : <MonitorUp />}
+              {shareIcon}
             </Button>
           </Hint>
         )}
@@ -205,8 +222,8 @@ export const ControlsBar = memo(function ControlsBar({
           </Hint>
           <DropdownMenuContent side="top" align="center">
             {canShare && (
-              <DropdownMenuItem className="sm:hidden" onSelect={onShare}>
-                {sharing ? <MonitorX /> : <MonitorUp />}
+              <DropdownMenuItem className="sm:hidden" onSelect={onShare} disabled={share === 'starting'}>
+                {shareIcon}
                 {shareLabel}
               </DropdownMenuItem>
             )}

@@ -94,11 +94,12 @@ function significant(bad: number, good: number, limit: number, share: number): b
   return bad >= limit && bad > (bad + good) * share
 }
 
-function troubled(health: InboundCounters): boolean {
-  return (
-    significant(health.droppedFrames, health.decodedFrames, DROPPED_FRAMES_LIMIT, DROPPED_FRAMES_SHARE) ||
-    significant(health.lostPackets, health.receivedPackets, LOST_PACKETS_LIMIT, LOST_PACKETS_SHARE)
-  )
+type Trouble = 'loss' | 'drops' | null
+
+function trouble(health: InboundCounters): Trouble {
+  if (significant(health.lostPackets, health.receivedPackets, LOST_PACKETS_LIMIT, LOST_PACKETS_SHARE)) return 'loss'
+  if (significant(health.droppedFrames, health.decodedFrames, DROPPED_FRAMES_LIMIT, DROPPED_FRAMES_SHARE)) return 'drops'
+  return null
 }
 
 /**
@@ -111,9 +112,10 @@ function troubled(health: InboundCounters): boolean {
 export function nextQuality(state: QualityState, layout: Layer, health: InboundCounters, rungs: Rungs): QualityState {
   const sinceUp = Math.min(state.sinceUp + 1, SETTLED_SAMPLES)
   const settledWait = sinceUp >= SETTLED_SAMPLES ? RECOVER_SAMPLES : state.wait
+  const seen = trouble(health)
 
-  if (troubled(health)) {
-    const failed = state.sinceUp < FAILED_RECOVERY_SAMPLES
+  if (seen !== null) {
+    const failed = seen === 'loss' && state.sinceUp < FAILED_RECOVERY_SAMPLES
     return {
       ceiling: rungBelow(lowerLayer(state.ceiling, layout), rungs),
       clean: 0,

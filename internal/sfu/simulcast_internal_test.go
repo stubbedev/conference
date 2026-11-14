@@ -513,3 +513,34 @@ func TestAStillScreenKeepsItsLayersWhileACameraLosesThem(t *testing.T) {
 		}
 	}
 }
+
+func TestAViewerIsAimedAtANewLayerBeforeItsFirstPacket(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(1000, 0)
+
+	track := simulcastTrack(trackKey{up: UpstreamScreen, mid: "0"}, KindScreen)
+	track.layers[layerLow] = newUpLayer(nil, start)
+
+	viewer := newUpViewer(nil, layerLow, layerHigh)
+	track.viewers["bob"] = viewer
+	track.retarget(start, false)
+
+	if viewer.target != layerLow {
+		t.Fatalf("with only the slow layer, the viewer is aimed at %d, want %d", viewer.target, layerLow)
+	}
+
+	// The fluid layer arrives a second later; its first packet is its
+	// opening keyframe, so the viewer must want it before that is forwarded.
+	if !track.installLayer(layerHigh, newUpLayer(nil, start.Add(time.Second)), start.Add(time.Second)) {
+		t.Fatal("the fluid layer was not installed")
+	}
+
+	if viewer.target != layerHigh {
+		t.Errorf("once the fluid layer arrived, the viewer is aimed at %d, want %d", viewer.target, layerHigh)
+	}
+
+	if track.installLayer(layerHigh, newUpLayer(nil, start.Add(time.Second)), start.Add(time.Second)) {
+		t.Error("a layer was installed twice")
+	}
+}

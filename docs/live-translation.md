@@ -285,7 +285,7 @@ their files under `files` (left out below):
     }
   },
   "mt": {
-    "kind": "seq2seq", "model": "Xenova/m2m100_418M", "dtype": "q4f16",
+    "kind": "seq2seq", "model": "Xenova/m2m100_418M", "dtype": "q8",
     "pairs": { "en-de": { "model": "Xenova/opus-mt-en-de", "dtype": "q4f16" } },
     "builtin": false
   },
@@ -375,9 +375,15 @@ among it, is left alone and never evicted.
 A browser uses the GPU whenever it can. It tries each model on the GPU in
 the export `models.json` names, then in every other export of the ladder
 in `web/src/lib/speech/runtime.ts` that the manifest lists, skipping those that
-need 16-bit floats on a GPU without `shader-f16`. An export counts as
+need 16-bit floats on a GPU without `shader-f16`. The 8-bit export is the
+CPU's and never runs on the GPU, and m2m100 only runs in it: at
+half precision on a GPU it answers in repetition loops or not at all, and
+its 4-bit exports drop parts of most sentences. An export counts as
 working only once it has run a real inference, and each one that fails is
-shown to the member. Transcription walks the ladder for its larger model
+shown to the member. A translation model's first inference must also give
+a real answer: one that is empty, repeats itself or runs into its token
+limit, a small one for the short warm-up sentence, is refused like an
+export that failed. Transcription walks the ladder for its larger model
 and then its smaller one, still on the GPU. The CPU is the last rung, and
 a failed download never moves down the ladder, because another export
 would fail the same way. A GPU can also hang without failing, as forced
@@ -395,7 +401,7 @@ browser version or the model setup changes.
 
 The models are large: whisper-large-v3-turbo at q4f16 is about 570 MB,
 TranslateGemma 4B at q4f16 about 2.7 GB (3.1 GB at q4),
-m2m100_418M at q4f16 about 740 MB, Qwen2.5-1.5B-Instruct at q4f16 about 1.2 GB, a
+m2m100_418M at q8 about 630 MB, Qwen2.5-1.5B-Instruct at q4f16 about 1.2 GB, a
 pair about 150 MB, and a Piper medium voice about 60 MB per language. A
 browser downloads what it uses once and caches it from then on.
 

@@ -141,8 +141,14 @@ test('the translator is TranslateGemma, falling back to m2m100', () => {
     kind: 'translator',
     model: 'onnx-community/translategemma-text-4b-it-ONNX',
     dtype: 'q4f16',
-    fallback: { model: 'Xenova/m2m100_418M', dtype: 'q4f16' },
+    fallback: { model: 'Xenova/m2m100_418M', dtype: 'q8' },
   })
+})
+
+test('m2m100 is chosen in its 8-bit export, and refused in any other', () => {
+  assert.deepEqual(parseArgs(['/srv/models', '--mt-kind=seq2seq']).mt.dtype, 'q8')
+  assert.throws(() => parseArgs(['/srv/models', '--mt-kind=seq2seq', '--mt-dtype=q4f16']), /Xenova\/m2m100_418M only works in its q8 export, not q4f16/)
+  assert.throws(() => parseArgs(['/srv/models', '--mt=Xenova/m2m100_418M', '--mt-dtype=q4']), /only works in its q8 export, not q4/)
 })
 
 test('an encoder-decoder translator needs no fallback', () => {
@@ -170,6 +176,23 @@ test('a model lists its metadata and every export it has, served under its id', 
     { path: 'owner/model/onnx/model_q4f16.onnx', repo: 'owner/model', revision: REVISION, file: 'onnx/model_q4f16.onnx', size: 400, sha256: 'ab'.repeat(32) },
     { path: 'owner/model/onnx/model_q4f16.onnx_data', repo: 'owner/model', revision: REVISION, file: 'onnx/model_q4f16.onnx_data', size: 900, sha256: 'cd'.repeat(32) },
   ])
+})
+
+test('m2m100 lists only its 8-bit export, whatever else its repository has', () => {
+  const listing = [
+    { type: 'file', path: 'config.json', size: 2 },
+    ...['', '_fp16', '_q4', '_q4f16', '_quantized'].flatMap((suffix) => [
+      { type: 'file', path: `onnx/encoder_model${suffix}.onnx`, size: 10 },
+      { type: 'file', path: `onnx/decoder_model_merged${suffix}.onnx`, size: 10 },
+    ]),
+  ]
+
+  const files = treeFiles('Xenova/m2m100_418M', 'seq2seq', ['q8'], REVISION, listing, 'tree')
+
+  assert.deepEqual(
+    files.map((file) => file.file),
+    ['config.json', 'onnx/encoder_model_quantized.onnx', 'onnx/decoder_model_merged_quantized.onnx'],
+  )
 })
 
 test('a model without the export asked for is refused by name', () => {

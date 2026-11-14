@@ -1,5 +1,5 @@
 import type { Language } from '../translate/languages.ts'
-import { rungsFor, type Capabilities, type Rung } from './runtime.ts'
+import { CPU_DTYPE, rungsFor, type Capabilities, type Rung } from './runtime.ts'
 
 export interface Export {
   model: string
@@ -55,8 +55,20 @@ export interface AsrRung extends Rung {
   tier: AsrTier
 }
 
+export const M2M100 = 'Xenova/m2m100_418M'
+
+const ONLY_EXPORTS: Readonly<Record<string, readonly string[]>> = { [M2M100]: [CPU_DTYPE] }
+
+export function usableExports(model: string): readonly string[] | null {
+  return Object.hasOwn(ONLY_EXPORTS, model) ? ONLY_EXPORTS[model] : null
+}
+
+export function usableExport(wanted: Export): boolean {
+  return usableExports(wanted.model)?.includes(wanted.dtype) ?? true
+}
+
 export function hostedIn(sizes: Sizes, model: string): (dtype: string) => boolean {
-  return (dtype) => Object.hasOwn(sizes, exportKey({ model, dtype }))
+  return (dtype) => usableExport({ model, dtype }) && Object.hasOwn(sizes, exportKey({ model, dtype }))
 }
 
 export function asrRungs(asr: AsrChoice, lang: string, capabilities: Capabilities, sizes: Sizes, floor: AsrTier): AsrRung[] {

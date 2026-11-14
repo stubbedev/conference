@@ -7,6 +7,13 @@ import { errorMessage, errorName } from '@/lib/errors'
 import { requestDisplay } from '@/lib/screen'
 import type { RoomClient } from '@/lib/sfu'
 
+export type ShareState = 'off' | 'starting' | 'on'
+
+export function shareState(sharing: boolean, starting: boolean): ShareState {
+  if (starting) return 'starting'
+  return sharing ? 'on' : 'off'
+}
+
 export function useScreenShare(
   clientRef: RefObject<RoomClient | null>,
   controlsRef: RefObject<Controls>,
@@ -14,6 +21,8 @@ export function useScreenShare(
 ) {
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
+  const [starting, setStarting] = useState(false)
+  const startingRef = useRef(false)
 
   useEffect(() => {
     return () => stopMediaStream(screenStreamRef.current)
@@ -21,7 +30,7 @@ export function useScreenShare(
 
   const toggleShare = useCallback(async () => {
     const client = clientRef.current
-    if (!client) return
+    if (!client || startingRef.current) return
 
     if (controlsRef.current.sharing) {
       await client.removeScreen()
@@ -32,6 +41,8 @@ export function useScreenShare(
       return
     }
 
+    startingRef.current = true
+    setStarting(true)
     try {
       const display = await requestDisplay()
       screenStreamRef.current = display
@@ -49,10 +60,13 @@ export function useScreenShare(
       if (errorName(err) === 'NotAllowedError') return
       console.error('screen share: starting the share', err)
       toast.error(`Your screen could not be shared: ${errorMessage(err)}`)
+    } finally {
+      startingRef.current = false
+      setStarting(false)
     }
   }, [clientRef, updateControls, controlsRef])
 
   const toggleScreen = useCallback(() => void toggleShare(), [toggleShare])
 
-  return { screenStream, screenStreamRef, toggleShare, toggleScreen }
+  return { screenStream, screenStreamRef, starting, toggleShare, toggleScreen }
 }

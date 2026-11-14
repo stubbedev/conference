@@ -28,6 +28,11 @@ test('an export the server does not host is never tried', () => {
   assert.deepEqual(rungsFor('q4f16', FULL, hosting('q4f16', 'fp32'), true), [onGpu('q4f16'), onGpu('fp32')])
 })
 
+test('the CPU export runs only on the CPU, even when the server chose it', () => {
+  assert.deepEqual(rungsFor('q8', FULL, ALL, true), [onGpu('q4f16'), onGpu('q4'), onGpu('fp16'), onGpu('fp32'), ON_CPU])
+  assert.deepEqual(rungsFor('q8', FULL, hosting('q8'), true), [ON_CPU])
+})
+
 test('without a GPU only the CPU remains', () => {
   assert.deepEqual(rungsFor('q4f16', NO_GPU, ALL, true), [ON_CPU])
 })
