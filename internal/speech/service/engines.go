@@ -336,7 +336,12 @@ func (e *httpEngines) converted(ctx context.Context, samples []int16, rate uint3
 
 	started := time.Now()
 
-	converted, err := e.convert(ctx, stock, own)
+	own16, ownRate, err := e.convert(ctx, stock, own)
+	if err != nil {
+		return speech{}, &unconvertedError{stock: spoken, err: err}
+	}
+
+	converted, err := pcmSpeech(conversion, matchLoudness(own16, samples), ownRate)
 	if err != nil {
 		return speech{}, &unconvertedError{stock: spoken, err: err}
 	}
@@ -365,13 +370,14 @@ func (e *httpEngines) warmVoice(ctx context.Context, own *reference) error {
 		return fmt.Errorf("%s: encode the warm-up: %w", conversion, err)
 	}
 
-	_, err = e.convert(ctx, silence, own)
+	_, _, err = e.convert(ctx, silence, own)
 
 	return err
 }
 
-// convert turns a stock voice WAV into the speaker's own voice.
-func (e *httpEngines) convert(ctx context.Context, stock []byte, own *reference) (speech, error) {
+// convert turns a stock voice WAV into the speaker's own voice: its
+// samples and their rate.
+func (e *httpEngines) convert(ctx context.Context, stock []byte, own *reference) ([]int16, uint32, error) {
 	request := convertRequest{
 		Model: e.settings.conversion.model,
 		Request: convertTask{
@@ -384,28 +390,24 @@ func (e *httpEngines) convert(ctx context.Context, stock []byte, own *reference)
 
 	err := e.callJSON(ctx, conversion, *e.settings.conversion, "/tasks/run", request, &reply)
 	if err != nil {
-		return speech{}, err
+		return nil, 0, err
 	}
 
 	if reply.Audio == "" {
-		return speech{}, fmt.Errorf("%s: %w", conversion, errNoAudio)
+		return nil, 0, fmt.Errorf("%s: %w", conversion, errNoAudio)
 	}
 
 	converted, err := base64.StdEncoding.DecodeString(reply.Audio)
 	if err != nil {
-		return speech{}, fmt.Errorf("%s: read the audio: %w", conversion, err)
+		return nil, 0, fmt.Errorf("%s: read the audio: %w", conversion, err)
 	}
 
-	return decodeSpeech(conversion, converted)
-}
-
-func decodeSpeech(use purpose, data []byte) (speech, error) {
-	samples, rate, err := wav.Decode(data)
+	samples, rate, err := wav.Decode(converted)
 	if err != nil {
-		return speech{}, fmt.Errorf("%s: read the voice: %w", use, err)
+		return nil, 0, fmt.Errorf("%s: read the voice: %w", conversion, err)
 	}
 
-	return pcmSpeech(use, samples, rate)
+	return samples, rate, nil
 }
 
 func pcmSpeech(use purpose, samples []int16, rate uint32) (speech, error) {
