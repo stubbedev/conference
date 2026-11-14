@@ -22,8 +22,10 @@ const (
 	contextKept  = 5
 
 	// A speaker's own voice is cloned from a sample they recorded: at
-	// least 6 s, at most 20 s is kept.
-	ownVoiceMax      = 20 * vad.Rate
+	// least 6 s, at most 14 s is kept. VoxCPM2 refuses a reference over
+	// 15 s with its default encoder capacity, and the browser records
+	// 15 s; the transcript is made from what is kept, so it still matches.
+	ownVoiceMax      = 14 * vad.Rate
 	ownVoicePrepared = 6 * vad.Rate
 )
 

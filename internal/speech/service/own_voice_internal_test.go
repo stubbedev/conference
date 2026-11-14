@@ -246,6 +246,24 @@ func TestRecordedVoiceIsUsedFromTheFirstSentence(t *testing.T) {
 	}
 }
 
+func TestALongRecordingIsKeptShortEnoughForEveryVoiceEngine(t *testing.T) {
+	t.Parallel()
+
+	opened, out := newOwnVoiceSession(t, "true", stubEngines{transcribeFn: echoTranscripts, translateFn: echoTranslations})
+
+	sendSample(t, opened, 16)
+	out.waitFor(t, noticeOf(wire.NoticeOwnVoiceReady))
+
+	samples, rate, err := wav.Decode(opened.speaker.prepared.Load().wav)
+	if err != nil {
+		t.Fatalf("read the kept recording: %v", err)
+	}
+
+	if seconds := float64(len(samples)) / float64(rate); seconds > 14 {
+		t.Errorf("a 16 s recording was kept as %.1f s, want at most 14 s", seconds)
+	}
+}
+
 func TestRecordedVoiceTooShortOrSilent(t *testing.T) {
 	t.Parallel()
 
