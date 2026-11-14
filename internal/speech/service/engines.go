@@ -281,22 +281,9 @@ func (e *httpEngines) translate(ctx context.Context, text string, source, target
 }
 
 func (e *httpEngines) speak(ctx context.Context, text string, lang language, choice voiceChoice, own *reference) (speech, error) {
-	request := speechRequest{
-		Model: e.settings.voice.model, Voice: "", Input: text, ResponseFormat: "wav",
-		VoiceRef: nil, ReferenceText: "", Language: "",
-	}
-
-	if own != nil && e.settings.voiceCloning {
-		request.VoiceRef = &voiceRef{Type: "base64", Data: base64.StdEncoding.EncodeToString(own.wav)}
-		request.ReferenceText = own.text
-		request.Language = lang.Code
-	} else {
-		name, err := e.stockVoice(lang, own.stockFor(choice))
-		if err != nil {
-			return speech{}, err
-		}
-
-		request.Voice = name
+	request, err := e.voiceRequest(text, lang, choice, own)
+	if err != nil {
+		return speech{}, err
 	}
 
 	payload, err := json.Marshal(request)
@@ -417,6 +404,37 @@ func pcmSpeech(use purpose, samples []int16, rate uint32) (speech, error) {
 	}
 
 	return speech{pcm: pcm, rate: int(rate), converting: 0}, nil
+}
+
+// voiceRequest asks the voice engine for text in the speaker's own voice
+// when it clones one, else in the stock voice their choice comes to.
+func (e *httpEngines) voiceRequest(text string, lang language, choice voiceChoice, own *reference) (speechRequest, error) {
+	request := speechRequest{
+		Model: e.settings.voice.model, Voice: "", Input: text, ResponseFormat: "wav",
+		VoiceRef: nil, ReferenceText: "", Language: "",
+	}
+
+	// A cloning engine (audio.cpp's Chatterbox) is told the language for a
+	// stock voice too: without it, it reads German and others as English.
+	if e.settings.voiceCloning {
+		request.Language = lang.Code
+	}
+
+	if own != nil && e.settings.voiceCloning {
+		request.VoiceRef = &voiceRef{Type: "base64", Data: base64.StdEncoding.EncodeToString(own.wav)}
+		request.ReferenceText = own.text
+
+		return request, nil
+	}
+
+	name, err := e.stockVoice(lang, own.stockFor(choice))
+	if err != nil {
+		return speechRequest{}, err
+	}
+
+	request.Voice = name
+
+	return request, nil
 }
 
 func (e *httpEngines) stockVoice(lang language, choice voiceChoice) (string, error) {

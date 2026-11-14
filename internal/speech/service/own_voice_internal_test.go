@@ -184,6 +184,30 @@ func TestOwnVoiceRequest(t *testing.T) {
 	}
 }
 
+func TestACloningEngineIsToldTheLanguageOfAStockVoice(t *testing.T) {
+	t.Parallel()
+
+	for _, cloning := range []bool{true, false} {
+		api, seen := fakeAPI(t)
+		settings := openAISettings(t, api)
+		settings.voiceCloning = cloning
+
+		_, err := newHTTPEngines(settings).speak(t.Context(), "hallo welt", mustLanguage(t, settings, "de"), voiceFemale, nil)
+		if err != nil {
+			t.Fatalf("speak: %v", err)
+		}
+
+		want := ""
+		if cloning {
+			want = "de"
+		}
+
+		if got := seen.speech; got.Voice == "" || got.VoiceRef != nil || got.Language != want {
+			t.Errorf("cloning=%v: stock voice request %+v, want voice %q with language %q", cloning, got, voiceAlloy, want)
+		}
+	}
+}
+
 func TestOwnVoiceStatus(t *testing.T) {
 	t.Parallel()
 
