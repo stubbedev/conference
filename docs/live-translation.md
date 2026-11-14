@@ -160,14 +160,16 @@ speaker's own microphone.
   stores nothing on disk. A cloning engine does keep prepared voices in
   memory, so that it doesn't prepare a voice again for every sentence
   (measured on an M1 Max: 2.2 s per sentence with the cache, 6.5 s
-  without). It prepares a voice per language, so switching between two
-  listener languages costs that again each time unless both stay cached.
-  Recommended:
+  without). Chatterbox rebuilds its model for each language and empties
+  this cache when it does, so in a room whose listeners use more than one
+  language every switch prepares the voice again: 3–5 s per sentence,
+  with spikes of 13–19 s, measured on an RTX 3060 Ti, whatever the number
+  of slots. VoxCPM2 and conversion keep their prepared voices across
+  languages. Recommended:
   - `conditionals_cache_slots` (Chatterbox) or `prompt_cache_slots`
     (VoxCPM2) in the model's `session_options`, set to about the number
-    of speakers using their own voice at the same time times the
-    languages they are heard in (default 1: two would keep evicting each
-    other);
+    of speakers using their own voice at the same time (default 1: two
+    would keep evicting each other);
   - `--idle-unload-ms 600000`, so after 10 minutes without a request the
     models, and the prepared voices with them, leave memory;
   - `log_request_body` off, so request bodies aren't logged.
@@ -194,8 +196,26 @@ speaker's own microphone.
 (C++, Apache-2.0) serves voice-cloning models such as VoxCPM2 (Apache-2.0)
 and Chatterbox Multilingual (MIT), both covering, among others, Danish,
 German, English and Swedish. Cloning is heavier than a stock voice: it
-needs a GPU to keep up with a live call. Chatterbox needs `language`: a
-German sentence without it comes out garbled.
+needs a GPU to keep up with a live call. On an RTX 3060 Ti, VoxCPM2 took
+0.4–0.5 s for a short sentence and 1.6–1.7 s for a long one, Chatterbox
+1.0–1.3 s and 2.1–3.0 s, and Chatterbox more whenever the language
+changes (above), so for rooms with several languages VoxCPM2 or
+conversion fit a live call better.
+
+- Chatterbox needs `language`, also for a stock voice: a German sentence
+  without it comes back garbled or with wrong words. With
+  `VOICE_CLONING` set, the service sends it with every voice request.
+- Chatterbox has no built-in voices: the stock voice names (each
+  language's `voices` in the language list, or `VOICE_NAME`) must be
+  voices in audio.cpp's `voice_dir`, a `<name>.wav` each plus a
+  `prompt_text` file with one `<name>|<what it says>` line per voice.
+- Chatterbox prepares a voice with an encoder on the CPU that forks
+  OpenMP threads for every frame: run `audiocpp_server` with
+  `OMP_NUM_THREADS=4`. On a busy host, preparing a voice took 25–80 s
+  without it and 0.9 s with it.
+- VoxCPM2 refuses a recording over 15 s with its default
+  `audiovae_encoder_sample_capacity`; the service keeps at most 14 s of
+  each recording, so the default is enough.
 
 - *Conversion* (`VOICE_CONVERT_URL`, `VOICE_CONVERT_MODEL`): the stock
   voice speaks the translation as usual, and a voice conversion model
@@ -203,7 +223,11 @@ German sentence without it comes out garbled.
   engine, the conversion doesn't depend on the language, and it is much
   lighter: on an M1 Max, Chatterbox's conversion with 3 flow steps took
   about 0.9 s per sentence, against about 6 s for cloning the same
-  sentence, and listeners couldn't tell the two apart. The service sends:
+  sentence, and listeners couldn't tell the two apart; on an RTX 3060 Ti
+  it took 0.34–0.40 s for a short sentence and 0.58–0.63 s for a long
+  one. The converted voice is brought to the loudness of the stock voice
+  it was made from, since the recording skips the call's gain control.
+  The service sends:
 
 ```json
 {

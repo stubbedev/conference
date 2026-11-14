@@ -415,7 +415,7 @@ func (e *httpEngines) voiceRequest(text string, lang language, choice voiceChoic
 	}
 
 	// A cloning engine (audio.cpp's Chatterbox) is told the language for a
-	// stock voice too: without it, it reads German and others as English.
+	// stock voice too: without it, German comes back garbled.
 	if e.settings.voiceCloning {
 		request.Language = lang.Code
 	}
