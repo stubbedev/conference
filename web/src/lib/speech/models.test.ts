@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { asrExport, asrRungs, bytesFor, exportKey, hostedIn, loadsUpFront, mtRoute, renderPrompt, sharedRun, type AsrChoice, type Export, type MtChoice, type SharedRun, type SpeechModels } from './models.ts'
+import { asrExport, asrRungs, bytesFor, exportKey, hostedIn, loadsUpFront, mtRoute, mtRungs, renderPrompt, sharedRun, usableExport, type AsrChoice, type Export, type MtChoice, type SharedRun, type SpeechModels } from './models.ts'
 
 const models: SpeechModels = {
   base: '/speech/',
@@ -40,8 +40,8 @@ const opus = (pair: string): Export => ({ model: `Xenova/opus-mt-${pair}`, dtype
 const pairs = Object.fromEntries(['en-de', 'de-en', 'en-da', 'da-en', 'da-de', 'fr-de'].map((pair) => [pair, opus(pair)]))
 const SHARED_RUNS: readonly SharedRun[] = ['seq2seq', 'generative', 'untried', 'none']
 
-const gemma: MtChoice = { kind: 'translator', model: 'google/translategemma', dtype: 'q4', fallback: { model: 'Xenova/m2m100_418M', dtype: 'q4' }, pairs }
-const gemmaSizes = { 'google/translategemma:q4': 1, 'Xenova/m2m100_418M:q4': 1, 'Xenova/m2m100_418M:q8': 1 }
+const gemma: MtChoice = { kind: 'translator', model: 'google/translategemma', dtype: 'q4', fallback: { model: 'Xenova/m2m100_418M', dtype: 'q8' }, pairs }
+const gemmaSizes = { 'google/translategemma:q4': 1, 'Xenova/m2m100_418M:q8': 1 }
 const GPU = { gpu: true, halves: false }
 const CPU = { gpu: false, halves: false }
 
@@ -120,6 +120,19 @@ test('what is hosted comes from the sizes the server reports', () => {
   const hosted = hostedIn({ 'a/b:q4': 1 }, 'a/b')
   assert.equal(hosted('q4'), true)
   assert.equal(hosted('fp32'), false)
+})
+
+const OLD_M2M100_SIZES = Object.fromEntries(['q4f16', 'q4', 'fp16', 'fp32', 'q8'].map((dtype) => [`Xenova/m2m100_418M:${dtype}`, 1]))
+
+test('m2m100 only works in its 8-bit export, whatever else an older manifest lists', () => {
+  const hosted = hostedIn(OLD_M2M100_SIZES, 'Xenova/m2m100_418M')
+  assert.deepEqual(['q4f16', 'q4', 'fp16', 'fp32', 'q8'].filter(hosted), ['q8'])
+  assert.equal(usableExport({ model: 'Xenova/m2m100_418M', dtype: 'q4f16' }), false)
+  assert.equal(usableExport({ model: 'Xenova/opus-mt-en-de', dtype: 'q4f16' }), true)
+})
+
+test('m2m100 translates on the CPU even on a GPU with 16-bit floats', () => {
+  assert.deepEqual(mtRungs({ model: 'Xenova/m2m100_418M', dtype: 'q4f16' }, 'seq2seq', { gpu: true, halves: true }, OLD_M2M100_SIZES), [{ device: 'wasm', dtype: 'q8' }])
 })
 
 const ladderChoice: AsrChoice = { model: 'big/whisper', dtype: 'q4f16', fallback: { model: 'small/whisper', dtype: 'q4' } }

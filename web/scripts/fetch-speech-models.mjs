@@ -23,7 +23,7 @@
 // --mt-fallback says otherwise) on a browser that cannot run it. Every
 // model also comes with whichever exports of the GPU ladder its repository
 // has and a browser can hold, so a browser whose GPU refuses one can try
-// the next.
+// the next, except m2m100, which only translates in its 8-bit export.
 //
 // The default translator is TranslateGemma, a language model trained to
 // translate between any two of its languages, for every pair without an
@@ -45,7 +45,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { mtRoute, PIVOT, sharedRun } from '../src/lib/speech/models.ts'
+import { M2M100, mtRoute, PIVOT, sharedRun, usableExport, usableExports } from '../src/lib/speech/models.ts'
 import { CPU_DTYPE, GPU_LADDER } from '../src/lib/speech/runtime.ts'
 
 const HUB = 'https://huggingface.co'
@@ -58,7 +58,7 @@ const PINNED = {
   'onnx-community/whisper-large-v3-turbo': '360ebcde2559d60bb474678be3c1de9ef347d01a',
   'onnx-community/whisper-base': '27a07b4b52b3a4c5886134bb4320e93e1a4bbc7c',
   'onnx-community/moonshine-base-ONNX': 'b1e9b6aae3c3c7298f10c3798393fdf38e8fbbad',
-  'Xenova/m2m100_418M': '9c374f0b7aca709787cea97b047bfbbd1559d177',
+  [M2M100]: '9c374f0b7aca709787cea97b047bfbbd1559d177',
   'onnx-community/translategemma-text-4b-it-ONNX': 'f7874a1ac60758872a4f78aac0df95b17b776994',
   'onnx-community/Qwen2.5-1.5B-Instruct': 'd54957e3af1be04546436e874a60fe386041b244',
 }
@@ -68,7 +68,7 @@ const LANGUAGES_FILE =
 
 const MT_DEFAULTS = {
   translator: { model: 'onnx-community/translategemma-text-4b-it-ONNX', dtype: 'q4f16' },
-  seq2seq: { model: 'Xenova/m2m100_418M', dtype: 'q4f16' },
+  seq2seq: { model: M2M100, dtype: CPU_DTYPE },
   llm: { model: 'onnx-community/Qwen2.5-1.5B-Instruct', dtype: 'q4f16' },
 }
 
@@ -187,20 +187,26 @@ export function parseArgs(argv) {
     }
   }
 
+  const asr = { model: options.asr, dtype: options['asr-dtype'] }
+  const fallback = options['asr-fallback'] === 'none' ? null : { model: options['asr-fallback'], dtype: options['asr-fallback-dtype'] }
+  const mt = {
+    kind,
+    model: options.mt ?? MT_DEFAULTS[kind].model,
+    dtype: options['mt-dtype'] ?? MT_DEFAULTS[kind].dtype,
+    fallback:
+      kind !== 'seq2seq' && options['mt-fallback'] !== 'none' ? { model: options['mt-fallback'] ?? MT_DEFAULTS.seq2seq.model, dtype: MT_DEFAULTS.seq2seq.dtype } : null,
+  }
+
+  for (const wanted of [asr, fallback, mt, mt.fallback]) {
+    if (wanted && !usableExport(wanted)) throw new Error(`${wanted.model} only works in its ${usableExports(wanted.model).join(', ')} export, not ${wanted.dtype}`)
+  }
+
   return {
     dir: path.resolve(positional[0]),
     languages,
-    asr: { model: options.asr, dtype: options['asr-dtype'] },
-    fallback: options['asr-fallback'] === 'none' ? null : { model: options['asr-fallback'], dtype: options['asr-fallback-dtype'] },
-    mt: {
-      kind,
-      model: options.mt ?? MT_DEFAULTS[kind].model,
-      dtype: options['mt-dtype'] ?? MT_DEFAULTS[kind].dtype,
-      fallback:
-        kind !== 'seq2seq' && options['mt-fallback'] !== 'none'
-          ? { model: options['mt-fallback'] ?? MT_DEFAULTS.seq2seq.model, dtype: MT_DEFAULTS.seq2seq.dtype }
-          : null,
-    },
+    asr,
+    fallback,
+    mt,
     pairs: pairsFrom(options['pair-languages'], languages, options['pair-dtype']),
     builtin: options.builtin,
   }
@@ -318,7 +324,7 @@ export function treeFiles(model, kind, dtypes, revision, listing, treeURL) {
   const names = MODEL_FILES.filter((name) => tree.has(name))
 
   const required = new Set(dtypes)
-  for (const dtype of new Set([...required, ...GPU_LADDER])) {
+  for (const dtype of new Set([...required, ...GPU_LADDER.filter((rung) => usableExport({ model, dtype: rung }))])) {
     try {
       names.push(...exportNames(tree, model, kind, dtype, revision, treeURL))
     } catch (err) {

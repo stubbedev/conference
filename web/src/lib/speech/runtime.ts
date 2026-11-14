@@ -25,7 +25,7 @@ export function needsHalves(dtype: string): boolean {
 }
 
 export function rungsFor(preferred: string, capabilities: Capabilities, hosted: (dtype: string) => boolean, cpu: boolean): Rung[] {
-  const gpu = capabilities.gpu ? [...new Set([preferred, ...GPU_LADDER])].filter((dtype) => hosted(dtype) && (capabilities.halves || !needsHalves(dtype))) : []
+  const gpu = capabilities.gpu ? [...new Set([preferred, ...GPU_LADDER])].filter((dtype) => dtype !== CPU_DTYPE && hosted(dtype) && (capabilities.halves || !needsHalves(dtype))) : []
   const onGpu = gpu.map((dtype): Rung => ({ device: 'webgpu', dtype }))
   return cpu && hosted(CPU_DTYPE) ? [...onGpu, { device: 'wasm', dtype: CPU_DTYPE }] : onGpu
 }
