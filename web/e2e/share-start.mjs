@@ -32,7 +32,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { consoleOf, createRoom, evalJs, findChrome, findFirefox, joinRoom, launchChrome, launchFirefox, stopProcess, waitFor } from './browser.mjs'
+import { callJs, consoleOf, createRoom, evalJs, findChrome, findFirefox, joinRoom, launchChrome, launchFirefox, stopProcess, waitFor, waitForCall } from './browser.mjs'
 import { buildServer, parseArgs, serverEnv, startServer } from './server.mjs'
 import { clickButtonByTitle, fakeDisplay, remoteScreen, SHARE_WIDTH, shareReceiveCounters, shareSendCounters, shareState } from './share.mjs'
 
@@ -99,6 +99,61 @@ Math.max(0, ...window.__pcs
   .map((pc) => (pc.remoteDescription?.sdp.match(/^m=/gm) ?? []).length))
 `
 
+function holdPicker() {
+  const devices = navigator.mediaDevices
+  const real = devices.getDisplayMedia
+  window.__pickerCalls = 0
+  devices.getDisplayMedia = (...request) => {
+    window.__pickerCalls += 1
+    return new Promise((resolve, reject) => {
+      window.__releasePicker = () => {
+        devices.getDisplayMedia = real
+        real.apply(devices, request).then(resolve, reject)
+      }
+    })
+  }
+  return true
+}
+
+function pendingShare() {
+  const control = [...document.querySelectorAll('button')].find((button) => accessibleName(button) === 'Starting your screen share…')
+  return { shown: Boolean(control), disabled: control?.disabled ?? false, busy: control?.getAttribute('aria-busy') === 'true', calls: window.__pickerCalls }
+}
+
+function clickPendingShare() {
+  const control = [...document.querySelectorAll('button')].find((button) => accessibleName(button) === 'Starting your screen share…')
+  control?.click()
+  return window.__pickerCalls
+}
+
+function releasePicker() {
+  window.__releasePicker()
+  return true
+}
+
+async function startWhilePickerWaits(label, presenter, viewer) {
+  await callJs(presenter, holdPicker)
+  if (!(await clickButtonByTitle(presenter, 'Share your screen'))) return `${label}, slow picker: no "Share your screen" button`
+
+  const pending = await waitForCall(presenter, pendingShare, [], (state) => state.shown, STOP_TIMEOUT_MS)
+  if (!pending.ok || !pending.value.disabled || !pending.value.busy) {
+    return `${label}, slow picker: the bar did not show a disabled, busy "Starting your screen share…" while the picker was open: ${JSON.stringify(pending.value)}`
+  }
+  const calls = await callJs(presenter, clickPendingShare)
+  if (calls !== 1) return `${label}, slow picker: clicking again while the picker was open asked for a screen ${calls} times, want 1`
+
+  await callJs(presenter, releasePicker)
+  const playing = await waitFor(viewer, shareReceiveCounters, (received) => received?.width === SHARE_WIDTH && received.decoded > 0, START_TIMEOUT_MS)
+  if (!playing.ok) return `${label}, slow picker: the share did not play once the picker answered (${JSON.stringify(playing.value)})`
+  if (!(await clickButtonByTitle(presenter, 'Stop sharing'))) return `${label}, slow picker: no "Stop sharing" button once the picker answered`
+
+  const gone = await waitFor(viewer, remoteScreen, (screen) => screen === null, STOP_TIMEOUT_MS)
+  if (!gone.ok) return `${label}, slow picker: the share stayed on the viewer's screen after it stopped`
+
+  console.log(`  ${label}: a slow picker showed the share as starting, ignored a second click, and played once it answered`)
+  return null
+}
+
 const sentBytes = (counters) => Object.values(counters?.layers ?? {}).reduce((sum, layer) => sum + layer.bytes, 0)
 
 async function startAndStop(label, round, presenter, viewer) {
@@ -144,6 +199,9 @@ async function pair(label, presenterKind, viewerKind, base, dir, firstIdx) {
     for (const [role, kind, browser] of [['presenter', presenterKind, presenter], ['viewer', viewerKind, viewer]]) {
       if (kind === 'chrome' && (await evalJs(browser, 'window.__collects')) !== true) return [`${label}: the ${role}'s worker is not collecting after its transform events`]
     }
+
+    const slow = await startWhilePickerWaits(label, presenter, viewer)
+    if (slow) return [slow]
 
     let afterFirst = 0
     for (let round = 1; round <= rounds; round++) {
