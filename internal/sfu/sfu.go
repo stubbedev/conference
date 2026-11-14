@@ -1717,6 +1717,22 @@ func (ut *UpTrack) isVideo() bool {
 // addLayer stores a newly arrived encoding and starts forwarding it;
 // it reports false when the layer is already known.
 func (ut *UpTrack) addLayer(index int, remote *webrtc.TrackRemote) bool {
+	layer := newUpLayer(remote, time.Now())
+	if !ut.installLayer(index, layer, time.Now()) {
+		return false
+	}
+
+	go ut.forwardLayer(index, layer)
+
+	return true
+}
+
+// installLayer adds a layer that has just arrived and moves the viewers
+// that want it onto it before its first packet is forwarded: that packet
+// opens the layer with a keyframe, which a viewer only aimed at the layer
+// at the next adaptation tick would miss, and a share that then sits still
+// sends no other until the screen moves.
+func (ut *UpTrack) installLayer(index int, layer *upLayer, now time.Time) bool {
 	ut.mu.Lock()
 
 	if ut.layers[index] != nil {
@@ -1725,12 +1741,13 @@ func (ut *UpTrack) addLayer(index int, remote *webrtc.TrackRemote) bool {
 		return false
 	}
 
-	layer := newUpLayer(remote, time.Now())
 	ut.layers[index] = layer
 
 	ut.mu.Unlock()
 
-	go ut.forwardLayer(index, layer)
+	if ut.simulcast {
+		ut.retarget(now, false)
+	}
 
 	return true
 }
