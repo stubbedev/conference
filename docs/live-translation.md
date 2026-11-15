@@ -160,16 +160,21 @@ speaker's own microphone.
   stores nothing on disk. A cloning engine does keep prepared voices in
   memory, so that it doesn't prepare a voice again for every sentence
   (measured on an M1 Max: 2.2 s per sentence with the cache, 6.5 s
-  without). Chatterbox rebuilds its model for each language and empties
-  this cache when it does, so in a room whose listeners use more than one
-  language every switch prepares the voice again: 3–5 s per sentence,
-  with spikes of 13–19 s, measured on an RTX 3060 Ti, whatever the number
-  of slots. VoxCPM2 and conversion keep their prepared voices across
+  without). Chatterbox up to audio.cpp 0.9.5 rebuilds its model for each
+  language and empties this cache when it does, so in a room whose
+  listeners use more than one language every switch prepares the voice
+  again: 3–5 s per sentence, with spikes of 13–19 s, measured on an RTX
+  3060 Ti, whatever the number of slots. From `main` at `6f979b9` it
+  rebuilds only between English and the other languages, which share one
+  model, and keeps the prepared voices; on an M1 Max a switch between
+  German, Danish and Swedish then took 2.5 s instead of 4.6 s with enough
+  slots. VoxCPM2 and conversion keep their prepared voices across
   languages. Recommended:
   - `conditionals_cache_slots` (Chatterbox) or `prompt_cache_slots`
     (VoxCPM2) in the model's `session_options`, set to about the number
-    of speakers using their own voice at the same time (default 1: two
-    would keep evicting each other);
+    of speakers using their own voice at the same time, times the
+    languages other than English they are heard in for Chatterbox
+    (default 1: two would keep evicting each other);
   - `--idle-unload-ms 600000`, so after 10 minutes without a request the
     models, and the prepared voices with them, leave memory;
   - `log_request_body` off, so request bodies aren't logged.
@@ -243,8 +248,10 @@ conversion fit a live call better.
   reply. Set the model's speed in the engine, e.g. audio.cpp's
   `"default_request_options": {"num_inference_steps": "3"}` for
   `chatterbox` with `"task": "vc"`. This needs audio.cpp from its `main`
-  at `de6fbe3` or later (after 0.9.4): it takes `voice_ref` inline as
-  above, and keeps a cache of prepared voices
+  at `6f979b9` or later (after 0.9.5): it takes `voice_ref` inline as
+  above, computes each speaker's voice correctly and not only the first
+  one a server prepares (0.9.5 and earlier reuse stale memory in the
+  speaker encoder after the first voice), and keeps a cache of prepared voices
   (`vc_reference_cache_slots` in the model's `session_options`, default
   1; set it to about the number of speakers using their own voice at the
   same time; 0 turns it off). A cached voice is prepared once instead of
