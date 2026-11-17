@@ -23,7 +23,7 @@ import { invented } from '@/lib/speech/invented'
 import { nextRunAt, Pace } from '@/lib/speech/pace'
 import { Recent } from '@/lib/speech/recent'
 import { ResourceSlot } from '@/lib/speech/resource-slot'
-import { Sentences, type Line } from '@/lib/speech/sentences'
+import { EARLIER_SENTENCES, Sentences, type Line } from '@/lib/speech/sentences'
 import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
 import { WarmUps } from '@/lib/speech/warm-ups'
 import { webgpuAvailable } from '@/lib/speech/webgpu'
@@ -35,7 +35,6 @@ import { VoicePlayer } from '@/lib/translate/voice'
 const QUEUED_UTTERANCES = 8
 const HOLD_MS = 1_500
 const TRANSLATION_WAIT_MS = 5_000
-const EARLIER_SENTENCES = 8
 const INTERIM_TRANSCRIPTION_GAP_MS = 1_000
 const INTERIM_TRANSLATION_GAP_MS = 1_500
 const REMEMBERED_TRANSLATIONS = 64

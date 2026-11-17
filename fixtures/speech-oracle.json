@@ -1,0 +1,88 @@
+{
+  "en": {
+    "recording": "english.wav",
+    "sentences": [
+      "Thanks for joining.",
+      "Let's start with a quick update on the rollout.",
+      "We can sync the product images to your webshop every night automatically.",
+      "Does that work for you, or should we schedule another call next week?",
+      "I'll share my screen so you can see the new folder structure."
+    ],
+    "translations": {
+      "de": [
+        [
+          "Danke, dass Sie dabei sind.",
+          "Danke für Ihre Teilnahme."
+        ],
+        "Beginnen wir mit einem kurzen Update zur Einführung.",
+        "Wir können die Produktbilder jede Nacht automatisch mit Ihrem Webshop synchronisieren.",
+        "Passt Ihnen das, oder sollen wir nächste Woche einen weiteren Termin vereinbaren?",
+        "Ich teile meinen Bildschirm, damit Sie die neue Ordnerstruktur sehen können."
+      ],
+      "da": [
+        [
+          "Tak fordi du deltager.",
+          "Tak fordi du er med.",
+          "Tak fordi du kom."
+        ],
+        "Lad os starte med en kort opdatering om udrulningen.",
+        "Vi kan synkronisere produktbillederne til din webshop automatisk hver nat.",
+        "Passer det dig, eller skal vi planlægge et nyt møde i næste uge?",
+        "Jeg deler min skærm, så du kan se den nye mappestruktur."
+      ]
+    }
+  },
+  "de": {
+    "recording": "german.wav",
+    "sentences": [
+      "Guten Morgen, schön, dass Sie heute Zeit haben.",
+      "Wir müssen die Lieferung um zwei Wochen verschieben, weil der Zulieferer Probleme hat.",
+      "Können Sie mir die Produktdaten bis Freitag als Excel-Datei schicken?",
+      "Das Bild ist zu dunkel.",
+      "Bitte machen Sie den Hintergrund heller."
+    ],
+    "translations": {
+      "en": [
+        [
+          "Good morning, it's nice that you have time today.",
+          "Good morning, I'm glad you have time today."
+        ],
+        "We have to postpone the delivery by two weeks because the supplier is having problems.",
+        "Can you send me the product data as an Excel file by Friday?",
+        "The picture is too dark.",
+        "Please make the background brighter."
+      ],
+      "da": [
+        [
+          "Godmorgen, dejligt at du har tid i dag.",
+          "Godmorgen, godt at du har tid i dag."
+        ],
+        "Vi er nødt til at udskyde leveringen med to uger, fordi leverandøren har problemer.",
+        "Kan du sende mig produktdataene som en Excel-fil inden fredag?",
+        "Billedet er for mørkt.",
+        "Gør venligst baggrunden lysere."
+      ]
+    }
+  },
+  "sv": {
+    "recording": "swedish.wav",
+    "sentences": [
+      "God morgon!",
+      "Vad roligt att du har tid idag.",
+      "Vi måste skjuta upp leveransen två veckor eftersom leverantören har problem.",
+      "Kan du skicka produktdata som en Excel-fil senast på fredag?",
+      "Bilden är för mörk.",
+      "Gör gärna bakgrunden ljusare."
+    ],
+    "translations": {
+      "en": [
+        "Good morning!",
+        "How nice that you have time today.",
+        "We have to postpone the delivery by two weeks because the supplier is having problems.",
+        "Can you send the product data as an Excel file by Friday at the latest?",
+        "The picture is too dark.",
+        "Please make the background lighter."
+      ]
+    }
+  }
+}

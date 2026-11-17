@@ -1,6 +1,7 @@
 import type { Cut } from './vad.ts'
 
 export const MAX_HELD_CHARS = 160
+export const EARLIER_SENTENCES = 8
 
 const SENTENCE_END = /[.!?…。！？][\p{Pe}\p{Pf}"']*\s*$/u
 const CLOSED = /[.…]+$/u

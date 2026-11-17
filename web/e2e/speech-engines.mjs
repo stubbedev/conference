@@ -8,11 +8,11 @@
 //   SPEECH_MODEL_DIR=… [GPU=1] node web/e2e/speech-engines.mjs
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 
 import { evalJs, findChrome, launchChrome, sleep, stopProcess } from './browser.mjs'
 import { builtWorker, serveSpeechPage, workerProbe } from './speech-page.mjs'
-import { buildServer, shutdown, startServer } from './translate-stack.mjs'
+import { serveModels, shutdown } from './translate-stack.mjs'
 
 const models = process.env.SPEECH_MODEL_DIR
 if (!models) {
@@ -25,17 +25,6 @@ const TIMEOUT_MS = 600_000
 const dir = mkdtempSync(join(tmpdir(), 'speech-engines-'))
 const failures = []
 
-async function modelServer() {
-  const base = await startServer(buildServer(dir), dir, {
-    SPEECH_RUNTIME: 'browser',
-    SPEECH_MODEL_DIR: resolve(models),
-    SPEECH_MODELS_FILE: resolve(models, 'models.json'),
-  })
-  const { translation } = await (await fetch(`${base}/api/config`)).json()
-  if (!translation.available) throw new Error(`the meeting server cannot serve the models: ${translation.reason}`)
-  return { base, chosen: translation.models }
-}
-
 async function finish(code) {
   rmSync(dir, { recursive: true, force: true })
   await shutdown(code)
@@ -43,7 +32,7 @@ async function finish(code) {
 
 let served
 try {
-  served = await modelServer()
+  served = await serveModels(dir, models)
 } catch (err) {
   console.error(`\nSPEECH ENGINES E2E FAILED\n  - setup: ${err.message}`)
   await finish(1)

@@ -182,6 +182,14 @@ e2e-speech:
 e2e-speech-engines dir:
     SPEECH_MODEL_DIR={{dir}} node web/e2e/speech-engines.mjs
 
+# The recordings in fixtures/ through the browser engines on the real
+# models in DIR as a meeting runs them (voice detection, transcription,
+# sentences, translation with the sentences before), checked sentence
+# by sentence against the subtitles and translations in
+# fixtures/speech-oracle.json. GPU=1 lets Chrome use the GPU.
+e2e-speech-fidelity dir:
+    SPEECH_MODEL_DIR={{dir}} node web/e2e/speech-fidelity.mjs
+
 # Live-translation demo: you (English, real mic) and a guest; options: hear, sv, male, openai.
 translate-demo *args:
     node web/e2e/translate-demo.mjs {{args}}

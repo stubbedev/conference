@@ -3,7 +3,7 @@
 // runs on the chosen engines, and cleanup of everything started.
 import { spawnSync } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { stopProcess } from './browser.mjs'
 import { buildServer as buildGoServer, repoRoot, serverEnv, startServer as startGoServer } from './server.mjs'
@@ -70,6 +70,23 @@ export async function startServer(bin, dir, engines) {
   }
   track(server.proc)
   return server.base
+}
+
+/**
+ * Starts a freshly built meeting server that serves the browser engines'
+ * models from modelDir, whose models.json fetch-speech-models.mjs wrote;
+ * returns its base URL, the models it tells browsers to load and its
+ * languages.
+ */
+export async function serveModels(dir, modelDir) {
+  const base = await startServer(buildServer(dir), dir, {
+    SPEECH_RUNTIME: 'browser',
+    SPEECH_MODEL_DIR: resolve(modelDir),
+    SPEECH_MODELS_FILE: resolve(modelDir, 'models.json'),
+  })
+  const { translation } = await (await fetch(`${base}/api/config`)).json()
+  if (!translation.available) throw new Error(`the meeting server cannot serve the models: ${translation.reason}`)
+  return { base, chosen: translation.models, languages: translation.languages }
 }
 
 /** Registers something with a close() or a child process for cleanup. */
