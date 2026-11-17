@@ -8,6 +8,11 @@ interface Output {
   nextStart: number
 }
 
+export interface Scheduled {
+  startsIn: number
+  endsIn: number
+}
+
 export class VoicePlayer {
   private readonly context: AudioContext
   private readonly outputs = new Map<string, Output>()
@@ -19,7 +24,7 @@ export class VoicePlayer {
   }
 
   /** Plays pcm under key, after whatever it played before. */
-  play(key: string, pcm: Float32Array, rate: number): void {
+  play(key: string, pcm: Float32Array, rate: number): Scheduled {
     const output = this.output(key)
     const buffer = this.context.createBuffer(1, Math.max(pcm.length, 1), rate)
     buffer.getChannelData(0).set(pcm)
@@ -31,6 +36,8 @@ export class VoicePlayer {
     node.buffer = buffer
     node.connect(output.destination)
     node.start(start)
+    const now = this.context.currentTime
+    return { startsIn: start - now, endsIn: output.nextStart - now }
   }
 
   /** Drops what key played, as a departed speaker's stream should be. */

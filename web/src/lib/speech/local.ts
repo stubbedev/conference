@@ -17,6 +17,7 @@ import { errorMessage } from '@/lib/errors'
 import type { RoomClient } from '@/lib/sfu'
 import { Awaited } from '@/lib/speech/awaited'
 import { clauses } from '@/lib/speech/clauses'
+import { Echoes, type Span } from '@/lib/speech/echo'
 import type { Engines, Segmenter } from '@/lib/speech/engines'
 import { invented } from '@/lib/speech/invented'
 import { nextRunAt, Pace } from '@/lib/speech/pace'
@@ -77,6 +78,7 @@ export class LocalTranslator implements Translator {
   private readonly translations = new Recent<string>(REMEMBERED_TRANSLATIONS)
   private interimTranscriptionAfter = 0
   private readonly spoken = new Recent<true>(REMEMBERED_SPOKEN)
+  private readonly echoes = new Echoes()
   private readonly voices = new Map<string, MediaStreamTrack>()
   private readonly unvoiced = new Set<string>()
   private readonly voiceless = new Set<string>()
@@ -278,22 +280,24 @@ export class LocalTranslator implements Translator {
     if (this.stopped || !this.canTranscribe) return
     this.clearHold()
 
+    const until = performance.now()
+    const heard = { from: until - (segment.audio.length / RATE) * 1000, until }
     if (segment.kind === 'partial') {
-      if (this.queued > 0 || performance.now() < this.interimTranscriptionAfter) return
-      this.queue(segment.audio, (text) => this.sentences.partial(text))
+      if (this.queued > 0 || until < this.interimTranscriptionAfter) return
+      this.queue(segment.audio, heard, (text) => this.sentences.partial(text))
       return
     }
 
     if (segment.audio.length < MIN_UTTERANCE_SAMPLES || this.queued >= QUEUED_UTTERANCES) return
-    this.queue(segment.audio, (text) => this.sentences.utterance(text), true)
+    this.queue(segment.audio, heard, (text) => this.sentences.utterance(text), true)
   }
 
-  private queue(audio: Int16Array, line: (text: string) => Line | null, utterance = false): void {
+  private queue(audio: Int16Array, heard: Span, line: (text: string) => Line | null, utterance = false): void {
     this.queued += 1
     this.transcribing = this.transcribing
       .then(async () => {
         const started = performance.now()
-        const text = await this.transcribe(audio, utterance)
+        const text = await this.transcribe(audio, heard, utterance)
         this.setCaptioning(true)
         if (!utterance) {
           const finished = performance.now()
@@ -310,7 +314,7 @@ export class LocalTranslator implements Translator {
       })
   }
 
-  private async transcribe(audio: Int16Array, utterance: boolean): Promise<string | null> {
+  private async transcribe(audio: Int16Array, heard: Span, utterance: boolean): Promise<string | null> {
     const lang = this.selfPrefs.lang
     const seconds = audio.length / RATE
     const started = performance.now()
@@ -323,7 +327,7 @@ export class LocalTranslator implements Translator {
       void this.keepUp()
     }
 
-    if (!text || (await invented(text))) return null
+    if (!text || (await invented(text)) || this.echoes.echoes(text, heard)) return null
     return text
   }
 
@@ -523,7 +527,9 @@ export class LocalTranslator implements Translator {
       for (const voiced of pending) {
         const { pcm, rate } = await voiced
         if (this.stopped || !this.player) return
-        this.player.play(speaker, pcm, rate)
+        const { startsIn, endsIn } = this.player.play(speaker, pcm, rate)
+        const now = performance.now()
+        this.echoes.play(segId, text, { from: now + startsIn * 1000, until: now + endsIn * 1000 })
         this.setVoiced(speaker, true)
       }
     } catch (error) {

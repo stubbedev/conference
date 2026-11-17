@@ -393,7 +393,13 @@ machine.
   sentences ("Thank you for watching", subtitle credits, a line repeated
   over and over) are dropped before anyone sees them.
 - **The voice** speaks a long translation a clause at a time, starting
-  on the first while the rest is still being made.
+  on the first while the rest is still being made. A browser's echo
+  cancellation does not count a voice the page makes itself as its own
+  output, so the microphone picks it up: a sentence a member's browser
+  transcribes while it plays a voice, or within 1.5 s after, is dropped
+  when most of its words are the voice's words in the same order. So a
+  translated voice is never taken for its listener's speech and
+  translated back to the member who said it.
 
 The web UI carries the pieces every install needs rather than asking for
 them: ONNX Runtime's WebAssembly builds, the Silero voice detection
