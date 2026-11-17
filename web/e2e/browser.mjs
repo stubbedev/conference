@@ -107,7 +107,10 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
       ...(headless ? ['--headless=new', '--mute-audio'] : []),
       '--no-sandbox',
       '--no-first-run',
-      ...(gpu ? ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan'] : ['--disable-gpu']),
+      // Without a GPU, Chrome only falls back to its software WebGL
+      // (SwiftShader) on some platforms; on macOS a test Chrome would have
+      // no WebGL2 at all, and background blur would be turned down.
+      ...(gpu ? ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan'] : ['--disable-gpu', '--enable-unsafe-swiftshader']),
       ...(fakeDevices ? ['--use-fake-device-for-media-stream'] : []),
       ...(fakeUi ? ['--use-fake-ui-for-media-stream'] : []),
       '--autoplay-policy=no-user-gesture-required',
