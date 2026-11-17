@@ -7,6 +7,7 @@ import { budgetFor, fingerprint, parseHistory, withUnusable, withQuiet, type Gpu
 import { GpuWatch } from '@/lib/speech/gpu-watch'
 import { Progress } from '@/lib/speech/progress'
 import { Serial } from '@/lib/speech/serial'
+import { parseSegment } from '@/lib/speech/vad'
 import { fetchRuntime, type Runtime } from '@/lib/speech/wasm'
 import { WorkerRpc, type WorkerEvent, type WorkerReply } from '@/lib/speech/worker'
 import { Workers } from '@/lib/speech/workers'
@@ -357,9 +358,12 @@ class BrowserEngines implements Engines {
       case 'warning':
         this.warn(String(event.message))
         return
-      case 'segment':
-        this.segments?.onSegment({ kind: event.kind === 'partial' ? 'partial' : 'utterance', audio: event.audio as Int16Array })
+      case 'segment': {
+        const segment = parseSegment(event)
+        if (segment) this.segments?.onSegment(segment)
+        else this.segments?.onError(new Error(`voice detection sent a segment this page cannot read, of kind ${String(event.kind)}`))
         return
+      }
       case 'error':
         this.segments?.onError(new Error(String(event.message)))
         return

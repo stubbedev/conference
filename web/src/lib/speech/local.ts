@@ -280,6 +280,13 @@ export class LocalTranslator implements Translator {
     if (this.stopped || !this.canTranscribe) return
     this.clearHold()
 
+    if (segment.kind === 'stopped') {
+      this.transcribing = this.transcribing.then(() => {
+        if (!this.stopped) this.expire()
+      })
+      return
+    }
+
     const until = performance.now()
     const heard = { from: until - (segment.audio.length / RATE) * 1000, until }
     if (segment.kind === 'partial') {
@@ -289,7 +296,8 @@ export class LocalTranslator implements Translator {
     }
 
     if (segment.audio.length < MIN_UTTERANCE_SAMPLES || this.queued >= QUEUED_UTTERANCES) return
-    this.queue(segment.audio, heard, (text) => this.sentences.utterance(text), true)
+    const { cut } = segment
+    this.queue(segment.audio, heard, (text) => this.sentences.utterance(text, cut), true)
   }
 
   private queue(audio: Int16Array, heard: Span, line: (text: string) => Line | null, utterance = false): void {

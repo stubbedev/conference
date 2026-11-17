@@ -1,6 +1,10 @@
+import type { Cut } from './vad.ts'
+
 export const MAX_HELD_CHARS = 160
 
 const SENTENCE_END = /[.!?…。！？][\p{Pe}\p{Pf}"']*\s*$/u
+const CLOSED = /[.…]+$/u
+const CARRIES_ON = /^\p{Ll}/u
 
 export function endsSentence(text: string): boolean {
   return SENTENCE_END.test(text)
@@ -13,7 +17,8 @@ export interface Line {
 }
 
 function joined(held: string, text: string): string {
-  return held && text ? `${held} ${text}` : held || text
+  if (!held || !text) return held || text
+  return `${CARRIES_ON.test(text) ? held.replace(CLOSED, '') : held} ${text}`
 }
 
 export class Sentences {
@@ -29,11 +34,11 @@ export class Sentences {
     return line ? { seq: this.seq, text: line, final: false } : null
   }
 
-  utterance(text: string): Line | null {
+  utterance(text: string, cut: Cut): Line | null {
     const line = joined(this.held, text.trim())
     if (!line) return null
 
-    if (!endsSentence(line) && line.length < MAX_HELD_CHARS) {
+    if ((cut === 'pause' || !endsSentence(line)) && line.length < MAX_HELD_CHARS) {
       this.held = line
       return { seq: this.seq, text: line, final: false }
     }

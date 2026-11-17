@@ -72,12 +72,17 @@ export class Frames {
   }
 }
 
+export type Cut = 'silence' | 'pause'
+
+export type Ended = { kind: 'utterance'; audio: Int16Array; cut: Cut } | { kind: 'stopped' }
+
 /** One speaker's utterances, from frame probabilities. */
 export class Utterances {
   private preroll: Int16Array[] = []
   private speech: Int16Array[] = []
   private length = 0
   private silent = 0
+  private sincePause: number | null = null
 
   /** Whether an utterance has started and not yet ended. */
   get active(): boolean {
@@ -89,12 +94,9 @@ export class Utterances {
     return this.length
   }
 
-  /**
-   * Adds one frame and the probability that it is speech, and returns the
-   * utterance it ends, or null.
-   */
-  detect(probability: number, frame: Int16Array): Int16Array | null {
+  detect(probability: number, frame: Int16Array): Ended | null {
     if (!this.active) {
+      const stopped = this.quiet(probability)
       this.preroll.push(frame)
       if (this.preroll.length > PREROLL_FRAMES) this.preroll.shift()
 
@@ -102,8 +104,9 @@ export class Utterances {
         this.speech = [...this.preroll]
         this.length = this.samplesOf(this.speech)
         this.silent = 0
+        this.sincePause = null
       }
-      return null
+      return stopped ? { kind: 'stopped' } : null
     }
 
     this.speech.push(frame)
@@ -115,8 +118,26 @@ export class Utterances {
     const frames = Math.floor(this.length / FRAME)
     const end = frames >= LONG_FRAMES ? SHORT_END_FRAMES : END_FRAMES
 
-    if (this.silent >= end || frames >= MAX_FRAMES) return this.flush()
-    return null
+    if (this.silent < end && frames < MAX_FRAMES) return null
+
+    const cut: Cut = this.silent >= END_FRAMES ? 'silence' : 'pause'
+    const silent = this.silent
+    const audio = this.flush()
+    if (!audio) return null
+    if (cut === 'pause') this.sincePause = silent
+    return { kind: 'utterance', audio, cut }
+  }
+
+  private quiet(probability: number): boolean {
+    if (this.sincePause === null) return false
+    if (probability >= END_PROBABILITY) {
+      this.sincePause = null
+      return false
+    }
+    this.sincePause += 1
+    if (this.sincePause < END_FRAMES) return false
+    this.sincePause = null
+    return true
   }
 
   snapshot(): Int16Array {
@@ -132,6 +153,7 @@ export class Utterances {
     this.preroll = []
     this.length = 0
     this.silent = 0
+    this.sincePause = null
     return done
   }
 
@@ -142,9 +164,15 @@ export class Utterances {
 
 export const INTERIM_SAMPLES = Math.round(RATE * 0.6)
 
-export interface Segment {
-  kind: 'partial' | 'utterance'
-  audio: Int16Array
+export type Segment = Ended | { kind: 'partial'; audio: Int16Array }
+
+export function parseSegment(message: Readonly<Record<string, unknown>>): Segment | null {
+  const { kind, audio, cut } = message
+  if (kind === 'stopped') return { kind }
+  if (!(audio instanceof Int16Array)) return null
+  if (kind === 'partial') return { kind, audio }
+  if (kind === 'utterance' && (cut === 'silence' || cut === 'pause')) return { kind, audio, cut }
+  return null
 }
 
 export type Probability = (frame: Int16Array) => Promise<number> | number
@@ -157,10 +185,10 @@ export class Segmentation {
   async push(pcm: Int16Array, probability: Probability): Promise<Segment[]> {
     const segments: Segment[] = []
     for (const frame of this.frames.push(pcm)) {
-      const utterance = this.utterances.detect(await probability(frame), frame)
-      if (utterance) {
+      const ended = this.utterances.detect(await probability(frame), frame)
+      if (ended) {
         this.reported = 0
-        segments.push({ kind: 'utterance', audio: utterance })
+        segments.push(ended)
         continue
       }
 
@@ -176,7 +204,7 @@ export class Segmentation {
   flush(): Segment | null {
     this.reported = 0
     const utterance = this.utterances.flush()
-    return utterance ? { kind: 'utterance', audio: utterance } : null
+    return utterance ? { kind: 'utterance', audio: utterance, cut: 'silence' } : null
   }
 
   reset(): void {

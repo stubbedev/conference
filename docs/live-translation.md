@@ -344,7 +344,12 @@ machine.
   version; the final one replaces it. A pause that cuts a sentence short
   does not end it: the fragment is shown and held until the sentence
   ends with its full stop, question or exclamation mark, or until 1.5 s
-  pass with nothing more said, so it is translated whole.
+  pass with nothing more said, so it is translated whole. Whisper closes
+  every fragment it hears with a full stop, so a sentence cut at a short
+  pause (160 ms, once it has run 3 s) is held whatever its punctuation,
+  until its speaker has been silent for 400 ms; the next fragment joins
+  it, and when that one carries on in lower case the full stop Whisper
+  put before it is dropped.
 - **The languages are shared out.** Each browser says how well it can
   translate: with the language model, with an encoder-decoder model, or
   not at all. The room's languages are handed out one at a time, in the

@@ -24,7 +24,9 @@ async function loadSilero(url: string): Promise<Silero> {
 
 function report(segments: readonly (Segment | null)[]): void {
   for (const segment of segments) {
-    if (segment) notify('segment', { kind: segment.kind, audio: segment.audio }, [segment.audio.buffer])
+    if (!segment) continue
+    if (segment.kind === 'stopped') notify('segment', { kind: segment.kind })
+    else notify('segment', { ...segment }, [segment.audio.buffer])
   }
 }
 
