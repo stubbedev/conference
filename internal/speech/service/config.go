@@ -22,6 +22,7 @@ const (
 	openAICompatible provider = "openai-compatible"
 	ollama           provider = "ollama"
 	fake             provider = "fake"
+	audioCPP         provider = "audio.cpp"
 )
 
 type purpose string
@@ -30,6 +31,7 @@ const (
 	transcription purpose = "transcription"
 	translation   purpose = "translation"
 	voice         purpose = "voice"
+	conversion    purpose = "voice conversion"
 )
 
 type responseFormat string
@@ -68,10 +70,15 @@ const (
 	envTranslateProvider = "TRANSLATE_PROVIDER"
 	envTranscribeFormat  = "TRANSCRIBE_RESPONSE_FORMAT"
 	envVoiceName         = "VOICE_NAME"
+	envVoiceCloning      = "VOICE_CLONING"
+	envConvertURL        = "VOICE_CONVERT_URL"
+	envConvertModel      = "VOICE_CONVERT_MODEL"
+	envConvertKey        = "VOICE_CONVERT_API_KEY"
 	envInterim           = "INTERIM_MS"
 	prefixTranscribe     = "TRANSCRIBE"
 	prefixTranslate      = "TRANSLATE"
 	prefixVoice          = "VOICE"
+	prefixConvert        = "VOICE_CONVERT"
 )
 
 type engine struct {
@@ -100,13 +107,19 @@ type Settings struct {
 	translation      engine
 	voice            engine
 	voiceName        string
-	interim          time.Duration
-	prompt           Prompt
-	languages        languages
-	models           Models
-	modelDir         string
-	cacheLimit       int64
-	hub              *url.URL
+	// voiceCloning: the voice engine takes a reference recording
+	// (voice_ref, reference_text), so a speaker can be heard in their own voice.
+	voiceCloning bool
+	// conversion, when set, turns the stock voice into the speaker's own
+	// voice from their recording (audio.cpp's /tasks/run).
+	conversion *engine
+	interim    time.Duration
+	prompt     Prompt
+	languages  languages
+	models     Models
+	modelDir   string
+	cacheLimit int64
+	hub        *url.URL
 }
 
 // LogEngines says which runtime runs the engines, which engines are not
@@ -137,11 +150,24 @@ func (s Settings) LogEngines() {
 }
 
 func (s Settings) engines() []namedEngine {
-	return []namedEngine{
+	engines := []namedEngine{
 		{purpose: transcription, engine: s.transcription},
 		{purpose: translation, engine: s.translation},
 		{purpose: voice, engine: s.voice},
 	}
+
+	if s.conversion != nil {
+		engines = append(engines, namedEngine{purpose: conversion, engine: *s.conversion})
+	}
+
+	return engines
+}
+
+// ownVoice says whether a speaker can be heard in their own voice: the
+// voice engine clones it, or a conversion engine makes it. The browser
+// runtime makes no voices on the server, so never there.
+func (s Settings) ownVoice() bool {
+	return s.runtime != runInBrowser && (s.voiceCloning || s.conversion != nil)
 }
 
 // logBrowserRuntime says what the browsers load, since no engine on this
@@ -183,7 +209,8 @@ func (s Settings) external() bool {
 		return false
 	}
 
-	return s.transcription.external || s.translation.external || s.voice.external
+	return s.transcription.external || s.translation.external || s.voice.external ||
+		(s.conversion != nil && s.conversion.external)
 }
 
 var (
@@ -194,6 +221,9 @@ var (
 	errNegative       = errors.New("must not be negative")
 	errEngineURL      = errors.New("must be an http:// or https:// URL with a host")
 	errDomain         = errors.New("must be domain names separated by commas")
+	errCloningValue   = errors.New(envVoiceCloning + " must be true or false")
+	errConvertHalf    = errors.New(envConvertURL + " and " + envConvertModel + " must be set together")
+	errOwnVoiceTwice  = errors.New("set " + envVoiceCloning + " or " + envConvertURL + ", not both")
 	errByteSize       = errors.New("must be a whole number of bytes with a unit, e.g. 15GB or 512MiB")
 )
 
@@ -228,6 +258,8 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		translation:      standIn(),
 		voice:            standIn(),
 		voiceName:        env(envVoiceName),
+		voiceCloning:     false,
+		conversion:       nil,
 		interim:          0,
 		prompt:           newPrompt(env(envGlossary), langs),
 		languages:        langs,
@@ -268,12 +300,34 @@ func (env environment) runtime() (runtime, error) {
 	}
 }
 
+// ownVoice reads whether the voice engine clones voices; a conversion
+// engine, read with the others, is the other way, and only one may be set.
+func (env environment) ownVoice(settings Settings) (Settings, error) {
+	cloning, err := env.flag(envVoiceCloning, errCloningValue)
+	if err != nil {
+		return Settings{}, err
+	}
+
+	if cloning && settings.conversion != nil {
+		return Settings{}, errOwnVoiceTwice
+	}
+
+	settings.voiceCloning = cloning
+
+	return settings, nil
+}
+
 func (env environment) chosenEngines(settings Settings) (Settings, error) {
 	switch env.or(envEngines, "real") {
 	case "fake":
-		return settings, nil
+		return env.ownVoice(settings)
 	case "real":
-		return env.realEngines(settings)
+		withEngines, err := env.realEngines(settings)
+		if err != nil {
+			return Settings{}, err
+		}
+
+		return env.ownVoice(withEngines)
 	default:
 		return Settings{}, errEnginesMode
 	}
@@ -302,6 +356,11 @@ func (env environment) realEngines(settings Settings) (Settings, error) {
 	}
 
 	settings.voice, err = engines.openAICompatible(prefixVoice)
+	if err != nil {
+		return Settings{}, err
+	}
+
+	settings.conversion, err = engines.conversion()
 	if err != nil {
 		return Settings{}, err
 	}
@@ -337,6 +396,17 @@ func (env environment) or(name, fallback string) string {
 	}
 
 	return fallback
+}
+
+func (env environment) flag(name string, invalid error) (bool, error) {
+	switch value := env(name); value {
+	case "", "false", "0":
+		return false, nil
+	case "true", "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%w, not %q", invalid, value)
+	}
 }
 
 func (env environment) duration(name string, unit, fallback time.Duration) (time.Duration, error) {
@@ -527,6 +597,32 @@ func (r engineReader) translation() (engine, error) {
 		apiKey:   "",
 		model:    model,
 		problem:  problem,
+		external: isExternal(endpoint, r.internal),
+	}, nil
+}
+
+// conversion is the optional voice conversion engine: none unless both
+// its address and model are set, with no default address to send voices to.
+func (r engineReader) conversion() (*engine, error) {
+	if r.env(envConvertURL) == "" && r.env(envConvertModel) == "" {
+		return nil, nil //nolint:nilnil // No conversion engine is a valid setting.
+	}
+
+	if r.env(envConvertURL) == "" || r.env(envConvertModel) == "" {
+		return nil, errConvertHalf
+	}
+
+	endpoint, err := r.endpoint(prefixConvert, "")
+	if err != nil {
+		return nil, err
+	}
+
+	return &engine{
+		provider: audioCPP,
+		endpoint: endpoint,
+		apiKey:   r.env(envConvertKey),
+		model:    r.env(envConvertModel),
+		problem:  "",
 		external: isExternal(endpoint, r.internal),
 	}, nil
 }

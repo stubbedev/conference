@@ -51,7 +51,14 @@ function check(label, condition, detail) {
 }
 
 async function startMeetingServer() {
-  const server = await startServer(buildServer(dir, { race: true }), serverEnv(dir, { BIND: '127.0.0.1', SPEECH_ENGINES: 'fake', SPEECH_RUNTIME: runtime }))
+  const env = serverEnv(dir, {
+    BIND: '127.0.0.1',
+    SPEECH_ENGINES: 'fake',
+    SPEECH_RUNTIME: runtime,
+    // On the server the stand-in voice engine clones too: a higher tone in the speaker's own voice.
+    ...(runtime === 'server' ? { VOICE_CLONING: 'true' } : {}),
+  })
+  const server = await startServer(buildServer(dir, { race: true }), env)
   procs.push(server.proc)
   server.proc.stdout.pipe(process.stdout)
   server.proc.stderr.pipe(process.stderr)
@@ -59,8 +66,8 @@ async function startMeetingServer() {
 }
 
 // Language settings the app reads from localStorage on its first load.
-function preset(browser, lang, name) {
-  const prefs = JSON.stringify({ lang, voice: true, subtitles: true, voiceChoice: 'female' })
+function preset(browser, lang, name, voiceChoice = 'female') {
+  const prefs = JSON.stringify({ lang, voice: true, subtitles: true, voiceChoice })
   return browser.cdp.send(
     'Page.addScriptToEvaluateOnNewDocument',
     {
@@ -81,6 +88,7 @@ const tileState = (name) => `(() => {
     caption: tile.querySelector('p.line-clamp-3')?.textContent ?? '',
     by: tile.querySelector('.hud-caption p + p')?.textContent ?? '',
     volume: tile.querySelector('audio')?.volume ?? null,
+    label: tile.querySelector('.hud-label')?.textContent ?? '',
   }
 })()`
 
@@ -163,6 +171,24 @@ const mendTranscription = `(() => { window.CompressionStream = window.__Compress
 
 const consoles = {}
 
+// The guest records its voice on the join screen, so it is in use from its first sentence.
+async function recordOwnVoice(browser) {
+  // Language and subtitles are folded on the join screen; open them like a person would.
+  const section = `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Language and subtitles')`
+  await waitFor(browser, `Boolean(${section})`, Boolean, 15_000)
+  await evalJs(browser, `${section}?.click()`)
+  // Without the speaker's consent to the server making their voice, recording stays off.
+  const recordState = `[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Record my voice'))?.disabled`
+  const blocked = await waitFor(browser, recordState, (disabled) => disabled === true, 15_000)
+  check('server consent', blocked.ok, `recording was possible without consenting to the server: ${JSON.stringify(blocked.value)}`)
+  await evalJs(browser, `document.getElementById('server-voice')?.click()`)
+  const recordButton = `[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Record my voice') && !b.disabled)`
+  await waitFor(browser, `Boolean(${recordButton})`, Boolean, 15_000)
+  await evalJs(browser, `${recordButton}?.click()`)
+  const recorded = await waitFor(browser, `document.body.innerText`, (text) => text.includes('Your voice is recorded'), 30_000)
+  check('recorded voice', recorded.ok, 'the guest could not record its voice on the join screen')
+}
+
 async function main() {
   const base = await startMeetingServer()
   const room = await createRoom(base, 'translate-e2e')
@@ -172,12 +198,14 @@ async function main() {
   const guest = await launchChrome(chrome, 1, dir, [`--use-file-for-fake-audio-capture=${join(fixtures, 'german.wav')}`, '--mute-audio'])
   procs.push(host.proc, guest.proc)
   await preset(host, 'en', 'Hana')
-  await preset(guest, 'de', 'Gerd')
+  // On the server, the guest speaks in its own voice, recorded before joining.
+  const ownVoice = runtime === 'server'
+  await preset(guest, 'de', 'Gerd', ownVoice ? 'own' : 'female')
   consoles.host = await consoleOf(host)
   consoles.guest = await consoleOf(guest)
 
   await joinRoom(host, room.privUrl)
-  await joinRoom(guest, room.url)
+  await joinRoom(guest, room.url, null, ownVoice ? recordOwnVoice : null)
   // Enabled once /api/config reports live translation can run.
   const button = await waitFor(
     host,
@@ -207,6 +235,13 @@ async function main() {
   const voice = await waitFor(guest, translationAudio, (list) => list?.some((a) => a.tracks > 0 && !a.paused), TIMEOUT_MS)
   const guestHeader = voice.ok ? '' : await evalJs(guest, header)
   check('guest voice', voice.ok, `no playing translated-voice track: ${JSON.stringify(voice.value)}; the guest's header reads ${JSON.stringify(guestHeader)}`)
+
+  if (ownVoice) {
+    const inUse = await waitFor(guest, `document.querySelector('header')?.innerText ?? ''`, (text) => text.includes('Your own voice is in use'), TIMEOUT_MS)
+    check('own voice', inUse.ok, `the guest's recorded voice was never in use: ${JSON.stringify(inUse.value)}`)
+    const labelled = await waitFor(host, tileState('Gerd'), (tile) => tile?.label.includes('AI voice (cloned)'), TIMEOUT_MS)
+    check('cloned voice', labelled.ok, `the host's tile for the guest never said "AI voice (cloned)": ${JSON.stringify(labelled.value)}`)
+  }
 
   const muted = await waitFor(guest, tileState('Hana'), (tile) => tile?.volume === 0, 5_000)
   check('guest muting', muted.ok, `the host's own voice is not muted for the guest: ${JSON.stringify(muted.value)}`)

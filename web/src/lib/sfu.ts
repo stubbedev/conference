@@ -357,6 +357,8 @@ export class RoomClient {
   private sealing = new Serial()
   private opening = new Serial()
   private provides: Provides = PROVIDES_NOTHING
+  /** The member recording the room, or '' when nobody is. */
+  recorder = ''
   private election = new Election()
   private room: Room = {
     inCall: (member) => member === this.selfId || this.members.has(member),
@@ -450,6 +452,7 @@ export class RoomClient {
           this.iceServers = msg.iceServers
           this.resumeToken = msg.resume
           this.selfId = msg.self.id
+          this.recorder = msg.recorder
           this.elect()
           for (const member of msg.members) this.members.set(member.id, member)
           this.emit('welcome', { self: msg.self, members: msg.members, recorder: msg.recorder, translatingBy: msg.translatingBy })
@@ -1014,6 +1017,8 @@ export class RoomClient {
         return
       }
       case 'recording':
+        if (msg.on) this.recorder = msg.from
+        else if (this.recorder === msg.from) this.recorder = ''
         this.emit('recording', { from: msg.from, on: msg.on })
         return
       case 'lang': {

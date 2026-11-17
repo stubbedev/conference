@@ -10,7 +10,7 @@ import (
 func TestPackUnpack(t *testing.T) {
 	t.Parallel()
 
-	sent := wire.VoiceHeader{Speaker: "anna", SegID: "anna-3", Lang: "fr", Rate: 24000}
+	sent := wire.VoiceHeader{Speaker: "anna", SegID: "anna-3", Lang: "fr", Rate: 24000, Cloned: false}
 	pcm := []byte{1, 0, 2, 0}
 
 	frame, err := wire.Pack(sent, pcm)

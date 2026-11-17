@@ -1,5 +1,6 @@
 import { Globe, Laptop } from 'lucide-react'
 
+import { OwnVoiceRecorder, type OwnVoiceControls } from '@/components/OwnVoiceRecorder'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
@@ -12,13 +13,15 @@ interface TranslationSettingsProps {
   onChange: (prefs: LangPrefs) => void
   /** On the join screen: ask for the language plainly, since guests see it first there. */
   prominent?: boolean
+  /** Recording the speaker's own voice, where the server can make it. */
+  ownVoice?: OwnVoiceControls
 }
 
 // The language this member speaks, and how translations of everyone else
 // reach them. Only rendered once live translation can run: what has to be
 // configured is a job for whoever runs the server, not something to hand
 // to the people in a call.
-export function TranslationSettings({ config, prefs, onChange, prominent }: TranslationSettingsProps) {
+export function TranslationSettings({ config, prefs, onChange, prominent, ownVoice }: TranslationSettingsProps) {
   // Until the server configuration is read there is no list, but the setting still shows.
   const languages = config.languages.length > 0 ? config.languages : [{ code: prefs.lang, name: 'Not available' }]
   // A browser speaks each language in the one voice the server chose for it.
@@ -84,6 +87,7 @@ export function TranslationSettings({ config, prefs, onChange, prominent }: Tran
               <SelectContent>
                 <SelectItem value="female">Female voice</SelectItem>
                 <SelectItem value="male">Male voice</SelectItem>
+                {config.ownVoice && <SelectItem value="own">My own voice</SelectItem>}
               </SelectContent>
             </Select>
           </div>
@@ -91,6 +95,9 @@ export function TranslationSettings({ config, prefs, onChange, prominent }: Tran
           <p className="text-xs text-muted-foreground">
             Others hear you in the voice your server picked for their language.
           </p>
+        )}
+        {chooseVoice && prefs.voiceChoice === 'own' && config.ownVoice && ownVoice && (
+          <OwnVoiceRecorder lang={prefs.lang} {...ownVoice} />
         )}
         <div className="flex items-center justify-between gap-3">
           <Label htmlFor="translated-voice" className="text-xs text-muted-foreground">

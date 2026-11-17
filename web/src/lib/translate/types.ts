@@ -3,9 +3,10 @@
 
 import type { Refused } from '../sealed.ts'
 
-export type VoiceChoice = 'female' | 'male'
+/** 'own' is the speaker's own voice, made from a recording they make. */
+export type VoiceChoice = 'female' | 'male' | 'own'
 
-export const VOICE_CHOICES: readonly VoiceChoice[] = ['female', 'male']
+export const VOICE_CHOICES: readonly VoiceChoice[] = ['female', 'male', 'own']
 
 /** A member's language settings, announced to the room. */
 export interface LangPrefs {
@@ -69,14 +70,17 @@ export interface Provides {
   translates: TranslationLevel
   /** The languages this member's last sentence went out in as a voice published to the room. */
   voices: readonly string[]
+  /** Those voices are made from this member's own recording, so listeners can say so. */
+  ownVoice: boolean
 }
 
-export const PROVIDES_NOTHING: Provides = { captions: false, translates: 'none', voices: [] }
+export const PROVIDES_NOTHING: Provides = { captions: false, translates: 'none', voices: [], ownVoice: false }
 
 export function sameProvides(a: Provides, b: Provides): boolean {
   return (
     a.captions === b.captions &&
     a.translates === b.translates &&
+    a.ownVoice === b.ownVoice &&
     a.voices.length === b.voices.length &&
     a.voices.every((lang, i) => lang === b.voices[i])
   )
@@ -115,6 +119,10 @@ export interface TranslatorStatus {
   /** Sentences the speech service could not translate and sent as said. */
   failedTranslations: number
   loading: Loading | null
+  /** This member's recorded own voice: in use, or turned down as too short or silent. */
+  ownVoice: 'off' | 'ready' | 'rejected'
+  /** Translated voices skipped because they would have played too late. */
+  droppedVoices: number
 }
 
 /** A member id, a segment id or a language code: a name, never prose. */
@@ -203,7 +211,7 @@ export function parseRoomMessage(value: unknown, sender: string, room: Room): Ro
 export function parseAnnouncement(value: unknown): LangAnnouncement | Refused {
   if (typeof value !== 'object' || value === null) return { refused: 'it is not an object' }
 
-  const { lang, voice, subtitles, voiceChoice, captions, translates, voices } = value as Record<string, unknown>
+  const { lang, voice, subtitles, voiceChoice, captions, translates, voices, ownVoice } = value as Record<string, unknown>
   if (!isLabel(lang)) return noLabel('lang')
   if (typeof voice !== 'boolean') return { refused: 'its voice is not a boolean' }
   if (typeof subtitles !== 'boolean') return { refused: 'its subtitles is not a boolean' }
@@ -214,7 +222,10 @@ export function parseAnnouncement(value: unknown): LangAnnouncement | Refused {
     return { refused: `its voices is not a list of at most ${VOICES_MAX} names` }
   }
 
-  return { lang, voice, subtitles, voiceChoice, captions, translates, voices }
+  // Members on a build without own voice send none: theirs is never their own.
+  if (ownVoice !== undefined && typeof ownVoice !== 'boolean') return { refused: 'its ownVoice is not a boolean' }
+
+  return { lang, voice, subtitles, voiceChoice, captions, translates, voices, ownVoice: ownVoice === true }
 }
 
 /** The language a host sets for another member. */

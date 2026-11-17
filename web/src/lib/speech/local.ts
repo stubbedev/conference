@@ -82,7 +82,16 @@ export class LocalTranslator implements Translator {
   private readonly voiceless = new Set<string>()
   private readonly notes = new Set<string>()
   private warmUps: WarmUps | null = null
-  private status: TranslatorStatus = { state: 'claiming', detail: '', sameLanguage: false, failedTranslations: 0, loading: null }
+  private status: TranslatorStatus = {
+    state: 'claiming',
+    detail: '',
+    sameLanguage: false,
+    failedTranslations: 0,
+    loading: null,
+    // This runtime makes no voice from a recording and plays every voice.
+    ownVoice: 'off',
+    droppedVoices: 0,
+  }
   private selfPrefs: LangPrefs
   private stopped = false
   private readonly events: TranslatorEvents
@@ -248,7 +257,7 @@ export class LocalTranslator implements Translator {
   }
 
   private announce(): void {
-    this.client?.setProvides({ captions: this.captioning, translates: this.translates, voices: [] })
+    this.client?.setProvides({ captions: this.captioning, translates: this.translates, voices: [], ownVoice: false })
     this.reassign()
   }
 

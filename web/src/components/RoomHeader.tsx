@@ -1,4 +1,4 @@
-import { Circle, Languages, Link2, TriangleAlert } from 'lucide-react'
+import { AudioLines, Circle, Languages, Link2, TriangleAlert } from 'lucide-react'
 
 import { Hint, TextHint } from '@/components/Hint'
 import { SpeechLoading } from '@/components/SpeechLoading'
@@ -31,7 +31,21 @@ function translationWarnings(status: TranslatorStatus, selfLang: string, languag
   if (status.failedTranslations > 0) {
     warnings.push(`${status.failedTranslations} sentence${status.failedTranslations === 1 ? '' : 's'} sent untranslated`)
   }
+  if (status.droppedVoices > 0) {
+    warnings.push(
+      `${status.droppedVoices} translated voice${status.droppedVoices === 1 ? '' : 's'} skipped: the voice engine fell behind`,
+    )
+  }
   return warnings
+}
+
+// Where this member's own voice stands, while they have chosen it.
+function ownVoiceLabel(status: TranslatorStatus, recorded: boolean, serverConsent: boolean): string {
+  if (!serverConsent) return 'Allow your voice on the server in the settings (female voice for now)'
+  if (status.ownVoice === 'ready') return 'Your own voice is in use'
+  if (status.ownVoice === 'rejected') return 'Your recording was too short: record again (female voice for now)'
+  if (!recorded) return 'Record your voice in the settings (female voice for now)'
+  return 'Preparing your voice…'
 }
 
 interface RoomHeaderProps {
@@ -46,6 +60,8 @@ interface RoomHeaderProps {
   translationFailure: string
   onDismissFailure: () => void
   lang: string
+  /** Set while this member has chosen their own voice and the server offers it. */
+  ownVoice?: { recorded: boolean; serverConsent: boolean }
 }
 
 export function RoomHeader({
@@ -60,6 +76,7 @@ export function RoomHeader({
   translationFailure,
   onDismissFailure,
   lang,
+  ownVoice,
 }: RoomHeaderProps) {
   return (
     <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex p-4">
@@ -107,6 +124,14 @@ export function RoomHeader({
               <TriangleAlert className="size-3 shrink-0" />
               <span className="truncate">Live translation failed: {translationFailure}</span>
             </button>
+          </TextHint>
+        )}
+        {translatorStatus && translationBy && ownVoice && (
+          <TextHint label="Others hear your translations in a voice made from your recording." side="bottom">
+            <span className="flex min-w-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+              <AudioLines className="size-3 shrink-0" />
+              <span className="truncate">{ownVoiceLabel(translatorStatus, ownVoice.recorded, ownVoice.serverConsent)}</span>
+            </span>
           </TextHint>
         )}
         {translatorStatus?.loading && <SpeechLoading loading={translatorStatus.loading} />}

@@ -16,6 +16,7 @@ func nothing() service.Status {
 		Models:    nil,
 		Languages: nil,
 		External:  false,
+		OwnVoice:  false,
 	}
 }
 
