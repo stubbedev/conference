@@ -30,33 +30,75 @@ const (
 	maxFrames      = int(MaxUtterance*Rate/time.Second) / frame
 )
 
+// Cut is how an utterance ended.
+type Cut int
+
+const (
+	// Silence ended it after 400 ms without speech: the speaker stopped.
+	Silence Cut = iota + 1
+	// Pause cut it short, at a shorter pause or at MaxUtterance, while
+	// the speaker may still be in the middle of a sentence.
+	Pause
+)
+
+// Event is what Push reports: an Utterance that ended, or Stopped.
+type Event interface {
+	event()
+}
+
+// Utterance is the audio of an utterance that ended, and how it ended.
+type Utterance struct {
+	Audio []int16
+	Cut   Cut
+}
+
+// Stopped says that the silence after an utterance cut at a Pause has
+// reached 400 ms without a new one starting.
+type Stopped struct{}
+
+func (Utterance) event() {}
+
+func (Stopped) event() {}
+
+type detector interface {
+	Process(samples []float32) (float32, error)
+}
+
 // Utterances collects one speaker's audio into utterances. It is not safe
 // for concurrent use.
 type Utterances struct {
-	detector     *silerovad.Detector
+	detector     detector
 	samples      [frame]float32
 	pending      []int16
 	preroll      []int16
 	speech       []int16
 	silentFrames int
+	afterPause   bool
+	sincePause   int
 }
 
 // New ends an utterance after 400 ms of silence (160 ms once it has run
 // for 3 s), or after MaxUtterance of speech.
 func New() (*Utterances, error) {
-	detector, err := silerovad.NewDetector()
+	silero, err := silerovad.NewDetector()
 	if err != nil {
 		return nil, fmt.Errorf("vad: load the Silero model: %w", err)
 	}
 
+	return detecting(silero), nil
+}
+
+func detecting(speech detector) *Utterances {
 	return &Utterances{
-		detector:     detector,
+		detector:     speech,
 		samples:      [frame]float32{},
 		pending:      make([]int16, 0, frame),
 		preroll:      make([]int16, 0, prerollFrames*frame),
 		speech:       nil,
 		silentFrames: 0,
-	}, nil
+		afterPause:   false,
+		sincePause:   0,
+	}
 }
 
 // Active reports whether an utterance has started and not yet ended.
@@ -74,27 +116,25 @@ func (u *Utterances) Audio() []int16 {
 	return append([]int16(nil), u.speech...)
 }
 
-// Push adds audio and returns every utterance that ended within it.
-func (u *Utterances) Push(pcm []int16) ([][]int16, error) {
+// Push adds audio and returns every event within it, in order.
+func (u *Utterances) Push(pcm []int16) ([]Event, error) {
 	u.pending = append(u.pending, pcm...)
 
-	var finished [][]int16
+	var events []Event
 
 	consumed := 0
 	for ; len(u.pending)-consumed >= frame; consumed += frame {
-		done, err := u.frame(u.pending[consumed : consumed+frame])
-		if err != nil {
-			return finished, err
-		}
+		var err error
 
-		if done != nil {
-			finished = append(finished, done)
+		events, err = u.frame(events, u.pending[consumed:consumed+frame])
+		if err != nil {
+			return events, err
 		}
 	}
 
 	u.pending = append(u.pending[:0], u.pending[consumed:]...)
 
-	return finished, nil
+	return events, nil
 }
 
 // Flush ends the current utterance and returns it, or nil if there is none.
@@ -111,28 +151,22 @@ func (u *Utterances) Flush() []int16 {
 	return done
 }
 
-func (u *Utterances) frame(pcm []int16) ([]int16, error) {
+func (u *Utterances) frame(events []Event, pcm []int16) ([]Event, error) {
 	for i, sample := range pcm {
 		u.samples[i] = float32(sample) / sampleScale
 	}
 
 	prob, err := u.detector.Process(u.samples[:])
 	if err != nil {
-		return nil, fmt.Errorf("vad: detect speech: %w", err)
+		return events, fmt.Errorf("vad: detect speech: %w", err)
 	}
 
 	if !u.Active() {
-		u.preroll = append(u.preroll, pcm...)
-		if excess := len(u.preroll) - prerollFrames*frame; excess > 0 {
-			u.preroll = append(u.preroll[:0], u.preroll[excess:]...)
+		if u.idle(prob, pcm) {
+			return append(events, Stopped{}), nil
 		}
 
-		if prob >= startProb {
-			u.speech = append(make([]int16, 0, len(u.preroll)+frame), u.preroll...)
-			u.silentFrames = 0
-		}
-
-		return nil, nil
+		return events, nil
 	}
 
 	u.speech = append(u.speech, pcm...)
@@ -150,9 +184,57 @@ func (u *Utterances) frame(pcm []int16) ([]int16, error) {
 		end = shortEndFrames
 	}
 
-	if u.silentFrames >= end || frames >= maxFrames {
-		return u.Flush(), nil
+	if u.silentFrames < end && frames < maxFrames {
+		return events, nil
 	}
 
-	return nil, nil
+	cut := Pause
+	if u.silentFrames >= endFrames {
+		cut = Silence
+	}
+
+	silent := u.silentFrames
+	ended := Utterance{Audio: u.Flush(), Cut: cut}
+	u.afterPause = cut == Pause
+	u.sincePause = silent
+
+	return append(events, ended), nil
+}
+
+func (u *Utterances) idle(prob float32, pcm []int16) bool {
+	stopped := u.stopped(prob)
+
+	u.preroll = append(u.preroll, pcm...)
+	if excess := len(u.preroll) - prerollFrames*frame; excess > 0 {
+		u.preroll = append(u.preroll[:0], u.preroll[excess:]...)
+	}
+
+	if prob >= startProb {
+		u.speech = append(make([]int16, 0, len(u.preroll)+frame), u.preroll...)
+		u.silentFrames = 0
+		u.afterPause = false
+	}
+
+	return stopped
+}
+
+func (u *Utterances) stopped(prob float32) bool {
+	if !u.afterPause {
+		return false
+	}
+
+	if prob >= endProb {
+		u.afterPause = false
+
+		return false
+	}
+
+	u.sincePause++
+	if u.sincePause < endFrames {
+		return false
+	}
+
+	u.afterPause = false
+
+	return true
 }

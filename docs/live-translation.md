@@ -102,9 +102,13 @@ average log-probability below −1, Whisper's own rule). whisper.cpp's
 `whisper-server` and OpenAI's `whisper-1` support it; OpenAI's gpt-4o
 transcription models accept only `json`, the default.
 
-**Sentences** end after 400 ms of silence (160 ms once someone has spoken
-for 3 s, so fast talkers are cut at their pauses) and at 12 s at the
-latest.
+**Sentences** end after 400 ms of silence. Once someone has spoken for
+3 s, voice detection cuts at a 160 ms pause, and at 12 s at the latest, so
+a fast talker's speech is transcribed in pieces; a piece cut that way is
+subtitled as it comes and held until its speaker has been silent for
+400 ms (or the line reaches 160 characters), and only then translated and
+spoken, whole. When the next piece carries on in lower case, the full stop
+Whisper put before it is dropped.
 
 ## In the browser
 

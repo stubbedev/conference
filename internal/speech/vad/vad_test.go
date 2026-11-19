@@ -43,12 +43,16 @@ func utterances(t *testing.T, pcm []int16) [][]int16 {
 	var found [][]int16
 
 	for start := 0; start < len(pcm); start += chunk {
-		done, err := cutter.Push(pcm[start:min(start+chunk, len(pcm))])
+		events, err := cutter.Push(pcm[start:min(start+chunk, len(pcm))])
 		if err != nil {
 			t.Fatalf("push: %v", err)
 		}
 
-		found = append(found, done...)
+		for _, event := range events {
+			if utterance, ok := event.(vad.Utterance); ok {
+				found = append(found, utterance.Audio)
+			}
+		}
 	}
 
 	if rest := cutter.Flush(); rest != nil {

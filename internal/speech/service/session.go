@@ -28,10 +28,9 @@ type voiceFrame struct {
 type sender func(message any) error
 
 type final struct {
-	seg   int64
+	event vad.Event
 	lang  language
 	voice voiceChoice
-	audio []int16
 }
 
 type speaker struct {
@@ -39,8 +38,9 @@ type speaker struct {
 	lang           language
 	voice          voiceChoice
 	utterances     *vad.Utterances
-	seg            atomic.Int64
+	queued         atomic.Int64
 	finals         chan final
+	lines          lines
 	interimBusy    atomic.Bool
 	interimSamples int
 	context        []string
@@ -79,8 +79,9 @@ func newSession(ctx context.Context, settings Settings, engines speechEngines, m
 			lang:           language{Code: "", Name: "", Whisper: "", Address: "", Voices: nil},
 			voice:          defaultVoice,
 			utterances:     utterances,
-			seg:            atomic.Int64{},
+			queued:         atomic.Int64{},
 			finals:         make(chan final, queuedFinals),
+			lines:          lines{mu: sync.Mutex{}, held: "", seq: 0},
 			interimBusy:    atomic.Bool{},
 			interimSamples: 0,
 			context:        nil,
@@ -124,7 +125,7 @@ func (s *session) audio(ctx context.Context, header wire.AudioHeader, pcm []int1
 	}
 
 	if current.lang.Code != "" && current.lang.Code != lang.Code {
-		err := s.finish(ctx, current, current.utterances.Flush())
+		err := s.stop(ctx, current)
 		if err != nil {
 			return err
 		}
@@ -133,13 +134,13 @@ func (s *session) audio(ctx context.Context, header wire.AudioHeader, pcm []int1
 	current.lang = lang
 	current.voice = parseVoiceChoice(header.Voice)
 
-	done, err := current.utterances.Push(pcm)
+	events, err := current.utterances.Push(pcm)
 	if err != nil {
 		return fmt.Errorf("speaker %s: %w", current.id, err)
 	}
 
-	for _, utterance := range done {
-		err = s.finish(ctx, current, utterance)
+	for _, event := range events {
+		err = s.finish(ctx, current, event)
 		if err != nil {
 			return err
 		}
@@ -155,7 +156,11 @@ func (s *session) end(ctx context.Context, speakerID string) error {
 		return fmt.Errorf("%w: %q", errForeignSpeaker, speakerID)
 	}
 
-	return s.finish(ctx, s.speaker, s.speaker.utterances.Flush())
+	return s.stop(ctx, s.speaker)
+}
+
+func (s *session) stop(ctx context.Context, current *speaker) error {
+	return s.finish(ctx, current, vad.Utterance{Audio: current.utterances.Flush(), Cut: vad.Silence})
 }
 
 func (s *session) close() {
@@ -163,15 +168,19 @@ func (s *session) close() {
 	s.tasks.Wait()
 }
 
-func (s *session) finish(ctx context.Context, current *speaker, audio []int16) error {
-	if len(audio) < minUtterance {
-		return nil
+func (s *session) finish(ctx context.Context, current *speaker, event vad.Event) error {
+	if utterance, ok := event.(vad.Utterance); ok && len(utterance.Audio) < minUtterance {
+		if utterance.Cut == vad.Pause {
+			return nil
+		}
+
+		event = vad.Stopped{}
 	}
 
-	job := final{seg: current.seg.Load(), lang: current.lang, voice: current.voice, audio: audio}
+	job := final{event: event, lang: current.lang, voice: current.voice}
 
 	s.pending.Add(1)
-	current.seg.Add(1)
+	current.queued.Add(1)
 	current.interimSamples = 0
 
 	select {
@@ -195,7 +204,7 @@ func (s *session) maybeInterim(ctx context.Context, current *speaker) {
 	}
 
 	current.interimSamples = current.utterances.Samples()
-	seg, lang, audio := current.seg.Load(), current.lang, current.utterances.Audio()
+	queued, lang, audio := current.queued.Load(), current.lang, current.utterances.Audio()
 
 	s.tasks.Go(func() {
 		defer current.interimBusy.Store(false)
@@ -207,11 +216,12 @@ func (s *session) maybeInterim(ctx context.Context, current *speaker) {
 			return
 		}
 
-		if text == "" || current.seg.Load() != seg {
+		if text == "" || current.queued.Load() != queued {
 			return
 		}
 
-		s.caption(ctx, current, seg, lang, lang, text, false)
+		interim := current.lines.partial(text)
+		s.caption(ctx, current, interim.seq, lang, lang, interim.text, false)
 	})
 }
 
@@ -223,9 +233,18 @@ func (s *session) work(ctx context.Context, current *speaker) {
 }
 
 func (s *session) final(ctx context.Context, current *speaker, job final) {
+	switch event := job.event.(type) {
+	case vad.Utterance:
+		s.heard(ctx, current, job, event)
+	case vad.Stopped:
+		s.sentence(ctx, current, job, current.lines.stopped())
+	}
+}
+
+func (s *session) heard(ctx context.Context, current *speaker, job final, utterance vad.Utterance) {
 	started := time.Now()
 
-	text, err := s.engines.transcribe(ctx, job.audio, job.lang)
+	text, err := s.engines.transcribe(ctx, utterance.Audio, job.lang)
 	if err != nil {
 		logFailure(ctx, "final", err)
 
@@ -234,14 +253,28 @@ func (s *session) final(ctx context.Context, current *speaker, job final) {
 
 	transcribed := time.Since(started)
 
-	if text == "" {
+	said, done := current.lines.utterance(text, utterance.Cut)
+
+	switch {
+	case done:
+		s.sentence(ctx, current, job, said)
+	case said.text != "":
+		s.caption(ctx, current, said.seq, job.lang, job.lang, said.text, false)
+	}
+
+	log.Printf("segment audio_s=%.1f asr_ms=%d total_ms=%d",
+		float64(len(utterance.Audio))/vad.Rate, transcribed.Milliseconds(), time.Since(started).Milliseconds())
+}
+
+func (s *session) sentence(ctx context.Context, current *speaker, job final, said line) {
+	if said.text == "" {
 		return
 	}
 
-	s.caption(ctx, current, job.seg, job.lang, job.lang, text, true)
+	s.caption(ctx, current, said.seq, job.lang, job.lang, said.text, true)
 
 	earlier := slices.Clone(current.context)
-	current.context = append(current.context, text)
+	current.context = append(current.context, said.text)
 	current.context = current.context[max(0, len(current.context)-contextKept):]
 
 	var targets sync.WaitGroup
@@ -251,26 +284,23 @@ func (s *session) final(ctx context.Context, current *speaker, job final) {
 			continue
 		}
 
-		targets.Go(func() { s.translate(ctx, current, job, target, text, earlier) })
+		targets.Go(func() { s.translate(ctx, current, job, target, said, earlier) })
 	}
 
 	targets.Wait()
-
-	log.Printf("segment audio_s=%.1f asr_ms=%d total_ms=%d",
-		float64(len(job.audio))/vad.Rate, transcribed.Milliseconds(), time.Since(started).Milliseconds())
 }
 
-func (s *session) translate(ctx context.Context, current *speaker, job final, target language, text string, earlier []string) {
-	translated, err := s.engines.translate(ctx, text, job.lang, target, earlier)
+func (s *session) translate(ctx context.Context, current *speaker, job final, target language, said line, earlier []string) {
+	translated, err := s.engines.translate(ctx, said.text, job.lang, target, earlier)
 	if err != nil {
 		logFailure(ctx, "translation, sent the original", err)
 		s.emit(ctx, wire.Notice{Type: wire.TypeNotice, Code: wire.NoticeTranslateFailed, Lang: target.Code})
-		s.caption(ctx, current, job.seg, job.lang, target, text, true)
+		s.caption(ctx, current, said.seq, job.lang, target, said.text, true)
 
 		return
 	}
 
-	s.caption(ctx, current, job.seg, job.lang, target, translated, true)
+	s.caption(ctx, current, said.seq, job.lang, target, translated, true)
 
 	spoken, err := s.engines.speak(ctx, translated, target, job.voice)
 	if err != nil {
@@ -281,7 +311,7 @@ func (s *session) translate(ctx context.Context, current *speaker, job final, ta
 	}
 
 	s.emit(ctx, voiceFrame{
-		header: wire.VoiceHeader{Speaker: current.id, SegID: current.segID(job.seg), Lang: target.Code, Rate: spoken.rate},
+		header: wire.VoiceHeader{Speaker: current.id, SegID: current.segID(said.seq), Lang: target.Code, Rate: spoken.rate},
 		pcm:    spoken.pcm,
 	})
 }

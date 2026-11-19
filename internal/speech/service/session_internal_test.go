@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -368,7 +370,7 @@ func TestFullQueueHoldsBackAudio(t *testing.T) {
 
 	for range queuedFinals + 2 {
 		finishCtx, stop := context.WithTimeout(ctx, 200*time.Millisecond)
-		err := opened.finish(finishCtx, opened.speaker, sentence)
+		err := opened.finish(finishCtx, opened.speaker, vad.Utterance{Audio: sentence, Cut: vad.Silence})
 
 		stop()
 
@@ -386,4 +388,79 @@ func TestFullQueueHoldsBackAudio(t *testing.T) {
 	if queued < queuedFinals || queued > queuedFinals+1 {
 		t.Fatalf("%d sentences accepted before audio was held back, want %d or %d", queued, queuedFinals, queuedFinals+1)
 	}
+}
+
+func TestSentenceCutAtAPauseIsTranslatedWhole(t *testing.T) {
+	t.Parallel()
+
+	var (
+		calls sync.Mutex
+		said  int
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	opened, out := openSession(ctx, t, map[string]string{envEngines: enginesFake, envInterim: "0"}, stubEngines{
+		transcribeFn: func(context.Context, language) (string, error) {
+			calls.Lock()
+			defer calls.Unlock()
+
+			said++
+
+			return fmt.Sprintf("teil %d.", said), nil
+		},
+		translateFn: echoTranslations,
+	})
+
+	samples, err := fixtureSamples("german.wav")
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+
+	samples = append(samples, make([]int16, vad.Rate)...)
+	header := wire.AudioHeader{Speaker: anna, Lang: "de", Voice: ""}
+
+	for offset := 0; offset < len(samples); offset += chunk {
+		err = opened.audio(ctx, header, samples[offset:min(offset+chunk, len(samples))])
+		if err != nil {
+			t.Fatalf("audio: %v", err)
+		}
+	}
+
+	want := []string{"teil 1.", "teil 2 teil 3.", "teil 4.", "teil 5.", "teil 6."}
+
+	out.waitFor(t, func(message any) bool {
+		got, ok := message.(wire.Caption)
+
+		return ok && got.Final && got.Lang == "en" && got.Text == "en: "+want[len(want)-1]
+	})
+	cancel()
+	opened.close()
+
+	sentences := finalTexts(out.snapshot(), "de")
+	if !slices.Equal(sentences, want) {
+		t.Fatalf("sentences %q, want %q", sentences, want)
+	}
+
+	translated := finalTexts(out.snapshot(), "en")
+	for i, text := range translated {
+		translated[i] = strings.TrimPrefix(text, "en: ")
+	}
+
+	slices.Sort(translated)
+
+	if !slices.Equal(translated, want) {
+		t.Fatalf("translated %q, want %q", translated, want)
+	}
+}
+
+func finalTexts(messages []any, lang string) []string {
+	var texts []string
+
+	for _, message := range messages {
+		if got, ok := message.(wire.Caption); ok && got.Final && got.Lang == lang {
+			texts = append(texts, got.Text)
+		}
+	}
+
+	return texts
 }
