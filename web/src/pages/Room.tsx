@@ -131,7 +131,7 @@ export default function Room() {
     onReconnected: people.keepPresent,
     onLost: people.reset,
   })
-  usePreferredLayers(clientRef, live, clientGeneration, allTiles, pinnedKey)
+  usePreferredLayers(clientRef, live, clientGeneration, allTiles, layout.mainKey)
   useShortcuts(phase, { toggleMic, toggleCam, toggleChat: panel.toggleChat, toggleFullscreen })
 
   const passwordProtected = Boolean(roomInfo?.requiresPassword)
@@ -247,6 +247,8 @@ export default function Room() {
 
   if (phase === 'joining') return <JoiningScreen />
 
+  const controlsOver = fullscreen || (layout.phone && layout.mainTile !== null && !panel.sidebar)
+
   return (
     <div className="relative flex h-dvh flex-col bg-muted/40">
       <RoomHeader
@@ -274,6 +276,7 @@ export default function Room() {
           translations={translations}
           speaker={devicePrefs.speaker}
           volume={devicePrefs.volume}
+          controlsOver={controlsOver}
         />
 
         {panel.sidebar && (
@@ -312,6 +315,7 @@ export default function Room() {
         chatOpen={panel.chatOpen}
         unread={panel.unread}
         fullscreen={fullscreen}
+        overlay={controlsOver}
         canShare={canShare}
         canRecord={recording.canRecord}
         recording={recording.recording}

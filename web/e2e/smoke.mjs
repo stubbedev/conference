@@ -862,9 +862,10 @@ async function checkTooltips(failures, browser) {
 }
 
 // A phone-sized window: narrower than Tailwind's sm breakpoint, where the
-// call bar keeps only its central controls.
+// stage shows one member edge to edge under controls that hide.
 const PHONE_WINDOW = { width: 375, height: 700 }
 const SETTINGS_LABEL = 'Audio and video settings'
+const CONTROLS_HIDE_WAIT_MS = 5000
 
 const settingsPanel = `(() => {
   const panel = document.querySelector('[data-slot="popover-content"]')
@@ -883,35 +884,116 @@ const settingsPanel = `(() => {
   }
 })()`
 
+function phoneStage() {
+  const box = (el) => {
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right), bottom: Math.round(r.bottom) }
+  }
+  const self = document.querySelector('[data-corner]')
+  const footer = document.querySelector('footer')
+  return {
+    width: window.innerWidth,
+    height: window.innerHeight,
+    scrollWidth: document.documentElement.scrollWidth,
+    main: box(document.querySelector('[data-stage="main"]')),
+    self: box(self),
+    corner: self?.dataset.corner ?? null,
+    strip: [...document.querySelectorAll('[data-stage="strip"] [role="button"]')].map((el) => el.getAttribute('aria-label')),
+    unpin: Boolean(document.querySelector('[data-stage="main"] button[aria-label="Unpin"]')),
+    controlsShown: Number(getComputedStyle(footer).opacity) === 1 && getComputedStyle(footer).pointerEvents !== 'none',
+  }
+}
+
+const centreOf = (box) => ({ x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 })
+
+async function dragTo(browser, from, to) {
+  const move = (type, { x, y }, buttons) =>
+    browser.cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons, clickCount: 1 }, browser.sessionId)
+  await move('mousePressed', from, 1)
+  const steps = 10
+  for (let i = 1; i <= steps; i++) {
+    await move('mouseMoved', { x: from.x + ((to.x - from.x) * i) / steps, y: from.y + ((to.y - from.y) * i) / steps }, 1)
+  }
+  await move('mouseReleased', to, 0)
+}
+
+// A call of two on a phone: the other member fills the window, the
+// viewer's own camera sits in the top-left corner, and the controls hide
+// until a tap brings them back.
+async function checkPhoneStage(failures, browser) {
+  const label = 'phone stage'
+  const { cdp, sessionId } = browser
+  try {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { ...PHONE_WINDOW, deviceScaleFactor: 1, mobile: false }, sessionId)
+    const fills = await waitForCall(
+      browser,
+      phoneStage,
+      [],
+      (g) =>
+        g.main !== null &&
+        g.main.left === 0 &&
+        g.main.top === 0 &&
+        g.main.right === g.width &&
+        g.main.bottom === g.height &&
+        g.scrollWidth <= g.width &&
+        g.corner === 'top-left' &&
+        g.self.right < g.width / 2 &&
+        g.self.bottom < g.height / 2,
+      CONTROL_WAIT_MS,
+    )
+    check(failures, label, fills.ok, `expected the other member edge to edge and the viewer's camera top left: ${JSON.stringify(fills.value)}`)
+    if (!fills.ok) return
+
+    const hidden = await waitForCall(browser, phoneStage, [], (g) => !g.controlsShown, CONTROLS_HIDE_WAIT_MS)
+    check(failures, label, hidden.ok, 'the controls never hid over the full-window video')
+    await press(browser, centreOf(fills.value.main))
+    const shown = await waitForCall(browser, phoneStage, [], (g) => g.controlsShown, CONTROL_WAIT_MS)
+    check(failures, label, shown.ok, 'a tap on the video did not bring the controls back')
+    if (!shown.ok) return
+
+    await checkSettingsOnPhone(failures, browser)
+
+    const area = fills.value
+    await dragTo(browser, centreOf(area.self), { x: area.width - 40, y: area.height - 160 })
+    const moved = await waitForCall(browser, phoneStage, [], (g) => g.corner === 'bottom-right' && g.self.left > g.width / 2, CONTROL_WAIT_MS)
+    check(failures, label, moved.ok, `dragging the viewer's camera to the bottom right did not leave it there: ${JSON.stringify(moved.value)}`)
+    if (!moved.ok) return
+
+    await press(browser, centreOf(moved.value.self))
+    const pinned = await waitForCall(browser, phoneStage, [], (g) => g.self === null && g.strip.length === 1 && g.unpin, CONTROL_WAIT_MS)
+    check(failures, label, pinned.ok, `a tap on the viewer's camera did not pin it with the other member in the strip: ${JSON.stringify(pinned.value)}`)
+    check(failures, label, await clickButtonByTitle(browser, 'Unpin'), 'no "Unpin" button on the pinned camera')
+    const back = await waitForCall(browser, phoneStage, [], (g) => g.self !== null && g.strip.length === 0 && !g.unpin, CONTROL_WAIT_MS)
+    check(failures, label, back.ok, `unpinning did not bring the other member back to the full window: ${JSON.stringify(back.value)}`)
+  } finally {
+    await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId)
+  }
+}
+
 // On a phone the device settings are reached through "More options", and
 // the panel they open fits the window.
 async function checkSettingsOnPhone(failures, browser) {
   const label = 'settings on a phone'
-  const { cdp, sessionId } = browser
-  try {
-    await cdp.send('Emulation.setDeviceMetricsOverride', { ...PHONE_WINDOW, deviceScaleFactor: 1, mobile: false }, sessionId)
-    const layout = await waitForCall(browser, callBarLayout, [], (l) => l.controls.some((c) => c.label === 'More options'), CONTROL_WAIT_MS)
-    check(failures, label, layout.ok, `no "More options" button in a ${PHONE_WINDOW.width}px window: ${JSON.stringify(layout.value.controls)}`)
-    if (!layout.ok) return
-    const more = layout.value.controls.find((c) => c.label === 'More options')
-    await press(browser, more)
-    const item = await waitForCall(browser, menuItemCentre, [SETTINGS_LABEL], Boolean, CONTROL_WAIT_MS)
-    check(failures, label, item.ok, `no "${SETTINGS_LABEL}" item in the "More options" menu`)
-    if (!item.ok) return
-    await press(browser, item.value)
-    const open = await waitFor(
-      browser,
-      settingsPanel,
-      (p) => p !== null && p.microphone && p.camera && p.left >= 0 && p.top >= 0 && p.right <= p.width && p.bottom <= p.height && p.scrollWidth <= p.width,
-      CONTROL_WAIT_MS,
-    )
-    check(failures, label, open.ok, `expected the microphone and camera settings open within the window: ${JSON.stringify(open.value)}`)
-    await pressKey(browser, 'Escape', 'Escape', 27)
-    const closed = await waitFor(browser, settingsPanel, (p) => p === null, CONTROL_WAIT_MS)
-    check(failures, label, closed.ok, 'Escape left the settings open')
-  } finally {
-    await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId)
-  }
+  const layout = await callJs(browser, callBarLayout)
+  const more = layout.controls.find((c) => c.label === 'More options')
+  check(failures, label, more, `no "More options" button in a ${PHONE_WINDOW.width}px window: ${JSON.stringify(layout.controls)}`)
+  if (!more) return
+  await press(browser, more)
+  const item = await waitForCall(browser, menuItemCentre, [SETTINGS_LABEL], Boolean, CONTROL_WAIT_MS)
+  check(failures, label, item.ok, `no "${SETTINGS_LABEL}" item in the "More options" menu`)
+  if (!item.ok) return
+  await press(browser, item.value)
+  const open = await waitFor(
+    browser,
+    settingsPanel,
+    (p) => p !== null && p.microphone && p.camera && p.left >= 0 && p.top >= 0 && p.right <= p.width && p.bottom <= p.height && p.scrollWidth <= p.width,
+    CONTROL_WAIT_MS,
+  )
+  check(failures, label, open.ok, `expected the microphone and camera settings open within the window: ${JSON.stringify(open.value)}`)
+  await pressKey(browser, 'Escape', 'Escape', 27)
+  const closed = await waitFor(browser, settingsPanel, (p) => p === null, CONTROL_WAIT_MS)
+  check(failures, label, closed.ok, 'Escape left the settings open')
 }
 
 // The buttons, tabs and menu items on the page that a screen reader
@@ -1006,7 +1088,7 @@ async function main() {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
     }
     await checkTooltips(failures, browsers[1])
-    await checkSettingsOnPhone(failures, browsers[1])
+    await checkPhoneStage(failures, browsers[1])
 
     await checkSimulcast(failures, browsers[0], browsers[1])
     await checkScreenShare(failures, browsers[0], browsers[1])

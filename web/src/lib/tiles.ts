@@ -3,6 +3,8 @@ import { SCREEN_KIND, type TileKind } from './track-kind.ts'
 import type { LangAnnouncement } from './translate/types.ts'
 
 export const LOCAL_SOURCE = 'local'
+export const LOCAL_CAMERA_KEY = `${LOCAL_SOURCE}:cam`
+export const LOCAL_SCREEN_KEY = `${LOCAL_SOURCE}:screen`
 
 export interface Tile {
   key: string
@@ -97,6 +99,15 @@ export function heardThrough<Stream>(
   if (voice === undefined) return own
 
   return { through: 'translation', stream: voice }
+}
+
+export function mainTileKey(
+  pinnedKey: string | null,
+  tiles: readonly Pick<Tile, 'key' | 'sourceId'>[],
+  phone: boolean,
+): string | null {
+  if (pinnedKey || !phone || tiles.length !== 2) return pinnedKey
+  return tiles.find((tile) => tile.sourceId !== LOCAL_SOURCE)?.key ?? null
 }
 
 export function layoutLayer(tile: Pick<Tile, 'key' | 'kind'>, pinnedKey: string | null, tileCount: number): Layer {

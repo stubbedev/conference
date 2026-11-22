@@ -43,6 +43,7 @@ interface ControlsBarProps {
   chatOpen: boolean
   unread: number
   fullscreen: boolean
+  overlay: boolean
   canShare: boolean
   canRecord: boolean
   recording: boolean
@@ -93,6 +94,7 @@ export const ControlsBar = memo(function ControlsBar({
   chatOpen,
   unread,
   fullscreen,
+  overlay,
   canShare,
   canRecord,
   recording,
@@ -117,8 +119,9 @@ export const ControlsBar = memo(function ControlsBar({
   const fullscreenKey = shortcutKey('toggleFullscreen')
   const [revealed, setRevealed] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const settingsFromMenu = useRef(false)
-  const visible = !fullscreen || revealed
+  const visible = !overlay || revealed || settingsOpen || menuOpen
   const hideTimer = useRef<number | undefined>(undefined)
 
   const armHide = useCallback(() => {
@@ -132,25 +135,27 @@ export const ControlsBar = memo(function ControlsBar({
   }, [armHide])
 
   useEffect(() => {
-    if (!fullscreen) return
+    if (!overlay) return
     armHide()
     window.addEventListener('pointermove', show)
+    window.addEventListener('pointerdown', show)
     return () => {
       window.clearTimeout(hideTimer.current)
       window.removeEventListener('pointermove', show)
+      window.removeEventListener('pointerdown', show)
       setRevealed(true)
     }
-  }, [fullscreen, armHide, show])
+  }, [overlay, armHide, show])
 
   return (
     <Popover open={settingsOpen} onOpenChange={setSettingsOpen}>
       <PopoverAnchor asChild>
         <footer
           onPointerEnter={() => window.clearTimeout(hideTimer.current)}
-          onPointerLeave={fullscreen ? show : undefined}
+          onPointerLeave={overlay ? show : undefined}
           className={cn(
             'grid grid-cols-[1fr_auto_1fr] items-center gap-2 px-3 py-3 sm:px-5',
-            fullscreen &&
+            overlay &&
               cn(
                 'fixed inset-x-0 bottom-0 z-50 bg-gradient-to-t from-black/60 to-transparent transition-all duration-200',
                 visible ? 'opacity-100' : 'pointer-events-none translate-y-3 opacity-0',
@@ -219,7 +224,7 @@ export const ControlsBar = memo(function ControlsBar({
                 </Button>
               </Hint>
             )}
-            <DropdownMenu>
+            <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
               <Hint label="More options">
                 <DropdownMenuTrigger asChild>
                   <Button variant="secondary" size="icon" className={ROUND}>

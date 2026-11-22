@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { heardThrough, layoutLayer, withoutVoice, withVoice, type Speaker, type Tile, type Translations } from './tiles.ts'
+import { heardThrough, layoutLayer, LOCAL_CAMERA_KEY, LOCAL_SOURCE, mainTileKey, withoutVoice, withVoice, type Speaker, type Tile, type Translations } from './tiles.ts'
 import { CAMERA_KIND, SCREEN_KIND } from './track-kind.ts'
 
 const screen: Pick<Tile, 'key' | 'kind'> = { key: 'bob:screen', kind: SCREEN_KIND }
@@ -145,4 +145,25 @@ test('a voice published anew stays when the one before it is seen to leave only 
   const restarted = withVoice(withVoice({}, 'bob', 'en', TRANSLATION), 'bob', 'en', 'the new voice')
   assert.equal(withoutVoice(restarted, 'bob', 'en', TRANSLATION), restarted)
   assert.equal(withoutVoice(restarted, 'carol', 'en', TRANSLATION), restarted)
+})
+
+const self = { key: LOCAL_CAMERA_KEY, sourceId: LOCAL_SOURCE }
+const bob = { key: 'bob:cam', sourceId: 'bob' }
+const carol = { key: 'carol:cam', sourceId: 'carol' }
+
+test('on a phone, a call of two fills the screen with the other member', () => {
+  assert.equal(mainTileKey(null, [self, bob], true), bob.key)
+})
+
+test('on a phone, a pin outranks the other member of a call of two', () => {
+  assert.equal(mainTileKey(self.key, [self, bob], true), self.key)
+})
+
+test('on a phone, a call of three keeps the grid until someone is pinned', () => {
+  assert.equal(mainTileKey(null, [self, bob, carol], true), null)
+  assert.equal(mainTileKey(carol.key, [self, bob, carol], true), carol.key)
+})
+
+test('a wide window shows a call of two as a grid', () => {
+  assert.equal(mainTileKey(null, [self, bob], false), null)
 })

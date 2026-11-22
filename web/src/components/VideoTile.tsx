@@ -37,6 +37,7 @@ interface VideoTileProps {
   onTogglePin?: (tileKey: string) => void
   compact?: boolean
   fill?: boolean
+  bleed?: { covered: number }
   onAspectRatio?: (tileKey: string, ratio: number) => void
   /** Live-translation subtitle for what this member is saying. */
   caption?: string
@@ -69,6 +70,8 @@ function watchVisibility(element: HTMLMediaElement, start: () => void): () => vo
 // muted (muted playback is always allowed) and remote audio plays through
 // a dedicated <audio> element that retries on the next user gesture if
 // the initial play is refused.
+const CAPTION_GAP = 8
+
 export const VideoTile = memo(function VideoTile({
   tileKey,
   stream,
@@ -85,6 +88,7 @@ export const VideoTile = memo(function VideoTile({
   onTogglePin,
   compact,
   fill = false,
+  bleed,
   onAspectRatio,
   caption,
   captionBy,
@@ -191,7 +195,12 @@ export const VideoTile = memo(function VideoTile({
 
   return (
     <div className="group hud-tile relative isolate h-full w-full">
-      <div className="absolute inset-0 overflow-hidden rounded-xl bg-black [clip-path:inset(0_round_0.75rem)]">
+      <div
+        className={cn(
+          'absolute inset-0 overflow-hidden bg-black',
+          !bleed && 'rounded-xl [clip-path:inset(0_round_0.75rem)]',
+        )}
+      >
         <video
           ref={videoRef}
           autoPlay
@@ -224,30 +233,36 @@ export const VideoTile = memo(function VideoTile({
         )}
       </div>
       {speakingNow && (
-        <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-emerald-400 ring-inset" />
+        <span className={cn('pointer-events-none absolute inset-0 ring-2 ring-emerald-400 ring-inset', !bleed && 'rounded-xl')} />
       )}
       {!muted && audioBlocked && (
         <button
           type="button"
-          onClick={enableSound}
+          onClick={(event) => {
+            event.stopPropagation()
+            enableSound()
+          }}
           className="absolute top-1/2 left-1/2 flex -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center gap-1.5 rounded-full bg-black/70 px-3 py-1.5 text-xs font-medium text-white backdrop-blur-sm"
         >
           <VolumeX className="size-3.5 shrink-0" />
           Tap for sound
         </button>
       )}
-      <div className="hud-label absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1.5 rounded-full bg-black/60 py-1 pr-2.5 pl-2 text-xs font-medium text-white backdrop-blur-sm">
-        {sharing && <MonitorUp className="size-3.5 shrink-0" />}
-        {!sharing && micOff && <MicOff className="size-3.5 shrink-0 text-red-400" />}
-        <span className={cn('truncate', compact ? 'max-w-24' : 'max-w-48')}>{name}</span>
-        {sharing && <span className="shrink-0 text-white/60">screen</span>}
-      </div>
+      {!bleed && (
+        <div className="hud-label absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1.5 rounded-full bg-black/60 py-1 pr-2.5 pl-2 text-xs font-medium text-white backdrop-blur-sm">
+          {sharing && <MonitorUp className="size-3.5 shrink-0" />}
+          {!sharing && micOff && <MicOff className="size-3.5 shrink-0 text-red-400" />}
+          <span className={cn('truncate', compact ? 'max-w-24' : 'max-w-48')}>{name}</span>
+          {sharing && <span className="shrink-0 text-white/60">screen</span>}
+        </div>
+      )}
       {caption && (
         <div
           className={cn(
             'hud-caption pointer-events-none absolute left-1/2 w-max max-w-[90%] -translate-x-1/2 rounded-lg bg-black/75 px-3 py-1.5 text-center font-medium text-white',
             compact ? 'bottom-8 text-xs' : 'bottom-10 text-sm sm:text-base',
           )}
+          style={bleed && { bottom: bleed.covered + CAPTION_GAP }}
         >
           <p className="line-clamp-3">{caption}</p>
           {captionBy && <p className="truncate text-[0.7em] font-normal opacity-70">Translated by {captionBy}</p>}
@@ -269,7 +284,7 @@ export const VideoTile = memo(function VideoTile({
             onClick={() => onTogglePin(tileKey)}
             className={cn(
               'absolute top-2 right-2 grid size-7 cursor-pointer place-items-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-opacity hover:bg-black/80',
-              pinned ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+              pinned ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100',
             )}
           >
             {pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
