@@ -861,6 +861,59 @@ async function checkTooltips(failures, browser) {
   await closed('after clicking away from a keyboard-focused control')
 }
 
+// A phone-sized window: narrower than Tailwind's sm breakpoint, where the
+// call bar keeps only its central controls.
+const PHONE_WINDOW = { width: 375, height: 700 }
+const SETTINGS_LABEL = 'Audio and video settings'
+
+const settingsPanel = `(() => {
+  const panel = document.querySelector('[data-slot="popover-content"]')
+  if (!panel) return null
+  const r = panel.getBoundingClientRect()
+  return {
+    left: Math.round(r.left),
+    top: Math.round(r.top),
+    right: Math.round(r.right),
+    bottom: Math.round(r.bottom),
+    microphone: panel.innerText.includes('Microphone'),
+    camera: panel.innerText.includes('Camera'),
+    width: window.innerWidth,
+    height: window.innerHeight,
+    scrollWidth: document.documentElement.scrollWidth,
+  }
+})()`
+
+// On a phone the device settings are reached through "More options", and
+// the panel they open fits the window.
+async function checkSettingsOnPhone(failures, browser) {
+  const label = 'settings on a phone'
+  const { cdp, sessionId } = browser
+  try {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { ...PHONE_WINDOW, deviceScaleFactor: 1, mobile: false }, sessionId)
+    const layout = await waitForCall(browser, callBarLayout, [], (l) => l.controls.some((c) => c.label === 'More options'), CONTROL_WAIT_MS)
+    check(failures, label, layout.ok, `no "More options" button in a ${PHONE_WINDOW.width}px window: ${JSON.stringify(layout.value.controls)}`)
+    if (!layout.ok) return
+    const more = layout.value.controls.find((c) => c.label === 'More options')
+    await press(browser, more)
+    const item = await waitForCall(browser, menuItemCentre, [SETTINGS_LABEL], Boolean, CONTROL_WAIT_MS)
+    check(failures, label, item.ok, `no "${SETTINGS_LABEL}" item in the "More options" menu`)
+    if (!item.ok) return
+    await press(browser, item.value)
+    const open = await waitFor(
+      browser,
+      settingsPanel,
+      (p) => p !== null && p.microphone && p.camera && p.left >= 0 && p.top >= 0 && p.right <= p.width && p.bottom <= p.height && p.scrollWidth <= p.width,
+      CONTROL_WAIT_MS,
+    )
+    check(failures, label, open.ok, `expected the microphone and camera settings open within the window: ${JSON.stringify(open.value)}`)
+    await pressKey(browser, 'Escape', 'Escape', 27)
+    const closed = await waitFor(browser, settingsPanel, (p) => p === null, CONTROL_WAIT_MS)
+    check(failures, label, closed.ok, 'Escape left the settings open')
+  } finally {
+    await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId)
+  }
+}
+
 // The buttons, tabs and menu items on the page that a screen reader
 // would announce without a name, each as its own markup, and whether
 // what was to be looked at is on the page at all.
@@ -953,6 +1006,7 @@ async function main() {
       await checkPinRoundTrip(failures, `pinning browser ${i}`, browser)
     }
     await checkTooltips(failures, browsers[1])
+    await checkSettingsOnPhone(failures, browsers[1])
 
     await checkSimulcast(failures, browsers[0], browsers[1])
     await checkScreenShare(failures, browsers[0], browsers[1])

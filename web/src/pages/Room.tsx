@@ -7,7 +7,7 @@ import { ControlsBar } from '@/components/ControlsBar'
 import { DiagnosticsPanel } from '@/components/DiagnosticsPanel'
 import { ErrorScreen } from '@/components/ErrorScreen'
 import { HudBackdrop } from '@/components/HudBackdrop'
-import { DeviceSettingsPopover } from '@/components/MediaSettings'
+import { DeviceSettingsPanel } from '@/components/MediaSettings'
 import { MeetingReady } from '@/components/MeetingReady'
 import { MemberAnnouncer } from '@/components/MemberAnnouncer'
 import { Prejoin } from '@/components/Prejoin'
@@ -149,9 +149,9 @@ export default function Room() {
 
   const joinCall = () => void join(() => connectClient(''))
 
-  const settingsPopover = useMemo(
+  const settingsPanel = useMemo(
     () => (
-      <DeviceSettingsPopover
+      <DeviceSettingsPanel
         devices={media.devices}
         selected={devicePrefs}
         hasMic={media.hasMic}
@@ -325,9 +325,8 @@ export default function Room() {
         onLeave={leave}
         onToggleChat={panel.toggleChat}
         onToggleFullscreen={toggleFullscreen}
-      >
-        {settingsPopover}
-      </ControlsBar>
+        settings={settingsPanel}
+      />
       {allTiles.map((tile) => {
         const heard = heardThrough(tile, translations)
         if (heard.through === 'own') return null

@@ -1,5 +1,4 @@
 import type { CSSProperties, ReactNode } from 'react'
-import { Settings2 } from 'lucide-react'
 
 import {
   CAMERA_RESOLUTIONS,
@@ -17,13 +16,10 @@ import {
   type DevicePrefs,
 } from '@/hooks/media'
 import { askForSpeaker, audioOutputs } from '@/hooks/audio-output'
-import { Button } from '@/components/ui/button'
 import { Disclosure } from '@/components/Disclosure'
-import { Hint } from '@/components/Hint'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { ThemeSelect } from '@/components/ThemeSelect'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Select,
   SelectContent,
@@ -276,43 +272,28 @@ const SCROLL_SHADOWS: CSSProperties = {
   ].join(', '),
 }
 
-export function DeviceSettingsPopover({
+export function DeviceSettingsPanel({
   translation,
   ...props
 }: DeviceSettingsProps & { translation?: ReactNode }) {
   return (
-    <Popover>
-      <Hint label="Audio and video settings">
-        <PopoverTrigger asChild>
-          <Button variant="ghost" size="icon">
-            <Settings2 />
-          </Button>
-        </PopoverTrigger>
-      </Hint>
-      <PopoverContent
-        side="top"
-        align="end"
-        className="flex max-h-(--radix-popover-content-available-height) w-80 flex-col p-0"
-      >
-        <div className="min-h-0 overflow-y-auto p-4" style={SCROLL_SHADOWS}>
-          <p className="mb-3 text-sm font-medium">Audio and video</p>
-          <DeviceSettings {...props} />
-          {translation && (
-            <>
-              <Separator className="my-3" />
-              <Disclosure
-                title="Live translation"
-                className="border-0"
-                contentClassName="px-0 pb-0"
-              >
-                {translation}
-              </Disclosure>
-            </>
-          )}
-          <Separator className="my-4" />
-          <ThemeSelect />
-        </div>
-      </PopoverContent>
-    </Popover>
+    <div className="min-h-0 overflow-y-auto p-4" style={SCROLL_SHADOWS}>
+      <p className="mb-3 text-sm font-medium">Audio and video</p>
+      <DeviceSettings {...props} />
+      {translation && (
+        <>
+          <Separator className="my-3" />
+          <Disclosure
+            title="Live translation"
+            className="border-0"
+            contentClassName="px-0 pb-0"
+          >
+            {translation}
+          </Disclosure>
+        </>
+      )}
+      <Separator className="my-4" />
+      <ThemeSelect />
+    </div>
   )
 }
