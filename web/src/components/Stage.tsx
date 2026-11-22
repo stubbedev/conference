@@ -65,7 +65,7 @@ export function Stage({
 
   if (pinnedTile) {
     return (
-      <main className="flex min-h-0 flex-1 flex-col gap-2 px-2 pb-2" style={{ paddingTop: STAGE_TOP }}>
+      <main className="flex flex-col gap-2 px-2 pb-2" style={{ paddingTop: STAGE_TOP }}>
         <div className="min-h-0 flex-1">{renderTile(pinnedTile)}</div>
         {stripTiles.length > 0 && (
           <div className="no-scrollbar flex shrink-0 gap-2 overflow-x-auto">
@@ -81,7 +81,7 @@ export function Stage({
   }
 
   return (
-    <main ref={stageRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-2" style={{ paddingTop: STAGE_TOP }}>
+    <main ref={stageRef} className="overflow-y-auto px-2 pb-2" style={{ paddingTop: STAGE_TOP }}>
       <div className="flex min-h-full flex-wrap content-center justify-center" style={{ gap: TILE_GAP }}>
         {allTiles.map((tile) => (
           <div key={tile.key} className="shrink-0" style={{ width: grid.width, height: grid.height }}>

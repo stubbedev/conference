@@ -43,7 +43,7 @@ export function RoomSidebar({
         className="absolute inset-0 z-30 cursor-default bg-black/50 md:hidden"
         onClick={onClose}
       />
-      <aside className="absolute inset-y-0 right-0 z-40 flex w-[85%] max-w-sm flex-col bg-background shadow-xl md:static md:z-auto md:w-[22rem] md:max-w-none md:shrink-0 md:border-l md:shadow-none">
+      <aside className="absolute inset-y-0 right-0 z-40 flex w-[85%] max-w-sm flex-col bg-background shadow-xl md:static md:z-auto md:w-[22rem] md:max-w-none md:border-l md:shadow-none">
         <SidePanel
           tab={tab}
           peopleCount={members.length}

@@ -263,7 +263,7 @@ export default function Room() {
         lang={langPrefs.lang}
       />
 
-      <div className="relative flex min-h-0 flex-1">
+      <div className="relative grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)]">
         <Stage
           layout={layout}
           selfMember={selfMember}

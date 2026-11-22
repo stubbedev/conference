@@ -650,6 +650,7 @@ async function checkScreenShare(failures, publisher, viewer) {
   const back = await settledEncoding('screen share', share, [FLUID_SHARE_RID])
   checkEncoding(failures, 'screen share', 'pinned again', back, [FLUID_SHARE_RID])
   checkFluidRate(failures, 'pinned again', back)
+  await checkSidebarBesidePinned(failures, viewer)
 
   await evalJs(publisher, shareMode('still'))
   await sleep(STILL_SETTLE_MS)
@@ -668,6 +669,65 @@ async function checkScreenShare(failures, publisher, viewer) {
   const left = await evalJs(publisher, uploads)
   check(failures, 'screen share', !left.some((up) => up.share), `the share's connection stayed open after the share stopped: ${JSON.stringify(left)}`)
   check(failures, 'screen share', left.some((up) => !up.share), `stopping the share closed the camera's upload too: ${JSON.stringify(left)}`)
+}
+
+// Tailwind's md breakpoint: the narrowest window where the side panel takes
+// a column of its own instead of sliding over the stage.
+const SIDEBAR_COLUMN_MIN_WIDTH = 768
+
+const sidebarGeometry = `(() => {
+  const aside = document.querySelector('aside')
+  const main = document.querySelector('main')
+  if (!aside || !main) return null
+  const a = aside.getBoundingClientRect()
+  const m = main.getBoundingClientRect()
+  return {
+    asideLeft: Math.round(a.left),
+    asideRight: Math.round(a.right),
+    mainLeft: Math.round(m.left),
+    mainRight: Math.round(m.right),
+    scrollWidth: document.documentElement.scrollWidth,
+    width: window.innerWidth,
+  }
+})()`
+
+const SIDEBAR_LAYOUTS = [
+  {
+    name: 'column',
+    width: SIDEBAR_COLUMN_MIN_WIDTH,
+    holds: (g) => g.mainRight <= g.asideLeft,
+    expected: 'the stage ends where the side panel begins',
+  },
+  {
+    name: 'drawer',
+    width: SIDEBAR_COLUMN_MIN_WIDTH - 1,
+    holds: (g) => g.mainLeft === 0 && g.mainRight === g.width && g.asideLeft < g.width,
+    expected: 'the stage keeps the full width and the side panel slides over it',
+  },
+]
+
+// A pinned tile with thumbnails under it shares the window with the side
+// panel: beside it from the md breakpoint up, under it below; the page never
+// scrolls sideways.
+async function checkSidebarBesidePinned(failures, browser) {
+  const { cdp, sessionId } = browser
+  try {
+    for (const layout of SIDEBAR_LAYOUTS) {
+      const label = `sidebar as a ${layout.name} beside a pinned tile`
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: layout.width, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId)
+      check(failures, label, await clickButtonByTitle(browser, 'Open chat'), 'no "Open chat" button')
+      const fits = await waitFor(
+        browser,
+        sidebarGeometry,
+        (g) => g !== null && g.scrollWidth <= g.width && g.asideRight <= g.width && layout.holds(g),
+        CONTROL_WAIT_MS,
+      )
+      check(failures, label, fits.ok, `in a ${layout.width}px window, expected no sideways scroll and that ${layout.expected}: ${JSON.stringify(fits.value)}`)
+      check(failures, label, await clickButtonByTitle(browser, 'Close chat'), 'no "Close chat" button')
+    }
+  } finally {
+    await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId)
+  }
 }
 
 async function checkPinRoundTrip(failures, label, browser) {
