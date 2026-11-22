@@ -27,6 +27,16 @@ test('part of a long voice, cut off at a pause, is an echo', () => {
   assert.equal(echoes.echoes('Die Zahlen für das dritte Quartal sehen besser aus.', { from: 12_300, until: 14_200 }), true)
 })
 
+test('one utterance that heard several voices played back to back is an echo', () => {
+  const echoes = new Echoes()
+  echoes.play('gerd-4', 'Can you send me the product data as an Excel file by Friday?', { from: 10_000, until: 13_000 })
+  echoes.play('gerd-5', 'The picture is too dark.', { from: 13_200, until: 14_400 })
+  echoes.play('gerd-6', 'Please make the background brighter.', { from: 14_600, until: 16_200 })
+  const heard = { from: 10_300, until: 16_500 }
+  assert.equal(echoes.echoes('Can you send me the product data by Friday as an Excel file? The picture is too dark. Please make the background. Hello.', heard), true)
+  assert.equal(echoes.echoes('The picture is too dark. Please make the background brighter.', { from: 13_400, until: 16_400 }), true)
+})
+
 test('a short voice heard back whole is an echo', () => {
   assert.equal(played('Ja.').echoes('Ja', { from: 10_100, until: 10_900 }), true)
 })

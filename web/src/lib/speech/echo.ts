@@ -54,11 +54,12 @@ export class Echoes {
   echoes(text: string, said: Span): boolean {
     const words = wordsOf(text)
     if (words.length === 0) return false
-    for (const played of this.played.values()) {
-      if (!overlaps(said, played)) continue
-      const common = inOrder(words, played.words)
-      if (common >= ECHO_SHARE * words.length && common >= Math.min(ECHO_WORDS, played.words.length)) return true
-    }
-    return false
+    const heard = [...this.played.values()]
+      .filter((played) => overlaps(said, played))
+      .sort((a, b) => a.from - b.from)
+      .flatMap((played) => played.words)
+    if (heard.length === 0) return false
+    const common = inOrder(words, heard)
+    return common >= ECHO_SHARE * words.length && common >= Math.min(ECHO_WORDS, heard.length)
   }
 }
