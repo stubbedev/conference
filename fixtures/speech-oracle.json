@@ -1,6 +1,8 @@
-{
-  "en": {
+[
+  {
+    "lang": "en",
     "recording": "english.wav",
+    "speech": "synthetic",
     "sentences": [
       "Thanks for joining.",
       "Let's start with a quick update on the rollout.",
@@ -32,8 +34,10 @@
       ]
     }
   },
-  "de": {
+  {
+    "lang": "de",
     "recording": "german.wav",
+    "speech": "synthetic",
     "sentences": [
       "Guten Morgen, schön, dass Sie heute Zeit haben.",
       "Wir müssen die Lieferung um zwei Wochen verschieben, weil der Zulieferer Probleme hat.",
@@ -64,8 +68,10 @@
       ]
     }
   },
-  "sv": {
+  {
+    "lang": "sv",
     "recording": "swedish.wav",
+    "speech": "synthetic",
     "sentences": [
       "God morgon!",
       "Vad roligt att du har tid idag.",
@@ -84,5 +90,135 @@
         "Please make the background lighter."
       ]
     }
+  },
+  {
+    "lang": "en",
+    "recording": "fleurs-english.wav",
+    "speech": "recorded",
+    "source": {
+      "dataset": "FLEURS, dev split",
+      "url": "https://huggingface.co/datasets/google/fleurs",
+      "license": "CC BY 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "changes": "each clip brought to a mean level of -26 dBFS (peaks at most -1 dBFS), as a microphone with automatic gain control delivers it, then joined in this order with 0.6 s of silence after each, as 16-bit PCM",
+      "clips": [
+        "data/en_us/audio/dev.tar.gz:dev/6969469525741631060.wav (FLoRes 1528)",
+        "data/en_us/audio/dev.tar.gz:dev/14159306883861268418.wav (FLoRes 1577)",
+        "data/en_us/audio/dev.tar.gz:dev/3907900566906015878.wav (FLoRes 1640)",
+        "data/en_us/audio/dev.tar.gz:dev/10765076284259209003.wav (FLoRes 1560)",
+        "data/en_us/audio/dev.tar.gz:dev/16817758965840412496.wav (FLoRes 1562)",
+        "data/en_us/audio/dev.tar.gz:dev/5498038997689553356.wav (FLoRes 1587)"
+      ]
+    },
+    "sentences": [
+      "Some festivals have special camping areas for families with young children.",
+      "That didn't seem to make sense to me; it certainly wasn't fair.",
+      "On icy and snowy roadways, friction is low and you cannot drive as if you were on bare asphalt.",
+      "As soon as you get out of the current, swimming back is no more difficult than normally.",
+      "This became common practice, but the iron caused more wear on the wooden wheels of the wagons.",
+      "The first cases of the disease this season were reported in late July."
+    ],
+    "translations": {
+      "de": [
+        "Manche Festivals haben spezielle Campingbereiche für Familien mit kleinen Kindern.",
+        "Das erschien mir nicht sinnvoll; es war ganz gewiss nicht fair.",
+        "Auf vereisten und verschneiten Straßen ist die Haftung gering und man kann nicht fahren, als befinde man sich auf nacktem Asphalt.",
+        "Wenn man aus der Strömung herauskommt, ist das Zurückschwimmen nicht schwieriger als normal.",
+        "Dies wurde üblich, doch das Eisen sorgte für mehr Verschleiß an den hölzernen Rädern der Wagen.",
+        "Die ersten Fälle der Krankheit dieser Saison wurden Ende Juli gemeldet."
+      ],
+      "da": [
+        "Nogle festivaler har særlige campingområder for småbørnsfamilier.",
+        "Det var helt afgjort ikke retfærdigt og gav ikke rigtig mening for mig.",
+        "På is- og sneglatte veje er der lav friktion, og du kan ikke køre, som du normalt ville gøre, på tør asfalt.",
+        "Så snart du slipper ud af strømmen, er det ikke sværere end normalt at svømme tilbage.",
+        "Dette blev almindelig praksis, men jernet medførte mere slid på vognenes træhjul.",
+        "De første tilfælde af sygdommen i denne sæson blev rapporteret i slutningen af juli."
+      ]
+    }
+  },
+  {
+    "lang": "de",
+    "recording": "fleurs-german.wav",
+    "speech": "recorded",
+    "source": {
+      "dataset": "FLEURS, dev split",
+      "url": "https://huggingface.co/datasets/google/fleurs",
+      "license": "CC BY 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "changes": "each clip brought to a mean level of -26 dBFS (peaks at most -1 dBFS), as a microphone with automatic gain control delivers it, then joined in this order with 0.6 s of silence after each, as 16-bit PCM",
+      "clips": [
+        "data/de_de/audio/dev.tar.gz:dev/1956593993505841234.wav (FLoRes 1607)",
+        "data/de_de/audio/dev.tar.gz:dev/17193269426431743622.wav (FLoRes 1599)",
+        "data/de_de/audio/dev.tar.gz:dev/7379644843237828894.wav (FLoRes 1598)",
+        "data/de_de/audio/dev.tar.gz:dev/1804178782757373077.wav (FLoRes 1612)",
+        "data/de_de/audio/dev.tar.gz:dev/16249525565498934193.wav (FLoRes 1624)",
+        "data/de_de/audio/dev.tar.gz:dev/7146016300570749740.wav (FLoRes 1587)"
+      ]
+    },
+    "sentences": [
+      "Es lohnt sich, eine halbe Stunde durch das faszinierende Dorf zu bummeln.",
+      "Die ursprüngliche Population hat sich überhaupt nicht verändert. Sie braucht noch immer dieselben Anpassungen wie zuvor.",
+      "Obwohl sich drei Menschen im Haus befanden, als das Auto hineinraste, wurde keiner von ihnen verletzt.",
+      "Auf einem 100 Fuß langen Teilabschnitt läuft Wasser über den Damm.",
+      "Binnenwasserstraßen können eine gute Grundlage für die Urlaubsplanung sein.",
+      "Die ersten Fälle der Krankheit dieser Saison wurden Ende Juli gemeldet."
+    ],
+    "translations": {
+      "en": [
+        "It's worth half an hour to stroll about the intriguing village.",
+        "The original population hasn't changed at all, they still need the same adaptations as before.",
+        "Although three people were inside the house when the car impacted it, none of them were hurt.",
+        "Water is spilling over the levee in a section 100 feet wide.",
+        "Inland waterways can be a good theme to base a holiday around.",
+        "The first cases of the disease this season were reported in late July."
+      ],
+      "da": [
+        "Det er værd at bruge en halv times tid på at gå rundt i den spændende landsby.",
+        "Den oprindelige population har ikke ændret sig overhovedet. Den har stadig brug for de samme tilpasninger som før.",
+        "Selvom der var tre personer i huset, da bilen ramte det, kom ingen af dem til skade.",
+        "Vand spilder over diget i et afsnit, der er 100 fod bred.",
+        "De indlandske vandveje kan være et godt tema at basere en ferie omkring.",
+        "De første tilfælde af sygdommen i denne sæson blev rapporteret i slutningen af juli."
+      ]
+    }
+  },
+  {
+    "lang": "sv",
+    "recording": "fleurs-swedish.wav",
+    "speech": "recorded",
+    "source": {
+      "dataset": "FLEURS, dev split",
+      "url": "https://huggingface.co/datasets/google/fleurs",
+      "license": "CC BY 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "changes": "each clip brought to a mean level of -26 dBFS (peaks at most -1 dBFS), as a microphone with automatic gain control delivers it, then joined in this order with 0.6 s of silence after each, as 16-bit PCM",
+      "clips": [
+        "data/sv_se/audio/dev.tar.gz:dev/14811722134662091931.wav (FLoRes 1530)",
+        "data/sv_se/audio/dev.tar.gz:dev/17157808321111617280.wav (FLoRes 1545)",
+        "data/sv_se/audio/dev.tar.gz:dev/14480309590256219353.wav (FLoRes 1572)",
+        "data/sv_se/audio/dev.tar.gz:dev/9949682931381405468.wav (FLoRes 1576)",
+        "data/sv_se/audio/dev.tar.gz:dev/897779841234332652.wav (FLoRes 1582)",
+        "data/sv_se/audio/dev.tar.gz:dev/16775975393279541601.wav (FLoRes 1648)"
+      ]
+    },
+    "sentences": [
+      "Man hade planerat att fälla det på tisdagen, men det räddades av ett akut domstolsbeslut.",
+      "En curry kan vara antingen \"torr\" eller \"fuktig\" beroende på mängden vätska.",
+      "Ytterligare tre bomber exploderade nära flera regeringsbyggnader under en tidsrymd på två timmar.",
+      "En kurs går vanligtvis igenom alla frågor som nämns här fast mycket mer detaljerat, oftast med praktiska övningar.",
+      "Det mesta av den hebreiska familjens liv ägde rum utomhus.",
+      "I Kanaans land fanns det inga stora skogar, därför var trä väldigt dyrbart."
+    ],
+    "translations": {
+      "en": [
+        "It had been scheduled to be cut down on Tuesday, but was saved after an emergency court ruling.",
+        "A curry can be either \"dry\" or \"wet\" depending on the amount of liquid.",
+        "Three more bombs exploded near government buildings in a period of two hours.",
+        "A course will normally cover all the issues discussed here in far greater detail, usually with practical experience.",
+        "Most of the life of the Hebrew family happened in the open air.",
+        "There were no large forests in the land of Canaan, so wood was extremely expensive."
+      ]
+    }
   }
-}
+]
