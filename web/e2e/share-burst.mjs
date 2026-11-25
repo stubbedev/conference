@@ -62,8 +62,10 @@ const LIMITED_BY_BANDWIDTH = 'bandwidth'
 const MIN_PLAYED_SHARE = 0.8
 
 // The frames of a burst the presenter sent that must reach a viewer
-// watching the fluid encoding. The two ends are read a moment apart, so a
-// few frames at either edge of a burst are counted at one end only.
+// watching the fluid encoding. The presenter's count is taken at the moment
+// the viewer's was, and the frames that did not arrive are counted from a
+// second into the still stretch before the burst to a second into the one
+// after it, where as many frames are in flight at both ends.
 const MIN_DELIVERED_SHARE = 0.9
 
 // How long after asking for the fluid encoding a viewer is taken to be
@@ -91,6 +93,8 @@ const HELD_MIN_ESTIMATE = SCREEN_SHARE_FLUID_MAX_BITRATE
 const phaseAt = (second) => (Math.floor(second / PHASE_SECONDS) % 2 === 0 ? 'scrolling' : 'still')
 
 const burstOf = (second) => Math.floor(second / (PHASE_SECONDS * 2))
+
+const aroundBurstOf = (second) => burstOf(second + PHASE_SECONDS - 1)
 
 // The first second of a burst ends the still screen's pause, which the
 // viewer counts as a freeze; it is not one the burst caused.
@@ -134,6 +138,7 @@ function secondOf(second, before, after, estimate) {
     lost: after.recv.lost - before.recv.lost,
     width: after.recv.width,
     encoded: (h.encoded ?? 0) - (ph.encoded ?? 0),
+    encodedForViewer: after.encodedAtRecv - before.encodedAtRecv,
     sentBits,
     sentBps: perSecond(sentBits, sendSeconds),
     targetBps: h.target ?? 0,
@@ -142,17 +147,32 @@ function secondOf(second, before, after, estimate) {
   }
 }
 
+function encodedAt(earlier, later, stamp, second) {
+  const [from, to] = [earlier.layers[FLUID], later.layers[FLUID]]
+  if (!from || !to) throw new Error(`the presenter sent no ${FLUID} encoding at t=${second}s`)
+  if (to.stamp === from.stamp) return to.encoded
+  return from.encoded + ((to.encoded - from.encoded) * (stamp - from.stamp)) / (to.stamp - from.stamp)
+}
+
+const FRESH_STATS_MS = 2000
+
 async function counters(presenter, viewer, second) {
-  const [recv, send] = await Promise.all([evalJs(viewer, shareReceiveCounters), evalJs(presenter, shareSendCounters)])
+  const earlier = await evalJs(presenter, shareSendCounters)
+  if (!earlier) throw new Error(`the presenter lost the share at t=${second}s`)
+  const viewed = await waitFor(viewer, shareReceiveCounters, (counts) => !counts || counts.stamp >= (earlier.layers[FLUID]?.stamp ?? -Infinity), FRESH_STATS_MS)
+  const recv = viewed.value
   if (!recv) throw new Error(`the viewer lost the share at t=${second}s`)
-  if (!send) throw new Error(`the presenter lost the share at t=${second}s`)
-  return { recv, send }
+  if (!viewed.ok) throw new Error(`the viewer's statistics at t=${second}s were not taken after the presenter's within ${FRESH_STATS_MS} ms`)
+  const later = await waitFor(presenter, shareSendCounters, (send) => !send || (send.layers[FLUID]?.stamp ?? Infinity) >= recv.stamp, FRESH_STATS_MS)
+  if (!later.value) throw new Error(`the presenter lost the share at t=${second}s`)
+  if (!later.ok) throw new Error(`the presenter's statistics at t=${second}s were not taken after the viewer's within ${FRESH_STATS_MS} ms`)
+  return { recv, send: later.value, encodedAtRecv: encodedAt(earlier, later.value, recv.stamp, second) }
 }
 
 async function timeline(presenter, viewer, seconds) {
   const out = []
-  await evalJs(presenter, shareMode(phaseAt(0)))
   let before = await counters(presenter, viewer, 0)
+  await evalJs(presenter, shareMode(phaseAt(0)))
   for (let second = 0; second < seconds; second++) {
     const phase = phaseAt(second)
     await sleep(1000)
@@ -179,9 +199,10 @@ const total = (rows, field) => rows.reduce((sum, row) => sum + row[field], 0)
 // One scrolling burst at both ends: what the presenter sent of the fluid
 // encoding, what of it reached the viewer, what the viewer made of it, and
 // whether the viewer was watching that encoding from start to end.
-function burstOfRows(rows) {
+function burstOfRows(rows, around) {
   const started = rows.filter((row) => burstStarted(row.second))
-  const delivered = total(rows, 'encoded') > 0 ? total(rows, 'received') / total(rows, 'encoded') : 0
+  const sent = total(rows, 'encodedForViewer')
+  const delivered = sent > 0 ? 1 - (total(around, 'encodedForViewer') - total(around, 'received')) / sent : 0
   return {
     fluid: rows.every((row) => row.fluid),
     sentFps: perSecond(total(rows, 'encoded'), total(rows, 'sendSeconds')),
@@ -215,10 +236,11 @@ function freezeFailure(burst) {
 function summarize({ rows, end }) {
   const scrolling = rows.filter((row) => row.phase === 'scrolling')
   const still = rows.filter((row) => row.phase === 'still')
+  const around = Map.groupBy(rows, (row) => aroundBurstOf(row.second))
   const estimates = (of) => of.map((row) => row.estimateBps).filter((bps) => bps !== null)
   const sentMbps = (of) => perSecond(total(of, 'sentBits'), total(of, 'sendSeconds')) / 1e6
   return {
-    bursts: [...Map.groupBy(scrolling, (row) => burstOf(row.second)).values()].map(burstOfRows),
+    bursts: [...Map.groupBy(scrolling, (row) => burstOf(row.second))].map(([burst, burstRows]) => burstOfRows(burstRows, around.get(burst))),
     scrollMbps: sentMbps(scrolling),
     stillMbps: sentMbps(still),
     scrollEstimates: estimates(scrolling),
@@ -331,6 +353,7 @@ async function main() {
             'estimate at start': mbps(s.startEstimate),
             'sent fps per burst': fpsList(s.bursts, 'sentFps'),
             'viewer fps per burst': fpsList(s.bursts, 'decodedFps'),
+            'delivered % per burst': s.bursts.map((burst) => (burst.delivered * 100).toFixed(0)).join(' '),
             'watched fluid': s.bursts.map((burst) => (burst.fluid ? 'yes' : 'no')).join(' '),
             'Mbps scrolling': s.scrollMbps.toFixed(2),
             'Mbps still': s.stillMbps.toFixed(2),
