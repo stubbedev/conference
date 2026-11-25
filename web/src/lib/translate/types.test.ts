@@ -3,6 +3,7 @@ import { test } from 'node:test'
 
 import {
   LABEL_MAX,
+  isFor,
   LINE_TEXT_MAX,
   parseAnnouncement,
   parseLanguageSet,
@@ -144,4 +145,14 @@ test('the language a host sets is a name, and nothing else is kept', () => {
   assert.deepEqual(parseLanguageSet({ lang: 'da', voice: false }), { lang: 'da' })
   for (const value of [undefined, null, 'da']) assert.match(refused(parseLanguageSet(value)), /not an object/)
   for (const lang of [undefined, '', 7, 'x'.repeat(LABEL_MAX + 1)]) assert.match(refused(parseLanguageSet({ lang })), /its lang is not a name/)
+})
+
+test('a line is for a listener in its language who did not say it', () => {
+  assert.equal(isFor(translation, { id: 'cleo', lang: 'en' }), true)
+  assert.equal(isFor(translation, { id: 'cleo', lang: 'de' }), false)
+})
+
+test('a listener never gets their own speech back, even translated into their language', () => {
+  assert.equal(isFor(translation, { id: 'anna', lang: 'en' }), false)
+  assert.equal(isFor(caption, { id: 'anna', lang: 'de' }), false)
 })
