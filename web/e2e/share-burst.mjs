@@ -7,8 +7,9 @@
 // trickle: the viewer sees a few frames a second and freezes. This test
 // prints the share second by second and fails when a scrolling burst is
 // not sent or not delivered fluidly, when it does not play fluidly, when
-// the viewer needs a keyframe after every still stretch, or when a share
-// started on a still screen does not get a high estimate at once.
+// the viewer needs a keyframe after every still stretch, when a second of
+// the fluid encoding goes out above its cap, or when a share started on a
+// still screen does not get a high estimate at once.
 //
 // What a burst plays at is only asked of a viewer that is watching the
 // fluid encoding. A viewer whose decoder drops frames asks the SFU for the
@@ -97,6 +98,8 @@ const burstStarted = (second) => phaseAt(second) === 'scrolling' && second % (PH
 
 const mbps = (bits) => (bits / 1e6).toFixed(1)
 
+const perSecond = (count, seconds) => (seconds > 0 ? count / seconds : 0)
+
 // A viewer watches the fluid encoding over a stretch when that is what it
 // last asked for, long enough before the stretch for the switch to be over.
 function watchesFluid(before, after) {
@@ -110,11 +113,13 @@ function watchesFluid(before, after) {
 function secondOf(second, before, after, estimate) {
   const h = after.send.layers[FLUID] ?? {}
   const ph = before.send.layers[FLUID] ?? {}
+  const sendSeconds = (after.send.at - before.send.at) / 1000
+  const sentBits = ((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8
   return {
     second,
     phase: phaseAt(second),
     recvSeconds: (after.recv.at - before.recv.at) / 1000,
-    sendSeconds: (after.send.at - before.send.at) / 1000,
+    sendSeconds,
     fluid: watchesFluid(before.recv, after.recv),
     asked: after.recv.asks.at(-1)?.layer ?? '-',
     received: after.recv.received - before.recv.received,
@@ -129,7 +134,8 @@ function secondOf(second, before, after, estimate) {
     lost: after.recv.lost - before.recv.lost,
     width: after.recv.width,
     encoded: (h.encoded ?? 0) - (ph.encoded ?? 0),
-    sentBits: ((h.bytes ?? 0) - (ph.bytes ?? 0)) * 8,
+    sentBits,
+    sentBps: perSecond(sentBits, sendSeconds),
     targetBps: h.target ?? 0,
     limit: h.limit ?? '-',
     estimateBps: estimate,
@@ -142,8 +148,6 @@ async function counters(presenter, viewer, second) {
   if (!send) throw new Error(`the presenter lost the share at t=${second}s`)
   return { recv, send }
 }
-
-const perSecond = (count, seconds) => (seconds > 0 ? count / seconds : 0)
 
 async function timeline(presenter, viewer, seconds) {
   const out = []
@@ -159,7 +163,7 @@ async function timeline(presenter, viewer, seconds) {
     const fps = (count, over) => String(Math.round(perSecond(count, over))).padStart(2)
     console.log(
       `  t=${String(second).padStart(2)}s ${phase.padEnd(9)} viewer asks ${row.asked}, ${fps(row.received, row.recvSeconds)} fps in, ${fps(row.decoded, row.recvSeconds)} decoded, +${row.dropped} dropped, +${row.freezes} freeze (${row.frozenMs} ms), +${row.keyframes} key, +${row.viewerPlis} pli, +${row.lost} lost, ${row.width}px` +
-        ` | presenter ${FLUID} ${fps(row.encoded, row.sendSeconds)} fps, +${row.sentKeyframes} key, +${row.presenterPlis} pli, ${mbps(perSecond(row.sentBits, row.sendSeconds))} Mbps (target ${mbps(row.targetBps)}), ${row.limit}` +
+        ` | presenter ${FLUID} ${fps(row.encoded, row.sendSeconds)} fps, +${row.sentKeyframes} key, +${row.presenterPlis} pli, ${mbps(row.sentBps)} Mbps (target ${mbps(row.targetBps)}), ${row.limit}` +
         ` | estimate ${row.estimateBps === null ? 'unknown' : `${mbps(row.estimateBps)} Mbps`}`,
     )
     out.push(row)
@@ -220,6 +224,8 @@ function summarize({ rows, end }) {
     scrollEstimates: estimates(scrolling),
     stillEstimates: estimates(still),
     keyframes: total(rows.filter((row) => row.fluid), 'keyframes'),
+    peakBps: Math.max(0, ...rows.map((row) => row.sentBps)),
+    overCapSeconds: rows.filter((row) => row.sentBps > SCREEN_SHARE_FLUID_MAX_BITRATE).map((row) => row.second),
     limitedSeconds: rows.filter((row) => row.limit === LIMITED_BY_BANDWIDTH).map((row) => row.second),
     steppedDown: end.asks.some((ask) => ask.layer !== FLUID),
     viewer: end,
@@ -251,7 +257,7 @@ async function present(label, presenter, viewer, base) {
   const room = await createRoom(base, `burst-${label}`)
   await joinRoom(presenter, room.url)
   await joinRoom(viewer, room.url)
-  await evalJs(presenter, fakeDisplay)
+  await evalJs(presenter, fakeDisplay(presenter.stillScreen))
   await evalJs(presenter, shareMode('still'))
   if (!(await clickButtonByTitle(presenter, 'Share your screen'))) throw new Error(`${label}: no "Share your screen" button`)
   const start = await startingEstimates(label, presenter)
@@ -271,6 +277,7 @@ function failuresOf(label, s) {
   const fastestSent = Math.max(...s.bursts.map((burst) => burst.sentFps))
   const held = [...s.scrollEstimates, ...s.stillEstimates]
   if (fastestSent < BURST_MIN_FPS) failures.push(`${label}: the fastest scrolling burst was sent at ${fastestSent.toFixed(1)} fps, want at least ${BURST_MIN_FPS}`)
+  if (s.overCapSeconds.length > 0) failures.push(`${label}: the fluid encoding was sent above its ${mbps(SCREEN_SHARE_FLUID_MAX_BITRATE)} Mbps cap at t=${s.overCapSeconds.join(', ')}s, at up to ${mbps(s.peakBps)} Mbps`)
   if (s.limitedSeconds.length > 0) failures.push(`${label}: the encoder of the fluid encoding was limited by bandwidth at t=${s.limitedSeconds.join(', ')}s`)
   if (held.length === 0) failures.push(`${label}: the share's estimate could not be read while it was presented`)
   else if (Math.min(...held) < HELD_MIN_ESTIMATE) failures.push(`${label}: the share's estimate sank to ${mbps(Math.min(...held))} Mbps while it was presented, want at least ${mbps(HELD_MIN_ESTIMATE)}`)
@@ -327,6 +334,7 @@ async function main() {
             'watched fluid': s.bursts.map((burst) => (burst.fluid ? 'yes' : 'no')).join(' '),
             'Mbps scrolling': s.scrollMbps.toFixed(2),
             'Mbps still': s.stillMbps.toFixed(2),
+            'Mbps peak second': mbps(s.peakBps),
             'estimate scrolling': estimateMbps(s.scrollEstimates),
             'estimate still (min)': minEstimateMbps(s.stillEstimates),
             'freezes in fluid bursts': s.bursts.filter((burst) => burst.fluid).reduce((sum, burst) => sum + burst.freezes, 0),
@@ -350,7 +358,7 @@ async function main() {
       console.error('\nserver log tail:\n' + server.log().split('\n').slice(-20).join('\n'))
       process.exitCode = 1
     } else {
-      console.log('\nSHARE BURST OK: the share starts with the estimate a scroll needs and keeps it while the screen sits still, its encoder is never limited by bandwidth, and the bursts a viewer watched on the fluid encoding arrived, played without a freeze that anything held them back by, and needed no keyframe')
+      console.log('\nSHARE BURST OK: the share starts with the estimate a scroll needs and keeps it while the screen sits still, its encoder is never limited by bandwidth nor sent above its cap, and the bursts a viewer watched on the fluid encoding arrived, played without a freeze that anything held them back by, and needed no keyframe')
     }
   } finally {
     await Promise.all(procs.map((p) => stopProcess(p, 'SIGKILL')))

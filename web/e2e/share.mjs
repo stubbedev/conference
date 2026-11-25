@@ -1,7 +1,7 @@
 // A shared screen as the tests see it: a stand-in for the screen picker,
 // which headless browsers do not have, and the counters both ends of a
 // share expose.
-import { accessibleName, callJs, sleep } from './browser.mjs'
+import { accessibleName, callJs, sleep, STILL_SCREEN } from './browser.mjs'
 
 // A control is a button on the bar or an item in its "More options"
 // menu, which Radix opens on pointerdown rather than click.
@@ -52,9 +52,13 @@ const CAPTURE_START_MS = 2000
 
 // The share is a canvas handed out where getDisplayMedia would hand out a
 // screen; everything after the picker is the call's own path. Like a
-// screen it shows a picture from the start, whatever the mode; a still
-// one repeats the same picture until CAPTURE_START_MS has passed.
-export const fakeDisplay = `(() => {
+// screen it shows a picture from the start, whatever the mode. A still
+// one repeats the same picture until CAPTURE_START_MS has passed, and
+// for as long as it stays still where the presenter's own capturer
+// repeats it (stillScreen in browser.mjs).
+export const fakeDisplay = (stillScreen) => {
+  if (!Object.values(STILL_SCREEN).includes(stillScreen)) throw new Error(`unknown still screen capture ${stillScreen}`)
+  return `(() => {
   window.__shareMode = 'typing'
   navigator.mediaDevices.getDisplayMedia = async () => {
     const canvas = document.createElement('canvas')
@@ -68,7 +72,7 @@ export const fakeDisplay = `(() => {
     let offset = 0
     const draw = () => {
       const mode = window.__shareMode
-      if (mode === 'still' && performance.now() - startedAt > ${CAPTURE_START_MS}) return
+      if (mode === 'still' && ${stillScreen === STILL_SCREEN.stops} && performance.now() - startedAt > ${CAPTURE_START_MS}) return
       if (mode === 'scrolling') offset += ${SCROLL_PX_PER_FRAME}
       ctx.fillStyle = '#fff'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
@@ -88,6 +92,7 @@ export const fakeDisplay = `(() => {
   }
   return true
 })()`
+}
 
 const sharePeerConnection = `window.__pcs.find((pc) => pc.signalingState !== 'closed' && pc.getTransceivers().some((t) => t.sender.track?.contentHint === 'detail'))`
 

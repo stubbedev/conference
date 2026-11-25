@@ -9,6 +9,8 @@ import { join } from 'node:path'
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+export const STILL_SCREEN = Object.freeze({ stops: 'stops', repeats: 'repeats' })
+
 export function findChrome() {
   for (const name of ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser']) {
     if (spawnSync('sh', ['-c', `command -v ${name}`]).status === 0) return name
@@ -138,6 +140,7 @@ export async function launchChrome(chrome, idx, dir, extraArgs = [], { headless 
   await cdp.send('Network.enable', {}, sessionId)
   return {
     proc,
+    stillScreen: STILL_SCREEN.stops,
     cdp,
     sessionId,
     browser: product,
@@ -322,6 +325,7 @@ export async function launchFirefox(firefox, idx, dir, { headless = true } = {})
   return {
     proc,
     bidi,
+    stillScreen: STILL_SCREEN.repeats,
     browser: `${capabilities.browserName}/${capabilities.browserVersion}`,
     async addInitScript(source) {
       await bidi.send('script.addPreloadScript', { functionDeclaration: `() => { ${source} }` })

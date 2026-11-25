@@ -614,7 +614,7 @@ const STILL_MAX_FREEZES = 1
 // asks for do not drag the share's layer down with them.
 async function checkScreenShare(failures, publisher, viewer) {
   const publisherConsole = await consoleOf(publisher)
-  await evalJs(publisher, fakeDisplay)
+  await evalJs(publisher, fakeDisplay(publisher.stillScreen))
   check(failures, 'screen share', await clickButtonByTitle(publisher, 'Share your screen'), 'no "Share your screen" button')
 
   const sent = await waitFor(publisher, screenSent, (s) => s && ['l', 'h'].every((rid) => s.layers[rid]?.frames > 0), 20000)
