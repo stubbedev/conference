@@ -1,7 +1,7 @@
 // A shared screen as the tests see it: a stand-in for the screen picker,
 // which headless browsers do not have, and the counters both ends of a
 // share expose.
-import { accessibleName, callJs, sleep } from './browser.mjs'
+import { accessibleName, callJs, sleep, STILL_SCREEN } from './browser.mjs'
 
 // A control is a button on the bar or an item in its "More options"
 // menu, which Radix opens on pointerdown rather than click.
@@ -52,9 +52,13 @@ const CAPTURE_START_MS = 2000
 
 // The share is a canvas handed out where getDisplayMedia would hand out a
 // screen; everything after the picker is the call's own path. Like a
-// screen it shows a picture from the start, whatever the mode; a still
-// one repeats the same picture until CAPTURE_START_MS has passed.
-export const fakeDisplay = `(() => {
+// screen it shows a picture from the start, whatever the mode. A still
+// one repeats the same picture until CAPTURE_START_MS has passed, and
+// for as long as it stays still where the presenter's own capturer
+// repeats it (stillScreen in browser.mjs).
+export const fakeDisplay = (stillScreen) => {
+  if (!Object.values(STILL_SCREEN).includes(stillScreen)) throw new Error(`unknown still screen capture ${stillScreen}`)
+  return `(() => {
   window.__shareMode = 'typing'
   navigator.mediaDevices.getDisplayMedia = async () => {
     const canvas = document.createElement('canvas')
@@ -68,7 +72,7 @@ export const fakeDisplay = `(() => {
     let offset = 0
     const draw = () => {
       const mode = window.__shareMode
-      if (mode === 'still' && performance.now() - startedAt > ${CAPTURE_START_MS}) return
+      if (mode === 'still' && ${stillScreen === STILL_SCREEN.stops} && performance.now() - startedAt > ${CAPTURE_START_MS}) return
       if (mode === 'scrolling') offset += ${SCROLL_PX_PER_FRAME}
       ctx.fillStyle = '#fff'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
@@ -88,6 +92,7 @@ export const fakeDisplay = `(() => {
   }
   return true
 })()`
+}
 
 const sharePeerConnection = `window.__pcs.find((pc) => pc.signalingState !== 'closed' && pc.getTransceivers().some((t) => t.sender.track?.contentHint === 'detail'))`
 
@@ -154,8 +159,9 @@ export const remoteScreen = `
 `
 
 // What the viewer received of the share and what became of it, read at
-// `at` on the page's clock, and every layer the page has asked the SFU
-// for on a share, with when it asked on the same clock.
+// `at` on the page's clock and taken at `stamp` on the clock both
+// browsers stamp their statistics with, and every layer the page has
+// asked the SFU for on a share, with when it asked on the page's clock.
 export const shareReceiveCounters = `
 (async () => {
   const tile = (${tileByLabel.toString()})('screen')
@@ -163,7 +169,7 @@ export const shareReceiveCounters = `
   for (const pc of window.__pcs.filter((pc) => pc.signalingState !== 'closed')) {
     for (const r of (await pc.getStats()).values()) {
       if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier === trackId) {
-        return { at: performance.now(), asks: window.__layerRequests.filter((request) => request.kind === 'screen'), received: r.framesReceived || 0, decoded: r.framesDecoded || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
+        return { at: performance.now(), stamp: r.timestamp, asks: window.__layerRequests.filter((request) => request.kind === 'screen'), received: r.framesReceived || 0, decoded: r.framesDecoded || 0, dropped: r.framesDropped || 0, keyframes: r.keyFramesDecoded || 0, freezes: r.freezeCount || 0, frozenMs: Math.round((r.totalFreezesDuration || 0) * 1000), plis: r.pliCount || 0, lost: r.packetsLost || 0, nacks: r.nackCount || 0, width: r.frameWidth || 0 }
       }
     }
   }
@@ -172,15 +178,15 @@ export const shareReceiveCounters = `
 `
 
 // The share's outgoing encodings by rid, read at `at` on the page's
-// clock, found by the share's own connection, which carries no other
-// video.
+// clock and each taken at its `stamp`, found by the share's own
+// connection, which carries no other video.
 export const shareSendCounters = `
 (async () => {
   const pc = ${sharePeerConnection}
   if (!pc) return null
   const layers = {}
   for (const r of (await pc.getStats()).values()) {
-    if (r.type === 'outbound-rtp' && r.kind === 'video' && r.rid) layers[r.rid] = { ssrc: r.ssrc, encoded: r.framesEncoded || 0, keyframes: r.keyFramesEncoded || 0, plis: r.pliCount || 0, firs: r.firCount || 0, limit: r.qualityLimitationReason, bytes: r.bytesSent || 0, target: r.targetBitrate || 0, nacks: r.nackCount || 0, retransmitted: r.retransmittedBytesSent || 0 }
+    if (r.type === 'outbound-rtp' && r.kind === 'video' && r.rid) layers[r.rid] = { ssrc: r.ssrc, stamp: r.timestamp, encoded: r.framesEncoded || 0, keyframes: r.keyFramesEncoded || 0, plis: r.pliCount || 0, firs: r.firCount || 0, limit: r.qualityLimitationReason, bytes: r.bytesSent || 0, target: r.targetBitrate || 0, nacks: r.nackCount || 0, retransmitted: r.retransmittedBytesSent || 0 }
   }
   return { at: performance.now(), layers }
 })()

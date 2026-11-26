@@ -192,7 +192,7 @@ async function pair(label, presenterKind, viewerKind, base, dir, firstIdx) {
     const room = await createRoom(base, `share-start-${label}`)
     await joinRoom(presenter, room.url)
     await joinRoom(viewer, room.url)
-    await evalJs(presenter, fakeDisplay)
+    await evalJs(presenter, fakeDisplay(presenter.stillScreen))
     const lines = presenterKind === 'chrome' ? await consoleOf(presenter) : []
     console.log(`${label}: ${presenter.browser} presenting to ${viewer.browser}`)
 
