@@ -13,6 +13,23 @@ export interface Tile {
   stream: MediaStream | null
 }
 
+/**
+ * tileTracks is what a tile plays once another of its tracks arrives: a
+ * camera and its microphone, or a share's picture and its sound, come in
+ * one by one and not always in one stream. The newer track of a kind takes
+ * the place of the older one, and a track that has ended is let go.
+ */
+export function tileTracks(
+  existing: readonly MediaStreamTrack[],
+  incoming: readonly MediaStreamTrack[],
+): MediaStreamTrack[] {
+  const added = incoming.filter((track) => track.readyState !== 'ended')
+  const replaced = new Set(added.map((track) => track.kind))
+  const kept = existing.filter((track) => track.readyState !== 'ended' && !replaced.has(track.kind))
+
+  return [...kept, ...added]
+}
+
 export function tileLabel(tile: Tile, displayName: string, members: readonly { id: string; name: string }[]): string {
   if (tile.sourceId === LOCAL_SOURCE) {
     return tile.kind === SCREEN_KIND ? 'Your screen' : `${displayName} (you)`

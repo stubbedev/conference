@@ -4,9 +4,8 @@ import { toast } from 'sonner'
 import { useLatest } from '@/hooks/latest'
 import type { Controls } from '@/hooks/local-media'
 import { tilesOfMembers } from '@/lib/reconnect'
-import { screenTracks } from '@/lib/screen'
 import type { MemberInfo, ModerateAction, RoomClient } from '@/lib/sfu'
-import { LOCAL_SOURCE, type Tile } from '@/lib/tiles'
+import { LOCAL_SOURCE, tileTracks, type Tile } from '@/lib/tiles'
 import { SCREEN_KIND, tileOf } from '@/lib/track-kind'
 
 export function useRoomMembers(clientRef: RefObject<RoomClient | null>, displayName: string, controls: Controls) {
@@ -50,10 +49,7 @@ export function useRoomMembers(clientRef: RefObject<RoomClient | null>, displayN
         const key = `${sourceId}:${tileKind}`
         setTiles((prev) => {
           const existing = prev.find((t) => t.key === key)
-          const stream =
-            tileKind === SCREEN_KIND
-              ? new MediaStream(screenTracks(existing?.stream?.getTracks() ?? [], incoming.getTracks()))
-              : incoming
+          const stream = new MediaStream(tileTracks(existing?.stream?.getTracks() ?? [], incoming.getTracks()))
           const rest = prev.filter((t) => t.key !== key)
           return [...rest, { key, sourceId, kind: tileKind, stream }]
         })

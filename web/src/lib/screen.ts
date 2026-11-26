@@ -19,19 +19,3 @@ export async function requestDisplay(): Promise<MediaStream> {
     return navigator.mediaDevices.getDisplayMedia({ video: SCREEN_CAPTURE })
   }
 }
-
-/**
- * screenTracks is the track list of one screen share: the picture and the
- * sound of a shared tab arrive as separate tracks, and the tile renders
- * them from one stream, the way it renders a camera and its microphone.
- */
-export function screenTracks(
-  existing: readonly MediaStreamTrack[],
-  incoming: readonly MediaStreamTrack[],
-): MediaStreamTrack[] {
-  const live = existing.filter((track) => track.readyState !== 'ended')
-  const known = new Set(live.map((track) => track.id))
-  const added = incoming.filter((track) => track.readyState !== 'ended' && !known.has(track.id))
-
-  return [...live, ...added]
-}
