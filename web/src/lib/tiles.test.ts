@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { heardThrough, layoutLayer, LOCAL_CAMERA_KEY, LOCAL_SOURCE, mainTileKey, withoutVoice, withVoice, type Speaker, type Tile, type Translations } from './tiles.ts'
+import { heardThrough, layoutLayer, LOCAL_CAMERA_KEY, LOCAL_SOURCE, mainTileKey, tileTracks, withoutVoice, withVoice, type Speaker, type Tile, type Translations } from './tiles.ts'
 import { CAMERA_KIND, SCREEN_KIND } from './track-kind.ts'
 
 const screen: Pick<Tile, 'key' | 'kind'> = { key: 'bob:screen', kind: SCREEN_KIND }
@@ -166,4 +166,37 @@ test('on a phone, a call of three keeps the grid until someone is pinned', () =>
 
 test('a wide window shows a call of two as a grid', () => {
   assert.equal(mainTileKey(null, [self, bob], false), null)
+})
+
+const track = (id: string, kind: 'audio' | 'video', readyState: MediaStreamTrackState = 'live') =>
+  ({ id, kind, readyState }) as MediaStreamTrack
+
+const ids = (tracks: readonly MediaStreamTrack[]) => tracks.map((t) => t.id)
+
+test('a microphone that arrives in a stream of its own joins the camera it belongs to', () => {
+  assert.deepEqual(ids(tileTracks([track('cam', 'video')], [track('mic', 'audio')])), ['cam', 'mic'])
+})
+
+test('a camera that arrives after the microphone keeps the microphone playing', () => {
+  assert.deepEqual(ids(tileTracks([track('mic', 'audio')], [track('cam', 'video')])), ['mic', 'cam'])
+})
+
+test('a stream that already holds both tracks is played as it is', () => {
+  assert.deepEqual(ids(tileTracks([track('cam', 'video')], [track('mic', 'audio'), track('cam', 'video')])), ['mic', 'cam'])
+})
+
+test('a share gets its sound merged into its picture', () => {
+  assert.deepEqual(ids(tileTracks([track('v', 'video')], [track('a', 'audio')])), ['v', 'a'])
+})
+
+test('the same track arriving twice is not played twice', () => {
+  assert.deepEqual(ids(tileTracks([track('v', 'video')], [track('v', 'video')])), ['v'])
+})
+
+test('a newer track of a kind takes the place of the older one', () => {
+  assert.deepEqual(ids(tileTracks([track('old', 'video'), track('mic', 'audio')], [track('new', 'video')])), ['mic', 'new'])
+})
+
+test('a track that already ended is dropped', () => {
+  assert.deepEqual(ids(tileTracks([track('old', 'audio', 'ended')], [track('v', 'video')])), ['v'])
 })
