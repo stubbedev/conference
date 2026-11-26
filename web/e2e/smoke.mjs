@@ -264,6 +264,10 @@ async function checkJoinWithoutMedia(failures, dir, base) {
     await setMedia('granted')
     const published = await waitFor(other, inboundVideoFrames, (frames) => frames > 0, 30000)
     check(failures, label, published.ok, 'granting access mid-call did not publish the camera')
+    // The camera and microphone published mid-call arrive one after the
+    // other; the tile must end up playing both, not just the later one.
+    const tile = await waitFor(other, tileMedia, (media) => media.videoTracks > 0 && media.audioTracks > 0, 15000)
+    check(failures, label, tile.ok, `the tile of a member who got media mid-call does not play both camera and microphone: ${JSON.stringify(tile.value)}`)
   } finally {
     await stopProcess(blocked.proc)
     await stopProcess(other.proc)

@@ -378,6 +378,10 @@ export class RoomClient {
   private localCam: MediaStreamTrack | null = null
   private micSender: RTCRtpSender | null = null
   private camSender: RTCRtpSender | null = null
+  // The stream the mic and camera are announced in. A receiver plays a
+  // member's voice from the stream its camera tile shows, so a track
+  // added after joining must join this stream, not one of its own.
+  private localStream: MediaStream | null = null
   private retuning: Promise<void> = Promise.resolve()
   private state = { mic: true, cam: true, sharing: false }
   private e2eeStats: E2EEStats | null = null
@@ -515,6 +519,7 @@ export class RoomClient {
   async publish(stream: MediaStream): Promise<void> {
     const pc = this.openUp(MEDIA_UP)
 
+    this.localStream = stream
     this.localMic = stream.getAudioTracks()[0] ?? null
     this.localCam = stream.getVideoTracks()[0] ?? null
     this.micSender = this.localMic ? pc.addTrack(this.localMic, stream) : null
@@ -627,7 +632,7 @@ export class RoomClient {
 
     let sender = kind === 'mic' ? this.micSender : this.camSender
     if (!sender) {
-      const stream = new MediaStream([track])
+      const stream = (this.localStream ??= new MediaStream())
       sender = kind === 'mic' ? pc.addTrack(track, stream) : this.addCamera(pc, track, stream)
       this.installTransform(sender)
       if (kind === 'mic') this.micSender = sender
