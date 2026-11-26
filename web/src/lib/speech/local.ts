@@ -28,7 +28,7 @@ import { MIN_UTTERANCE_SAMPLES, RATE, type Segment } from '@/lib/speech/vad'
 import { WarmUps } from '@/lib/speech/warm-ups'
 import { webgpuAvailable } from '@/lib/speech/webgpu'
 import { MicCapture } from '@/lib/translate/capture'
-import { PROVIDES_NOTHING, type CaptionLine, type LangPrefs, type RoomMessage, type TranslationLevel, type TranslationLine, type TranslatorStatus } from '@/lib/translate/types'
+import { isFor, PROVIDES_NOTHING, type CaptionLine, type LangPrefs, type RoomMessage, type TranslationLevel, type TranslationLine, type TranslatorStatus } from '@/lib/translate/types'
 import type { Translator, TranslatorEvents } from '@/lib/translate/translator'
 import { VoicePlayer } from '@/lib/translate/voice'
 
@@ -514,10 +514,12 @@ export class LocalTranslator implements Translator {
     const line: Translation = { speaker: caption.speaker, segId: caption.segId, sourceLang: caption.lang, lang: target, text, final: caption.final }
     const self = this.client?.memberId
     if (share && self) void this.client?.sendCaption({ k: 'translation', by: self, ...line })
-    if (target === this.selfPrefs.lang) this.show({ k: 'caption', ...line })
+    this.show({ k: 'caption', ...line })
   }
 
   private show(line: RoomMessage): void {
+    const self = this.client?.memberId
+    if (!self || !isFor(line, { id: self, lang: this.selfPrefs.lang })) return
     if (line.k === 'translation' && !line.final && this.spoken.get(line.segId)) return
     this.events.onCaption(line)
     if (line.final && this.selfPrefs.voice) void this.speak(line.speaker, line.segId, line.text)

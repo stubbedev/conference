@@ -423,14 +423,22 @@ e2e-speech-engines <model dir>` runs the built workers on the real
 models in a model directory: it transcribes the fixtures, translates
 through a pair and the multilingual model, and speaks with every voice.
 `just e2e-speech-fidelity <model dir>` measures how well they do it:
-the three recordings in `fixtures/` go through voice detection,
+the recordings in `fixtures/` go through voice detection,
 transcription and the sentence assembly a meeting uses, and every
-sentence is translated with the sentences before it. The subtitles must
+sentence is translated with the sentences before it. Three are
+synthetic meeting talk; three are people reading six sentences each in
+English, German and Swedish, taken from Google's FLEURS (CC BY 4.0),
+whose reference translations are FLoRes's human translations of the
+same sentences. The subtitles must
 come within a 10% word error rate of the text the recordings speak, and
 every translated sentence within reach of a reference translation
 (chrF 40, 50 over a whole recording), both kept in
-`fixtures/speech-oracle.json`; a translation that drifts into nonsense
-after a sentence or two fails on the sentence where it does.
+`fixtures/speech-oracle.json` with where each recording comes from; a
+translation that drifts into nonsense after a sentence or two fails on
+the sentence where it does. `npm test` checks the oracle and the
+scoring without the models: every recording's format, every reference
+lined up with its sentence, and that a translation drifting into
+nonsense fails.
 
 ## Streams
 

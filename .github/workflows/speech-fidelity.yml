@@ -1,0 +1,53 @@
+name: speech-fidelity
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: Options for web/scripts/fetch-speech-models.mjs besides --languages
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  fidelity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: list the models
+        env:
+          MODEL_OPTIONS: ${{ inputs.models }}
+        run: |
+          set -euo pipefail
+          read -r -a options <<<"$MODEL_OPTIONS"
+          node web/scripts/fetch-speech-models.mjs speech-models --languages=en,de,da,sv "${options[@]}"
+      - id: models
+        uses: actions/cache/restore@v4
+        with:
+          path: speech-models
+          key: speech-models-${{ hashFiles('speech-models/models.json') }}
+      - name: fidelity
+        run: node web/e2e/speech-fidelity.mjs
+        env:
+          CHROME: google-chrome
+          SPEECH_MODEL_DIR: speech-models
+      - if: always() && steps.models.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: speech-models
+          key: speech-models-${{ hashFiles('speech-models/models.json') }}

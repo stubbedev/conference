@@ -48,6 +48,21 @@ export interface TranslationLine {
 
 export type RoomMessage = CaptionLine | TranslationLine
 
+/** Who a line is shown and spoken to: a member of the call, in their language. */
+export interface Listener {
+  id: string
+  lang: string
+}
+
+/**
+ * isFor tells whether a line in another member's words is for listener:
+ * in the listener's language, and never the listener's own speech, which
+ * a translation can come back in once the listener changes language.
+ */
+export function isFor(line: Pick<RoomMessage, 'speaker' | 'lang'>, listener: Listener): boolean {
+  return line.speaker !== listener.id && line.lang === listener.lang
+}
+
 export const TRANSLATION_LEVELS = ['none', 'plain', 'prompted'] as const
 
 export type TranslationLevel = (typeof TRANSLATION_LEVELS)[number]

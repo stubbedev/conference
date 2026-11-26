@@ -8,7 +8,7 @@
     "dev": "npm run vendor && vite",
     "build": "npm run vendor && tsc -b && vite build",
     "lint": "oxlint --deny-warnings",
-    "test": "node --test \"src/**/*.test.ts\" \"scripts/**/*.test.mjs\"",
+    "test": "node --test \"src/**/*.test.ts\" \"scripts/**/*.test.mjs\" \"e2e/**/*.test.mjs\"",
     "preview": "vite preview"
   },
   "dependencies": {
